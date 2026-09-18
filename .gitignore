@@ -1,0 +1,51 @@
+# Secrets and key material. Nothing derived from a private key goes in git.
+.env
+.env.*
+!.env.example
+*.nsec
+nsec*
+*.key
+*.pem
+*.mnemonic
+*.seed
+secrets/
+recovery-*.txt
+
+# Bitcoin data directories. Anchored so that test/regtest/ is not matched.
+/.bitcoin/
+/.bitcoin-data/
+wallet.dat
+*.wallet
+
+# Node
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+.pnpm-debug.log*
+
+# Local data
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Editors and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Bitcoin Core for the regtest tests, downloaded per machine (see spec/VERIFY.md)
+tools/
+
+# services/relay: the locally compiled write policy, backups, a local database
+services/relay/fmd-write-policy
+services/relay/backups/
+strfry-db/
+
+# The Vercel CLI's project link
+.vercel/
