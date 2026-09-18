@@ -1,0 +1,35 @@
+{
+  "name": "flexmydomain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Non-custodial domain marketplace on Nostr and Bitcoin",
+  "license": "MIT",
+  "scripts": {
+    "build": "bun run scripts/build-web.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test/vectors",
+    "test:all": "bun test",
+    "test:regtest": "bun test test/regtest",
+    "serve": "python3 serve.py",
+    "indexer": "bun run services/indexer/indexer.ts",
+    "verifier": "bun run services/verifier/verifier.ts",
+    "publish:handler": "bun run scripts/publish-handler.ts",
+    "watch:transfer": "bun run scripts/watch-transfer.ts",
+    "build:recover": "bun run scripts/build-recover.ts",
+    "escrow": "bun run scripts/escrow-signet.ts",
+    "relay:check": "bun run scripts/relay-check.ts"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.0.1",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@scure/base": "2.4.0",
+    "@scure/btc-signer": "2.4.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "nostr-tools": "^2.25.2",
+    "typescript": "^7.0.2"
+  }
+}
