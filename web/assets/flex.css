@@ -1,0 +1,146 @@
+/* flex.html, the portfolio page, plus components the other pages reuse
+   (stepper, record, reports, key dialog). Tokens come from app.css, and
+   nothing here redefines a colour, so every page keeps the one accent and the
+   two-theme token set. */
+
+/* ================= who is being viewed ================= */
+.flex-hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
+  gap:clamp(16px,3vw,32px);padding-block:clamp(26px,4vw,46px)}
+.flex-id{display:flex;align-items:center;gap:16px;min-width:0}
+.flex-avatar{width:clamp(48px,5vw,62px);aspect-ratio:1;border-radius:999px;flex:none;
+  border:1px solid var(--line);background:var(--sunk)}
+.flex-who{min-width:0}
+.flex-who h1{font-size:clamp(26px,3.4vw,40px);font-weight:700;letter-spacing:-.04em;line-height:1.1}
+.flex-npub{font-size:12.5px;color:var(--muted);margin-top:6px;word-break:break-all}
+.flex-npub code{font-size:12.5px;color:var(--accent-ink)}
+.flex-npub button{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;padding:0}
+
+.flex-stats{display:flex;gap:clamp(18px,2.4vw,34px);flex:none}
+.flex-stats dt{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+.flex-stats dd{font-size:clamp(20px,2.2vw,26px);font-weight:600;letter-spacing:-.03em;margin-top:3px}
+
+/* ================= the add-a-domain stepper ================= */
+.add-panel{margin-bottom:clamp(26px,4vw,44px)}
+.steps{list-style:none;display:grid;gap:2px;background:var(--line-soft);
+  border-top:1px solid var(--line-soft)}
+.step{display:flex;gap:clamp(12px,1.6vw,18px);padding:clamp(16px,2vw,22px) clamp(15px,1.7vw,20px);
+  background:var(--panel)}
+.step:not(.on):not(.done){opacity:.44}
+.step:not(.on):not(.done) .step-body>*:not(h3){display:none}
+.step-no{display:grid;place-items:center;width:28px;height:28px;border-radius:999px;flex:none;
+  border:1px solid var(--line);background:var(--sunk);color:var(--muted);
+  font-family:var(--mono);font-size:12.5px;font-weight:600}
+.step.on .step-no{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.step.done .step-no{background:var(--live);border-color:var(--live);color:var(--on-accent)}
+.step.done .step-no::after{content:"✓"}
+.step.done .step-no{font-size:0}
+.step.done .step-no::after{font-size:14px}
+.step-body{flex:1;min-width:0}
+.step-body h3{font-size:15.5px;font-weight:650;letter-spacing:-.02em}
+.step-lede{font-size:13px;color:var(--muted);margin:6px 0 12px;max-width:62ch;line-height:1.55}
+.step-body .btn{margin-top:2px}
+
+.add-form{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}
+.add-form input{flex:1 1 240px;min-width:0;height:46px;border-radius:999px;
+  border:1px solid var(--line);background:var(--sunk);color:var(--ink);
+  font-family:var(--mono);font-size:14px;padding:0 18px;outline:none;
+  transition:border-color .18s,box-shadow .18s}
+.add-form input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.hint.ok{color:var(--live)}
+
+/* ================= the record to paste ================= */
+.record{margin-top:14px;border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--sunk);padding:4px clamp(12px,1.4vw,16px)}
+.record-row{display:flex;align-items:center;gap:12px;padding:11px 0;flex-wrap:wrap;
+  border-bottom:1px solid var(--line-soft)}
+.record-row:last-of-type{border-bottom:0}
+.record-label{font-size:11.5px;color:var(--faint);text-transform:uppercase;
+  letter-spacing:.06em;width:52px;flex:none}
+.record code{font-size:12.5px;color:var(--ink);flex:1;min-width:0}
+.record code.wrapped{word-break:break-all;line-height:1.55}
+.record .btn{flex:none}
+.record .hint{text-align:left;padding-bottom:12px}
+
+/* ================= resolver and relay reports ================= */
+.observations,.relay-results,.registry{margin-top:14px;display:grid;gap:7px}
+.obs{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:9px 13px;
+  border:1px solid var(--line);border-radius:var(--r-sm);background:var(--sunk);flex-wrap:wrap}
+.obs b{font-weight:600}
+.obs .who{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:88px}
+.obs .what{color:var(--muted);flex:1;min-width:0}
+.obs.good{border-color:color-mix(in srgb,var(--live) 42%,var(--line))}
+.obs.bad{border-color:color-mix(in srgb,var(--accent) 34%,var(--line))}
+.obs .mark{width:7px;height:7px;border-radius:50%;flex:none;background:var(--faint)}
+.obs.good .mark{background:var(--live)}
+.obs.bad .mark{background:var(--accent)}
+
+/* ================= the domain cards ================= */
+.domain-grid{display:grid;gap:var(--gap);padding-bottom:clamp(26px,4vw,48px);
+  grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+.domain{position:relative;display:flex;flex-direction:column;gap:11px;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);
+  padding:clamp(15px,1.7vw,19px);box-shadow:var(--shadow-sm);
+  transition:transform .18s,box-shadow .18s,border-color .18s}
+.domain:hover{transform:translateY(-3px);box-shadow:var(--shadow-md)}
+.domain.stale{border-style:dashed;opacity:.74}
+.domain-name{font-size:19px;font-weight:700;letter-spacing:-.035em;word-break:break-all}
+.domain-tagline{font-size:13px;color:var(--muted);line-height:1.5}
+.domain-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:4px}
+.tag{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;
+  border:1px solid var(--line);background:var(--sunk);
+  font-size:11.5px;color:var(--muted);white-space:nowrap}
+.tag.proven{border-color:color-mix(in srgb,var(--live) 42%,var(--line));color:var(--live)}
+.tag.unproven{border-color:color-mix(in srgb,var(--accent) 34%,var(--line));color:var(--accent-ink)}
+.tag.dnssec{color:var(--accent-ink)}
+.domain-actions{display:flex;gap:7px;flex-wrap:wrap}
+.domain-actions .btn{height:32px;padding:0 13px;font-size:12px}
+
+/* ================= the key dialog ================= */
+.key-dialog{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel);
+  color:var(--ink);padding:clamp(18px,2.4vw,26px);max-width:min(460px,92vw);
+  box-shadow:var(--shadow-lg)}
+.key-dialog::backdrop{background:color-mix(in srgb,var(--ink) 40%,transparent);backdrop-filter:blur(3px)}
+.key-dialog h2{font-size:19px;font-weight:700;letter-spacing:-.03em;margin-bottom:12px}
+.key-dialog p{font-size:13.5px;color:var(--muted);line-height:1.6;margin-bottom:12px}
+.key-dialog .warn{color:var(--ink);background:var(--accent-soft);border-radius:var(--r-sm);
+  padding:11px 13px;font-size:13px}
+.key-dialog input{width:100%;height:42px;border-radius:var(--r-sm);border:1px solid var(--line);
+  background:var(--sunk);color:var(--ink);font-family:var(--sans);font-size:14px;
+  padding:0 13px;outline:none;margin-bottom:12px}
+.key-dialog input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.key-dialog .nsec{font-family:var(--mono);font-size:12px;word-break:break-all;
+  background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:11px 13px;margin-bottom:12px;user-select:all}
+.key-choice{display:grid;gap:9px;margin-bottom:6px}
+.key-choice button{text-align:left;width:100%;height:auto;padding:13px 15px;border-radius:var(--r-md);
+  justify-content:flex-start;flex-direction:column;align-items:flex-start;gap:3px}
+.key-choice button span{font-size:12.5px;font-weight:400;color:var(--muted);white-space:normal}
+.key-choice button:disabled{opacity:.5;cursor:not-allowed}
+.key-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+
+/* ================= registry findings ================= */
+.finding{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;padding:9px 13px;
+  border-radius:var(--r-sm);border:1px solid var(--line);background:var(--sunk);color:var(--muted)}
+.finding.refuse{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--ink)}
+.facts{display:flex;flex-wrap:wrap;gap:6px}
+
+/* ---------- identity: profile line, relays, watchlist ---------- */
+.ident-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;
+  font-size:12.5px;color:var(--muted)}
+.ident-line b{color:var(--ink);font-weight:650}
+.ident-h{font-size:13px;font-weight:700;letter-spacing:-.02em;margin:18px 0 6px}
+.ident-h:first-child{margin-top:0}
+.ident-h small{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--faint);
+  margin-left:6px;letter-spacing:0}
+.chip-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.chip-x{display:inline-flex;align-items:center;gap:7px;padding:5px 8px 5px 12px;
+  border-radius:999px;border:1px solid var(--line);background:var(--sunk);
+  font-family:var(--mono);font-size:12px;color:var(--ink)}
+.chip-x button{border:0;background:none;cursor:pointer;color:var(--faint);
+  font-size:14px;line-height:1;padding:0 2px}
+.chip-x button:hover{color:var(--accent)}
+.chip-x .mark{font-family:var(--sans);font-size:10.5px;color:var(--faint);
+  text-transform:uppercase;letter-spacing:.05em}
+.chip-x.down{border-color:color-mix(in srgb,var(--accent) 34%,var(--line));opacity:.72}
+
+.domain-grid>.empty{grid-column:1/-1}

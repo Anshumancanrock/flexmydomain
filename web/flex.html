@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
+<title>portfolio: domains proven by a key</title>
+<meta name="description" content="Every domain a Nostr key has proven, rendered from relays. No account, no server, and it keeps working if we disappear.">
+<meta property="og:title" content="flexmydomain · flex">
+<meta property="og:description" content="Prove a domain with one DNS record and one signature. No account, no API key, no server.">
+<meta property="og:image" content="/opengraph-image.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.ico" sizes="256x256" type="image/x-icon">
+<link rel="icon" href="icon.svg" sizes="any" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-icon.png" sizes="180x180">
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/dm-sans.woff2" crossorigin>
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/geist-mono.woff2" crossorigin>
+<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="assets/flex.css">
+<script>
+  try { var t = localStorage.getItem("fmd-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+
+<a class="skip" href="#portfolio">Skip to the domains</a>
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="index.html" aria-label="flexmydomain, home">
+      <svg viewBox="0 0 36 28" fill="none" aria-hidden="true">
+        <path d="M0 28V13a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v15Z" fill="currentColor"/>
+        <path d="M13 28V3a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v25Z" class="accent-bar"/>
+        <path d="M26 28V18a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v10Z" fill="currentColor"/>
+      </svg>
+      <span>flex<span class="a">my</span>domain</span>
+    </a>
+
+    <nav class="top-nav" aria-label="Main">
+      <a href="index.html">Rank</a>
+      <a href="market.html">Market</a>
+      <a href="escrow.html">Escrow</a>
+      <a href="flex.html" aria-current="page">Portfolio</a>
+    </nav>
+
+    <div class="tools">
+      <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+      <button class="btn btn-accent btn-sm" id="connect" type="button">Connect</button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ who is being viewed ============ -->
+  <section class="wrap flex-hero">
+    <div class="flex-id">
+      <div class="flex-avatar" id="avatar" aria-hidden="true" hidden></div>
+      <div class="flex-who">
+        <h1 id="who">A domain portfolio</h1>
+        <p class="flex-npub mono" id="npub">Connect a key, or open anyone's portfolio with <code>?p=npub1…</code></p>
+        <p class="ident-line" id="profile"></p>
+      </div>
+    </div>
+    <dl class="flex-stats" id="stats" hidden>
+      <div><dt>Domains</dt><dd id="stat-count" class="mono">0</dd></div>
+      <div><dt>Proven</dt><dd id="stat-proven" class="mono">0</dd></div>
+      <div><dt>Oldest held</dt><dd id="stat-oldest" class="mono">—</dd></div>
+    </dl>
+  </section>
+
+  <!-- ============ identity: profile, relays, watchlist ============ -->
+  <section class="wrap" id="identity" hidden>
+    <div class="panel add-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Your keys and your relays</h2>
+          <p class="meta">Where your events live is your decision. This page only helps you say it.</p>
+        </div>
+        <button class="icon-btn" id="identity-close" type="button" aria-label="Close">&#10005;</button>
+      </div>
+
+      <div class="sell-body">
+        <!-- NIP-65 -->
+        <h3 class="ident-h">Your relays <small>NIP-65</small></h3>
+        <p class="step-lede">
+          Publish this and every client, ours and everyone else's, will look for your
+          events where <em>you</em> said. Until you publish one, our five defaults are used
+          as a fallback, never as a replacement.
+        </p>
+        <div id="relay-list"></div>
+        <form class="add-form" id="relay-form">
+          <input type="text" id="relay-url" placeholder="wss://relay.example" autocomplete="off"
+                 spellcheck="false" aria-label="Relay URL">
+          <button class="btn btn-ghost" type="submit">Add</button>
+        </form>
+        <div class="sell-actions">
+          <button class="btn btn-accent" type="button" id="relay-publish">Publish my relay list</button>
+          <p class="hint" id="relay-hint"></p>
+        </div>
+        <div class="relay-results" id="relay-out" hidden></div>
+
+        <!-- NIP-51 -->
+        <h3 class="ident-h">Watchlist <small>NIP-51</small></h3>
+        <p class="step-lede">
+          Domains you are keeping an eye on. A plain list on Nostr, readable by any client,
+          and yours to take elsewhere.
+        </p>
+        <div id="watch-list"></div>
+        <form class="add-form" id="watch-form">
+          <input type="text" id="watch-domain" placeholder="lumenary.com" autocomplete="off"
+                 spellcheck="false" aria-label="Domain to watch">
+          <button class="btn btn-ghost" type="submit">Watch</button>
+        </form>
+        <div class="sell-actions">
+          <button class="btn btn-accent" type="button" id="watch-publish">Publish watchlist</button>
+          <p class="hint" id="watch-hint"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ the portfolio ============ -->
+  <section class="wrap" id="portfolio">
+    <div class="panel-head sm">
+      <h2 class="sec-h">Domains</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" id="identity-open" type="button" hidden>Keys &amp; relays</button>
+        <button class="btn btn-ghost btn-sm" id="recheck" type="button" hidden>Re-check all</button>
+      </div>
+    </div>
+    <div class="domain-grid" id="grid">
+      <p class="empty" id="empty">Nothing here yet.</p>
+    </div>
+  </section>
+
+  <!-- ============ how this page works ============ -->
+  <section class="wrap about" id="how">
+    <h2 class="sec-h">How this page works</h2>
+    <div class="panel about-panel">
+      <p>Everything above came from public infrastructure we do not run: the domains from
+         Nostr relays, the proofs from DNS resolvers. This page is a static file and holds
+         no data of its own. Open your browser's network tab and check.</p>
+      <p>To prove a domain and add it here, go to the
+         <a href="market.html">market</a>, where listing is free and the proof is the price.
+         The <a href="index.html">flex board</a> is the other way round: anyone can put any
+         domain there by paying, and nothing is checked.</p>
+      <p class="muted-p">A TXT record proves control of the <b>zone</b>. It does not prove
+         you are the registrant, or that you can sell the name: that takes registrar
+         access, and the marketplace checks it separately before any money moves.
+         <a href="market.html" id="spec-link">Prove a domain on the market.</a></p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-top">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 36 28" fill="none" aria-hidden="true">
+        <path d="M0 28V13a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v15Z" fill="currentColor"/>
+        <path d="M13 28V3a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v25Z" class="accent-bar"/>
+        <path d="M26 28V18a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v10Z" fill="currentColor"/>
+      </svg>
+      <span>flex<span class="a">my</span>domain</span>
+    </a>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="index.html">Rank</a><a href="market.html">Market</a><a href="escrow.html">Escrow</a><a href="flex.html">Portfolio</a><a href="#how">How it works</a>
+    </nav>
+  </div>
+  <div class="wrap foot-bottom">
+    <span>Proven, not paid for.</span>
+    <span>No accounts. No custody. No backend.</span>
+  </div>
+</footer>
+
+<!-- ============ the key dialog ============ -->
+<dialog class="key-dialog" id="key-dialog">
+  <form method="dialog" id="key-form">
+    <h2 id="key-title">Connect</h2>
+    <div id="key-body"></div>
+    <div class="key-actions">
+      <button class="btn btn-ghost btn-sm" value="cancel" type="submit">Cancel</button>
+      <button class="btn btn-accent btn-sm" id="key-go" value="ok" type="button">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="assets/flex.js"></script>
+</body>
+</html>
