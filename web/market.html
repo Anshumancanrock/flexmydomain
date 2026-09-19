@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
+<title>market: domains for sale, proven by their owners</title>
+<meta name="description" content="Every listing carries its own proof. Verify it yourself, buy without trusting us, and take your inventory elsewhere whenever you like.">
+<meta property="og:title" content="flexmydomain · market">
+<meta property="og:description" content="Domains for sale on Nostr. Every listing carries its own proof.">
+<meta property="og:image" content="/opengraph-image.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.ico" sizes="256x256" type="image/x-icon">
+<link rel="icon" href="icon.svg" sizes="any" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-icon.png" sizes="180x180">
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/dm-sans.woff2" crossorigin>
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/geist-mono.woff2" crossorigin>
+<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="assets/flex.css">
+<link rel="stylesheet" href="assets/market.css">
+<script>
+  try { var t = localStorage.getItem("fmd-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+
+<a class="skip" href="#results">Skip to the listings</a>
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="index.html" aria-label="flexmydomain, home">
+      <svg viewBox="0 0 36 28" fill="none" aria-hidden="true">
+        <path d="M0 28V13a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v15Z" fill="currentColor"/>
+        <path d="M13 28V3a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v25Z" class="accent-bar"/>
+        <path d="M26 28V18a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v10Z" fill="currentColor"/>
+      </svg>
+      <span>flex<span class="a">my</span>domain</span>
+    </a>
+
+    <nav class="top-nav" aria-label="Main">
+      <a href="index.html">Rank</a>
+      <a href="market.html" aria-current="page">Market</a>
+      <a href="escrow.html">Escrow</a>
+      <a href="flex.html">Portfolio</a>
+    </nav>
+
+    <div class="tools">
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+        <input type="search" id="search" placeholder="Search domains…" autocomplete="off"
+               spellcheck="false" aria-label="Search listings">
+      </label>
+      <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+      <button class="btn btn-accent btn-sm" id="connect" type="button">Connect</button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="wrap market-hero">
+    <div>
+      <nav class="range" aria-label="Sections">
+        <a class="range-opt" href="index.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M7.5 4h9v5.4a4.5 4.5 0 0 1-9 0V4Z"/>
+            <path d="M16.5 5.3H19a2.3 2.3 0 0 1 0 4.6h-1.1"/>
+            <path d="M7.5 5.3H5a2.3 2.3 0 0 0 0 4.6h1.1"/>
+            <path d="M12 13.9v3.3M8.9 20.2h6.2a2.6 2.6 0 0 0-2.6-2.9h-1a2.6 2.6 0 0 0-2.6 2.9Z"/>
+          </svg>Rank</a>
+        <a class="range-opt on" href="market.html" aria-current="page">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 9h16l-1 11H5L4 9Z"/><path d="M9 9V6.5a3 3 0 0 1 6 0V9"/>
+          </svg>Marketplace</a>
+      </nav>
+      <h1>Domains for sale</h1>
+      <p class="lede">
+        Listing is <b>free</b>, but you have to prove the domain is yours. Every listing
+        below carries its own proof, and this page checked each one against the domain's
+        DNS before showing it, so none of them rests on our word or a relay's.
+      </p>
+    </div>
+    <button class="btn btn-accent" id="sell" type="button">List a domain</button>
+  </section>
+
+  <!-- ============ the sell panel ============ -->
+  <section class="wrap" id="sell-section" hidden>
+    <div class="panel add-panel">
+      <div class="panel-head">
+        <div>
+          <h2>List a domain</h2>
+          <p class="meta">Free to list. One DNS record proves the domain is yours, and we never see your key.</p>
+        </div>
+        <button class="icon-btn" id="sell-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="sell-body">
+        <div id="sell-pick"></div>
+
+        <!-- prove a new domain, inline -->
+        <details class="prove" id="prove">
+          <summary>Prove a new domain</summary>
+          <ol class="steps" id="steps">
+            <li class="step on" data-step="1">
+              <div class="step-no">1</div>
+              <div class="step-body">
+                <h3>Which domain?</h3>
+                <form class="add-form" id="domain-form">
+                  <input type="text" id="domain" placeholder="lumenary.com" autocomplete="off"
+                         spellcheck="false" autocapitalize="off" aria-label="Domain name">
+                  <button class="btn btn-accent" type="submit" id="check-btn">Check</button>
+                </form>
+                <p class="hint" id="domain-hint"></p>
+                <div class="registry" id="registry" hidden></div>
+              </div>
+            </li>
+
+            <li class="step" data-step="2">
+              <div class="step-no">2</div>
+              <div class="step-body">
+                <h3>Sign the proof, then publish it in your zone</h3>
+                <p class="step-lede">Your key signs a statement naming this domain and the time.
+                   Nothing is sent anywhere: the signature is made in this page and you put it
+                   in DNS yourself.</p>
+                <button class="btn btn-accent" type="button" id="sign-btn">Sign the proof</button>
+                <div class="record" id="record" hidden>
+                  <div class="record-row"><span class="record-label">Type</span><code class="mono">TXT</code></div>
+                  <div class="record-row">
+                    <span class="record-label">Name</span>
+                    <code class="mono" id="record-name"></code>
+                    <button class="btn btn-ghost btn-sm copy" type="button" data-copy="record-name">Copy</button>
+                  </div>
+                  <div class="record-row">
+                    <span class="record-label">Value</span>
+                    <code class="mono wrapped" id="record-value"></code>
+                    <button class="btn btn-ghost btn-sm copy" type="button" data-copy="record-value">Copy</button>
+                  </div>
+                  <p class="hint">209 characters, one token, no spaces. It fits in a single TXT
+                     record, and every registrar panel we know of accepts it unchanged.</p>
+                </div>
+              </div>
+            </li>
+
+            <li class="step" data-step="3">
+              <div class="step-no">3</div>
+              <div class="step-body">
+                <h3>Check the zone</h3>
+                <p class="step-lede">Two independent DNS resolvers are asked and must agree.
+                   Propagation takes a few minutes; checking again costs nothing.</p>
+                <button class="btn btn-accent" type="button" id="verify-btn">Check DNS</button>
+                <div class="observations" id="observations" hidden></div>
+              </div>
+            </li>
+
+            <li class="step" data-step="4">
+              <div class="step-no">4</div>
+              <div class="step-body">
+                <h3>Publish the proof</h3>
+                <p class="step-lede">Two events, both signed by you: the proof, and your
+                   portfolio. They go to your own relays.</p>
+                <button class="btn btn-accent" type="button" id="publish-btn">Publish to relays</button>
+                <div class="relay-results" id="relay-results" hidden></div>
+              </div>
+            </li>
+          </ol>
+        </details>
+
+        <form class="sell-form" id="sell-form" hidden>
+          <label class="field">
+            <span>Domain</span>
+            <select id="sell-domain"></select>
+          </label>
+          <label class="field">
+            <span>Price in sats</span>
+            <input type="text" id="sell-price" inputmode="numeric" placeholder="2500000" autocomplete="off">
+            <small id="sell-price-note">In sats.</small>
+          </label>
+          <label class="field">
+            <span>One line</span>
+            <input type="text" id="sell-summary" placeholder="A brighter internet." maxlength="120" autocomplete="off">
+          </label>
+          <label class="field full">
+            <span>Description <small>markdown, optional</small></span>
+            <textarea id="sell-description" rows="4" placeholder="Ten years old, clean history, never parked."></textarea>
+          </label>
+          <div class="sell-actions">
+            <button class="btn btn-accent" type="submit" id="sell-publish">Sign and publish</button>
+            <p class="hint" id="sell-hint"></p>
+          </div>
+        </form>
+        <div class="relay-results" id="sell-results" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ filters ============ -->
+  <section class="wrap" id="results">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Listings</h2>
+          <p class="meta" id="count">Asking the relays…</p>
+        </div>
+        <div class="market-tools">
+          <label class="sr" for="sort">Sort</label>
+          <select id="sort" class="sort">
+            <option value="price-desc">Price: high to low</option>
+            <option value="price-asc">Price: low to high</option>
+            <option value="newest">Newest</option>
+            <option value="oldest-domain">Oldest domain</option>
+            <option value="az">A → Z</option>
+          </select>
+        </div>
+      </div>
+      <div class="chips" id="tlds"></div>
+      <div class="listing-grid" id="grid">
+        <p class="empty">Loading…</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ what this page checked ============ -->
+  <section class="wrap about" id="how">
+    <h2 class="sec-h">What this page checked</h2>
+    <div class="panel about-panel">
+      <p>For every listing: the event's signature, that the embedded proof verifies for
+         <em>that</em> domain under <em>that</em> key, and that the domain's DNS still agrees.
+         A listing that fails any of the three is not shown as a listing.</p>
+      <p class="muted-p">Nostr has no gatekeeper, so a listing claiming <code>apple.com</code>
+         will exist. The event stays on the relays; this page only declines to show it,
+         and the check is public so any client can apply it. Use the
+         <b>Unverified</b> toggle to see what was hidden and why.</p>
+      <p class="muted-p">The <a href="index.html">flex board</a> works the other way round:
+         anyone can put any domain there by paying, and nothing is checked. Paying there
+         buys attention; only a proof gets a domain listed here.</p>
+      <label class="toggle">
+        <input type="checkbox" id="show-unverified">
+        <span>Show unverified listings</span>
+      </label>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-top">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 36 28" fill="none" aria-hidden="true">
+        <path d="M0 28V13a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v15Z" fill="currentColor"/>
+        <path d="M13 28V3a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v25Z" class="accent-bar"/>
+        <path d="M26 28V18a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v10Z" fill="currentColor"/>
+      </svg>
+      <span>flex<span class="a">my</span>domain</span>
+    </a>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="index.html">Rank</a><a href="market.html">Market</a><a href="escrow.html">Escrow</a><a href="flex.html">Portfolio</a><a href="#how">What we check</a>
+    </nav>
+  </div>
+  <div class="wrap foot-bottom">
+    <span>Listings live on relays, not here.</span>
+    <span>Take your inventory with you.</span>
+  </div>
+</footer>
+
+<dialog class="key-dialog" id="key-dialog">
+  <form method="dialog" id="key-form">
+    <h2 id="key-title">Connect</h2>
+    <div id="key-body"></div>
+    <div class="key-actions">
+      <button class="btn btn-ghost btn-sm" value="cancel" type="submit">Cancel</button>
+      <button class="btn btn-accent btn-sm" id="key-go" value="ok" type="button">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="assets/market.js"></script>
+</body>
+</html>

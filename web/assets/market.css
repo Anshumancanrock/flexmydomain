@@ -1,0 +1,65 @@
+/* market.html: listings, filters, and the sell panel.
+   Tokens from app.css, shared components from flex.css. Nothing redefined. */
+
+.market-hero{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
+  gap:clamp(16px,3vw,32px);padding-block:clamp(24px,4vw,42px)}
+.market-hero h1{font-size:clamp(26px,3.4vw,40px);font-weight:700;letter-spacing:-.04em;line-height:1.1}
+.market-hero .lede{font-size:14px;color:var(--muted);margin-top:9px;max-width:62ch;line-height:1.6}
+.market-tools{display:flex;gap:8px;align-items:center}
+
+/* ---------- the sell panel ---------- */
+.sell-body{padding:clamp(15px,1.7vw,20px)}
+.sell-form{display:grid;gap:13px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.field.full{grid-column:1/-1}
+.field>span{font-size:12px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+.field>span small{text-transform:none;letter-spacing:0}
+.field input,.field select,.field textarea{width:100%;border-radius:var(--r-sm);
+  border:1px solid var(--line);background:var(--sunk);color:var(--ink);
+  font-family:var(--sans);font-size:14px;padding:11px 13px;outline:none;
+  transition:border-color .18s,box-shadow .18s}
+.field input,.field select{height:44px;padding-block:0}
+.field textarea{resize:vertical;line-height:1.55}
+.field input:focus,.field select:focus,.field textarea:focus{
+  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.field small{font-size:12px;color:var(--muted)}
+.sell-actions{grid-column:1/-1;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.sell-actions .hint{text-align:left;margin:0}
+
+/* ---------- listings ---------- */
+.listing-grid{display:grid;gap:var(--gap);padding:clamp(14px,1.7vw,20px);
+  grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+.listing{display:flex;flex-direction:column;gap:10px;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r-lg);padding:clamp(15px,1.7vw,19px);
+  box-shadow:var(--shadow-sm);transition:transform .18s,box-shadow .18s}
+.listing:hover{transform:translateY(-3px);box-shadow:var(--shadow-md)}
+.listing.unverified{border-style:dashed;opacity:.72}
+.listing-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.listing-name{font-size:19px;font-weight:700;letter-spacing:-.035em;word-break:break-all}
+.listing-price{font-family:var(--mono);font-size:16px;font-weight:600;white-space:nowrap;text-align:right}
+.listing-price small{display:block;font-size:11.5px;color:var(--faint);font-weight:400}
+.listing-summary{font-size:13px;color:var(--muted);line-height:1.5}
+.listing-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:4px}
+.listing-actions{display:flex;gap:7px;flex-wrap:wrap}
+.listing-actions .btn{height:32px;padding:0 13px;font-size:12px}
+.listing-why{font-size:12px;color:var(--accent-ink);background:var(--accent-soft);
+  border-radius:var(--r-sm);padding:8px 11px;line-height:1.5}
+
+.toggle{display:inline-flex;align-items:center;gap:9px;font-size:13.5px;color:var(--muted);
+  margin-top:12px;cursor:pointer}
+.toggle input{width:auto;height:auto;accent-color:var(--accent)}
+
+/* ---------- the inline prove ceremony ---------- */
+.prove{margin-top:16px;border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--sunk);overflow:hidden}
+.prove>summary{cursor:pointer;padding:13px 15px;font-size:13.5px;font-weight:600;
+  color:var(--ink);list-style:none;display:flex;align-items:center;gap:9px}
+.prove>summary::-webkit-details-marker{display:none}
+.prove>summary::before{content:"+";font-family:var(--mono);font-size:15px;color:var(--accent)}
+.prove[open]>summary::before{content:"\2212"}
+.prove>summary:hover{color:var(--accent-ink)}
+.prove .steps{border-top:1px solid var(--line)}
+
+/* An empty-state message spans the whole grid rather than sitting in one
+   narrow column, where it looks like a layout bug. */
+.listing-grid>.empty{grid-column:1/-1}
