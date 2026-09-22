@@ -1,0 +1,69 @@
+/* escrow.html: the signing ceremony.
+   Tokens from app.css, components from flex.css and market.css. */
+
+.net-badge{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;border-radius:999px;
+  border:1px solid var(--line);background:var(--panel);font-family:var(--mono);font-size:12.5px;
+  color:var(--muted);white-space:nowrap;flex:none}
+.net-badge b{color:var(--ink);font-weight:650}
+.net-badge.mainnet{border-color:color-mix(in srgb,var(--accent) 50%,var(--line));color:var(--accent-ink)}
+
+/* the recovery string, which is the most dangerous thing on the page */
+.warn-box{border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
+  background:var(--accent-soft);border-radius:var(--r-md);padding:14px 16px;margin-bottom:14px}
+.warn-box p{font-size:13.5px;line-height:1.6;margin:0 0 10px}
+.warn-box .nsec{font-family:var(--mono);font-size:12px;word-break:break-all;user-select:all;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:11px 13px;margin-bottom:10px}
+.ack{display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--ink);margin-top:10px}
+.ack input{width:auto;height:auto;margin-top:3px;accent-color:var(--accent)}
+
+/* the derivation panel: every byte, so anyone can recompute the address */
+.derive{border:1px solid var(--line);border-radius:var(--r-md);background:var(--sunk);
+  padding:4px clamp(12px,1.4vw,16px);margin:14px 0}
+.derive-row{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--line-soft);
+  font-size:12.5px;flex-wrap:wrap;align-items:baseline}
+.derive-row:last-child{border-bottom:0}
+.derive-row .k{width:132px;flex:none;color:var(--faint);text-transform:uppercase;
+  letter-spacing:.055em;font-size:11px}
+.derive-row .v{font-family:var(--mono);flex:1;min-width:0;word-break:break-all;color:var(--ink)}
+.derive-row .v.big{font-size:14px;font-weight:600}
+.derive-note{font-size:12.5px;color:var(--muted);line-height:1.55;padding:10px 0 12px}
+
+/* leaves */
+.leaf{display:flex;gap:11px;align-items:baseline;font-size:12.5px;padding:8px 0;
+  border-bottom:1px solid var(--line-soft)}
+.leaf:last-child{border-bottom:0}
+.leaf .n{font-family:var(--mono);font-weight:700;width:18px;flex:none;color:var(--accent-ink)}
+.leaf .who{flex:1}
+.leaf .who b{color:var(--ink)}
+.leaf .seq{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+
+/* the big confirm screen */
+.confirm{border:2px solid var(--accent);border-radius:var(--r-lg);padding:clamp(16px,2vw,22px);
+  background:var(--panel);margin:14px 0}
+.confirm .amount{font-family:var(--mono);font-size:clamp(24px,3.4vw,34px);font-weight:700;
+  letter-spacing:-.03em;line-height:1.1}
+.confirm .to{font-family:var(--mono);font-size:13px;word-break:break-all;color:var(--ink);
+  margin-top:10px;padding:10px 12px;background:var(--sunk);border-radius:var(--r-sm)}
+.confirm .fee{font-size:12.5px;color:var(--muted);margin-top:10px}
+
+/* disagreement between published views */
+.clash{border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
+  border-radius:var(--r-md);background:var(--accent-soft);padding:13px 15px;margin-bottom:12px}
+.clash h4{font-size:13.5px;margin:0 0 8px}
+.clash-row{font-size:12.5px;font-family:var(--mono);word-break:break-all;padding:3px 0}
+.clash-row b{font-family:var(--sans);color:var(--muted);font-weight:400}
+
+.cando{width:100%;border-collapse:collapse;font-size:13.5px;margin-bottom:12px}
+.cando th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--faint);padding:0 0 8px;font-weight:600}
+.cando td{padding:7px 0;border-top:1px solid var(--line-soft);vertical-align:top}
+.cando td:first-child{padding-right:18px;color:var(--muted)}
+.cando td:last-child{color:var(--ink);font-weight:500}
+
+.state-pill{display:inline-flex;align-items:center;gap:8px;padding:7px 15px;border-radius:999px;
+  font-size:13px;font-weight:600;border:1px solid var(--line);background:var(--sunk);
+  margin-bottom:12px}
+.state-pill.funded{border-color:color-mix(in srgb,var(--live) 45%,var(--line));color:var(--live)}
+.state-pill.settled{border-color:color-mix(in srgb,var(--live) 45%,var(--line));color:var(--live)}
+.state-pill.expired{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--accent-ink)}

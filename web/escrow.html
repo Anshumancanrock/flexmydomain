@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
+<title>escrow: a trade neither side can rig</title>
+<meta name="description" content="A 2-of-3 Taproot escrow between buyer, seller and an arbiter you both choose. We hold at most one key of three, and can move nothing alone.">
+<meta property="og:title" content="flexmydomain · escrow">
+<meta property="og:description" content="A 2-of-3 Taproot escrow. We can move nothing alone, and if everyone vanishes a timelock settles it with nobody's permission.">
+<meta property="og:image" content="/opengraph-image.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.ico" sizes="256x256" type="image/x-icon">
+<link rel="icon" href="icon.svg" sizes="any" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-icon.png" sizes="180x180">
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/dm-sans.woff2" crossorigin>
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/geist-mono.woff2" crossorigin>
+<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="assets/flex.css">
+<link rel="stylesheet" href="assets/market.css">
+<link rel="stylesheet" href="assets/escrow.css">
+<script>
+  try { var t = localStorage.getItem("fmd-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+
+<a class="skip" href="#escrow">Skip to the escrow</a>
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="index.html" aria-label="flexmydomain, home">
+      <svg viewBox="0 0 36 28" fill="none" aria-hidden="true">
+        <path d="M0 28V13a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v15Z" fill="currentColor"/>
+        <path d="M13 28V3a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v25Z" class="accent-bar"/>
+        <path d="M26 28V18a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v10Z" fill="currentColor"/>
+      </svg>
+      <span>flex<span class="a">my</span>domain</span>
+    </a>
+    <nav class="top-nav" aria-label="Main">
+      <a href="index.html">Rank</a>
+      <a href="market.html">Market</a>
+      <a href="escrow.html" aria-current="page">Escrow</a>
+      <a href="flex.html">Portfolio</a>
+    </nav>
+    <div class="tools">
+      <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+      <button class="btn btn-accent btn-sm" id="connect" type="button">Connect</button>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="wrap market-hero">
+    <div>
+      <h1>Escrow</h1>
+      <p class="lede">
+        Buy or sell a domain without trusting the other side. The buyer's bitcoin is
+        locked where <b>nobody can take it alone</b>: not the buyer, not the seller, not
+        us. It is released when the domain arrives. If everyone walks away, a timer
+        settles it after a set time, and the page shows you who that timer pays before
+        you send a single sat.
+      </p>
+    </div>
+    <div class="net-badge" id="net-badge" title="Set in web/assets/config.js"></div>
+  </section>
+
+  <!-- ============ open an escrow ============ -->
+  <section class="wrap" id="open-section">
+    <div class="panel add-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Open an escrow</h2>
+          <p class="meta">Both sides generate a key here. We never see either of them.</p>
+        </div>
+      </div>
+
+      <ol class="steps" id="steps">
+
+        <li class="step on" data-step="1">
+          <div class="step-no">1</div>
+          <div class="step-body">
+            <h3>The trade</h3>
+            <form class="sell-form" id="terms-form">
+              <label class="field">
+                <span>Domain</span>
+                <input type="text" id="e-domain" placeholder="lumenary.com" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="field">
+                <span>Price in sats</span>
+                <input type="text" id="e-amount" inputmode="numeric" placeholder="2500000" autocomplete="off">
+              </label>
+              <label class="field">
+                <span>Your side</span>
+                <select id="e-side">
+                  <option value="buyer">I am buying</option>
+                  <option value="seller">I am selling</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Counterparty <small>npub or hex</small></span>
+                <input type="text" id="e-counterparty" placeholder="npub1…" autocomplete="off" spellcheck="false">
+              </label>
+              <div class="sell-actions">
+                <button class="btn btn-accent" type="submit">Check the terms</button>
+                <p class="hint" id="terms-hint"></p>
+              </div>
+            </form>
+            <div class="registry" id="terms-out" hidden></div>
+          </div>
+        </li>
+
+        <li class="step" data-step="2">
+          <div class="step-no">2</div>
+          <div class="step-body">
+            <h3>Who referees, if anyone</h3>
+            <p class="step-lede">
+              An arbiter holds one key of three. They can co-sign with you or with your
+              counterparty, <b>never alone</b>. We read both sides' published arbiter lists
+              and offer only the ones you both accept.
+            </p>
+            <div id="arbiters"></div>
+          </div>
+        </li>
+
+        <li class="step" data-step="3">
+          <div class="step-no">3</div>
+          <div class="step-body">
+            <h3 id="commit-title">Where the domain is going</h3>
+            <div id="commit-fields">
+              <p class="step-lede">
+                The registry hides who owns a domain, so it can only show us <em>which
+                registrar</em> holds it. As the buyer, say where you will receive it. "The
+                transfer completed" will mean the registry shows exactly this.
+              </p>
+              <div class="sell-form">
+                <label class="field">
+                  <span>Your registrar's IANA id <small>or leave blank and give nameservers</small></span>
+                  <input type="text" id="e-registrar" placeholder="292" autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Your nameservers <small>comma separated</small></span>
+                  <input type="text" id="e-ns" placeholder="ns1.you.example, ns2.you.example" autocomplete="off" spellcheck="false">
+                </label>
+              </div>
+              <p class="hint" style="text-align:left">Your registrar's id is on
+                <a href="https://www.iana.org/assignments/registrar-ids/registrar-ids.xhtml" target="_blank" rel="noopener">IANA's list</a>
+                (GoDaddy 146, Namecheap 1068, Porkbun 1861, Cloudflare 1910). Prefer it:
+                <b>nameservers alone are weak</b>, because the seller can point the domain at
+                yours without handing it over. Use them only when you both use the same
+                registrar, and whatever you commit, check that the domain is in your own
+                registrar account before you release anything.</p>
+            </div>
+            <p class="step-lede" id="commit-seller-note" hidden>
+              You are the seller, so the buyer says where they will receive the domain. That
+              comes back with their reply.
+            </p>
+            <button class="btn btn-accent" type="button" id="invite-btn">Create the invite</button>
+            <p class="hint" id="commit-hint"></p>
+          </div>
+        </li>
+
+        <li class="step" data-step="4">
+          <div class="step-no">4</div>
+          <div class="step-body">
+            <h3>Swap one message each way, then publish</h3>
+            <p class="step-lede">
+              The escrow address needs <b>both</b> your keys, so neither of you can make it
+              alone. Send your counterparty the invite link; they send back a short reply.
+              Nothing in either message is secret, so you can paste them anywhere.
+            </p>
+            <div id="invite-out"></div>
+            <div id="reply-in" hidden>
+              <label class="field full">
+                <span>Their reply <small>starts with fmdrep1</small></span>
+                <input type="text" id="e-reply" placeholder="fmdrep1…" autocomplete="off" spellcheck="false">
+              </label>
+              <button class="btn btn-accent" type="button" id="reply-btn">Use their reply</button>
+            </div>
+            <div class="warn-box" id="recovery-box" hidden>
+              <p><b>This string is the only way to reclaim your money if we disappear.</b>
+                 Write it down now. It holds your private key. We do not have a copy
+                 and cannot make you another one.</p>
+              <div class="nsec" id="recovery"></div>
+              <button class="btn btn-ghost btn-sm" type="button" id="copy-recovery">Copy</button>
+              <label class="ack">
+                <input type="checkbox" id="saved-recovery">
+                <span>I have written it down somewhere safe.</span>
+              </label>
+            </div>
+            <div id="derivation"></div>
+            <button class="btn btn-accent" type="button" id="publish-escrow" disabled hidden>Sign and publish my view</button>
+            <div class="relay-results" id="publish-out" hidden></div>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ joining from an invite ============ -->
+  <section class="wrap" id="join-section" hidden>
+    <div class="panel add-panel">
+      <div class="panel-head">
+        <div>
+          <h2>You have been invited to an escrow</h2>
+          <p class="meta">Read the terms. Nothing happens until you accept.</p>
+        </div>
+      </div>
+      <div class="sell-body">
+        <div id="join-terms"></div>
+        <div id="join-commit" hidden>
+          <p class="step-lede">You are the buyer, so say where you will receive the domain.
+            The registry will be checked against exactly this before the seller is paid.</p>
+          <div class="sell-form">
+            <label class="field">
+              <span>Your registrar's IANA id <small>or leave blank and give nameservers</small></span>
+              <input type="text" id="j-registrar" placeholder="292" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Your nameservers <small>comma separated</small></span>
+              <input type="text" id="j-ns" placeholder="ns1.you.example" autocomplete="off" spellcheck="false">
+            </label>
+          </div>
+          <p class="hint" style="text-align:left">Your registrar's id is on
+            <a href="https://www.iana.org/assignments/registrar-ids/registrar-ids.xhtml" target="_blank" rel="noopener">IANA's list</a>
+            (GoDaddy 146, Namecheap 1068, Porkbun 1861, Cloudflare 1910). Prefer it:
+            <b>nameservers alone are weak</b>, because the seller can point the domain at
+            yours without handing it over. Use them only when you both use the same
+            registrar, and whatever you commit, check that the domain is in your own
+            registrar account before you release anything.</p>
+        </div>
+        <button class="btn btn-accent" type="button" id="join-btn">Accept and make my key</button>
+        <p class="hint" id="join-hint"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ an existing escrow ============ -->
+  <section class="wrap" id="escrow" hidden>
+    <div class="panel add-panel">
+      <div class="panel-head">
+        <div>
+          <h2 id="escrow-title">Escrow</h2>
+          <p class="meta" id="escrow-sub"></p>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="refresh" type="button">Refresh</button>
+      </div>
+      <div class="sell-body">
+        <div id="state-line"></div>
+        <div id="disagreements"></div>
+        <div id="derivation-view"></div>
+        <div id="chain-view"></div>
+        <div id="transfer-view"></div>
+        <div id="settle-view"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ what we can and cannot do ============ -->
+  <section class="wrap about" id="how">
+    <h2 class="sec-h">What we can and cannot do</h2>
+    <div class="panel about-panel">
+      <table class="cando">
+        <tr><th>We can</th><th>We cannot</th></tr>
+        <tr><td>Refuse to show your listing</td><td>Remove it from the relays</td></tr>
+        <tr><td>Refuse to arbitrate</td><td>Move a single satoshi by ourselves</td></tr>
+        <tr><td>Publish a ruling you disagree with</td><td>Freeze, seize or reverse a payment</td></tr>
+        <tr><td>Stop running this site</td><td>Take your domain, your key, or your history</td></tr>
+      </table>
+      <p class="muted-p">There is no leaf in the script tree an arbiter key can spend by
+         itself. That is a property of the output, asserted by a test that spends every
+         leaf against Bitcoin Core. If we vanish, the timeout path settles it with
+         <a href="recover.html">recover.html</a>, offline, from a file.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-top">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 36 28" fill="none" aria-hidden="true">
+        <path d="M0 28V13a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v15Z" fill="currentColor"/>
+        <path d="M13 28V3a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v25Z" class="accent-bar"/>
+        <path d="M26 28V18a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v10Z" fill="currentColor"/>
+      </svg>
+      <span>flex<span class="a">my</span>domain</span>
+    </a>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="index.html">Rank</a><a href="market.html">Market</a><a href="escrow.html">Escrow</a><a href="flex.html">Portfolio</a><a href="recover.html">Recover</a>
+    </nav>
+  </div>
+  <div class="wrap foot-bottom">
+    <span>Spending takes two of three keys.</span>
+    <span>If we vanish, the timelock still settles it.</span>
+  </div>
+</footer>
+
+<dialog class="key-dialog" id="key-dialog">
+  <form method="dialog" id="key-form">
+    <h2 id="key-title">Connect</h2>
+    <div id="key-body"></div>
+    <div class="key-actions">
+      <button class="btn btn-ghost btn-sm" value="cancel" type="submit">Cancel</button>
+      <button class="btn btn-accent btn-sm" id="key-go" value="ok" type="button">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="assets/escrow.js"></script>
+</body>
+</html>
