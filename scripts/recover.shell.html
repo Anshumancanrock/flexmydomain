@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flexmydomain: recover your escrow</title>
+<style>
+  :root{
+    --bg:#f0f5fc; --panel:#fff; --sunk:#e6eef8; --ink:#0e1c2a; --muted:#4e647a;
+    --faint:#8aa2bb; --line:#d9e6f2; --accent:#0b7cba; --on-accent:#fff;
+    --warn:#b4401f; --ok:#0f9f5e;
+    --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#07121c;--panel:#0f1e2b;--sunk:#152736;--ink:#e6f0f8;--muted:#8da5bb;
+      --faint:#5d7489;--line:#1f3546;--accent:#38b6ef;--on-accent:#04202f;
+      --warn:#ff8a65;--ok:#33c97e}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.6;padding:clamp(18px,4vw,48px)}
+  main{max-width:820px;margin-inline:auto}
+  h1{font-size:clamp(24px,3.4vw,34px);letter-spacing:-.03em;margin:0 0 6px}
+  .lede{color:var(--muted);margin:0 0 22px;max-width:62ch}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:clamp(15px,2vw,22px);margin-bottom:16px}
+  h2{font-size:15px;letter-spacing:-.02em;margin:0 0 10px}
+  label{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;
+    color:var(--faint);margin-bottom:6px}
+  textarea,input{width:100%;background:var(--sunk);color:var(--ink);border:1px solid var(--line);
+    border-radius:9px;padding:11px 13px;font-family:var(--mono);font-size:13px;outline:none}
+  textarea{resize:vertical;min-height:84px;word-break:break-all}
+  textarea:focus,input:focus{border-color:var(--accent)}
+  .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+  .row>div{flex:1 1 200px}
+  button{appearance:none;border:0;border-radius:999px;background:var(--accent);
+    color:var(--on-accent);font-family:var(--sans);font-size:14px;font-weight:600;
+    padding:11px 22px;cursor:pointer;margin-top:14px}
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .warn{background:color-mix(in srgb,var(--warn) 12%,transparent);
+    border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));
+    border-radius:10px;padding:12px 14px;font-size:13.5px;margin-bottom:18px}
+  .warn b{color:var(--warn)}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:13px}
+  dt{color:var(--faint)}
+  dd{margin:0;font-family:var(--mono);word-break:break-all}
+  .out{font-family:var(--mono);font-size:12px;word-break:break-all;background:var(--sunk);
+    border:1px solid var(--line);border-radius:9px;padding:12px;margin-top:12px;user-select:all}
+  .msg{font-size:13px;margin-top:10px}
+  .msg.err{color:var(--warn)}
+  .msg.ok{color:var(--ok)}
+  footer{color:var(--faint);font-size:12.5px;margin-top:26px}
+  code{font-family:var(--mono);font-size:.92em}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Recover your escrow</h1>
+<p class="lede">
+  This page rebuilds your escrow from one recovery string and signs a transaction
+  that sweeps it back to you. It makes no network requests of any kind, so there is
+  no server that could be switched off and nobody to ask for permission.
+</p>
+
+<div class="warn">
+  <b>Your recovery string contains a private key.</b> Anyone who reads it can spend
+  this escrow. Do not paste it into a website, a chat, or a support ticket, including
+  ours. This page works offline: disconnect first if you like, and check the network
+  tab afterwards.
+</div>
+
+<div class="panel">
+  <h2>1. Your recovery string</h2>
+  <label for="rec">Given to you when the escrow was created</label>
+  <textarea id="rec" spellcheck="false" autocomplete="off" placeholder="fmdrec1…"></textarea>
+  <button id="load">Rebuild the escrow</button>
+  <p class="msg" id="loadMsg"></p>
+</div>
+
+<div class="panel" id="details" hidden>
+  <h2>2. What this string describes</h2>
+  <dl id="facts"></dl>
+</div>
+
+<div class="panel" id="fundingPanel" hidden>
+  <h2>2b. Where the escrow was funded</h2>
+  <p class="lede" style="margin:0 0 12px">Your string was saved before the escrow
+    was paid, so it does not record the payment. Look the address above up on any
+    block explorer and copy the funding transaction here. This page still makes no
+    network request: you are the one reading the chain.</p>
+  <div class="row"><div>
+    <label for="fTxid">Funding transaction id</label>
+    <input id="fTxid" spellcheck="false" autocomplete="off" placeholder="64 hex characters">
+  </div></div>
+  <div class="row">
+    <div><label for="fVout">Output index (vout)</label>
+      <input id="fVout" inputmode="numeric" value="0"></div>
+    <div><label for="fAmount">Amount in satoshis</label>
+      <input id="fAmount" inputmode="numeric" placeholder="exactly as the explorer shows"></div>
+  </div>
+  <button id="useFunding">Use this payment</button>
+  <p class="msg" id="fundingMsg"></p>
+</div>
+
+<div class="panel" id="sweepPanel" hidden>
+  <h2>3. Sweep it to an address you control</h2>
+  <label for="dest">Destination address (any standard address, same network as the escrow)</label>
+  <input id="dest" spellcheck="false" autocomplete="off" placeholder="bc1p…">
+  <div class="row">
+    <div>
+      <label for="fee">Fee in satoshis</label>
+      <input id="fee" inputmode="numeric" value="2000">
+    </div>
+    <div>
+      <label for="leaf">Spend path</label>
+      <input id="leaf" value="D: timeout (your key alone)" readonly>
+    </div>
+  </div>
+  <button id="build">Build and sign</button>
+  <button class="ghost" id="copy" hidden>Copy raw transaction</button>
+  <p class="msg" id="sweepMsg"></p>
+  <div class="out" id="raw" hidden></div>
+</div>
+
+<footer>
+  <p><b>How to broadcast it.</b> Paste the raw hex into any node or block explorer that
+  accepts one: <code>bitcoin-cli sendrawtransaction &lt;hex&gt;</code>, mempool.space, or a
+  friend's node. This page makes no network requests, so it cannot broadcast for you.</p>
+  <p><b>The timeout path needs the timelock to have elapsed.</b> If a node replies
+  <code>non-BIP68-final</code>, the escrow is not old enough yet. The transaction is
+  already valid; it just cannot be mined before its time. Keep it and try again.</p>
+  <p>flexmydomain · this file is self-contained · verify it by reading it</p>
+</footer>
+
+</main>
+
+<script>
+/*__ESCROW_BUNDLE__*/
+</script>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  let state = null;
+
+  const say = (el, text, cls) => { el.textContent = text; el.className = "msg" + (cls ? " " + cls : ""); };
+
+  $("load").addEventListener("click", () => {
+    const parsed = decodeRecovery($("rec").value);
+    if (!parsed.ok) { say($("loadMsg"), parsed.reason, "err"); return; }
+
+    let rebuilt;
+    try { rebuilt = rebuildFromRecovery(parsed.recovery); }
+    catch (err) { say($("loadMsg"), err.message, "err"); return; }
+
+    state = { ...rebuilt, recovery: parsed.recovery };
+    const r = parsed.recovery;
+    const canSweep = r.timeoutTo === rebuilt.role;
+
+    $("facts").innerHTML = [
+      ["Your role", rebuilt.role],
+      ["Escrow address", rebuilt.tree.addresses.mainnet],
+      ["  signet / testnet", rebuilt.tree.addresses.signet],
+      ["  regtest", rebuilt.tree.addresses.regtest],
+      ["Tree", rebuilt.tree.shape],
+      ["Timeout pays", r.timeoutTo],
+      ["Timelock", r.timeoutBlocks + " blocks"],
+      ["Funding", r.funding ? r.funding.txid + ":" + r.funding.vout + "  (" + r.funding.amountSats + " sats)" : "not recorded in this string"],
+    ].map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
+    $("details").hidden = false;
+
+    /* The string a user saves is made when the escrow is created, before
+       anyone has paid it, so it usually has no funding outpoint. The string
+       alone must still be enough, so the page asks for the outpoint instead:
+       the user reads it off any explorer, and the page makes no request of its
+       own. */
+    if (!r.funding) {
+      $("sweepPanel").hidden = true;
+      if (!canSweep) {
+        say($("loadMsg"), "Rebuilt. The timeout path pays the " + r.timeoutTo + ", and this key is the " + rebuilt.role + ", so you cannot sweep alone. The address above is correct; you need your counterparty or the arbiter.", "err");
+        return;
+      }
+      say($("loadMsg"), "Rebuilt. Check the address above against the one you funded, then tell this page which payment funded it.", "ok");
+      $("fundingPanel").hidden = false;
+      return;
+    }
+    if (!canSweep) {
+      say($("loadMsg"), "Rebuilt. The timeout path pays the " + r.timeoutTo + ", and this key is the " + rebuilt.role + ", so you cannot sweep alone. The address above is correct; you need your counterparty or the arbiter.", "err");
+      $("sweepPanel").hidden = true;
+      return;
+    }
+
+    say($("loadMsg"), "Rebuilt. The address above should be the one you funded; check it before signing anything.", "ok");
+    $("leaf").value = "D: timeout, spendable by the " + r.timeoutTo + " alone after " + r.timeoutBlocks + " blocks";
+    $("sweepPanel").hidden = false;
+  });
+
+
+  $("useFunding").addEventListener("click", () => {
+    if (!state) return;
+    const txid = $("fTxid").value.trim().toLowerCase();
+    const vout = Number($("fVout").value.trim());
+    const amount = $("fAmount").value.replace(/[^0-9]/g, "");
+    if (!/^[0-9a-f]{64}$/.test(txid)) { say($("fundingMsg"), "A transaction id is 64 hex characters.", "err"); return; }
+    if (!Number.isInteger(vout) || vout < 0) { say($("fundingMsg"), "The output index is a whole number, usually 0 or 1.", "err"); return; }
+    if (!amount || BigInt(amount) <= 0n) { say($("fundingMsg"), "Enter the amount in satoshis, exactly as the explorer shows it.", "err"); return; }
+    /* BIP-341 signs over the input amount, so a wrong amount yields a
+       signature no node accepts. The message says so now, before the user
+       broadcasts and is refused. */
+    state.recovery = { ...state.recovery, funding: { txid, vout, amountSats: BigInt(amount) } };
+    say($("fundingMsg"), "Recorded. The amount must match the chain exactly: the signature covers it, and every node refuses a wrong one.", "ok");
+    $("leaf").value = "D: timeout, spendable by the " + state.recovery.timeoutTo + " alone after " + state.recovery.timeoutBlocks + " blocks";
+    $("sweepPanel").hidden = false;
+  });
+
+  $("build").addEventListener("click", () => {
+    if (!state) return;
+    const dest = $("dest").value.trim();
+    const fee = BigInt($("fee").value.replace(/[^0-9]/g, "") || "0");
+    const funding = state.recovery.funding;
+
+    if (!dest) { say($("sweepMsg"), "Enter an address to sweep to.", "err"); return; }
+    if (fee <= 0n) { say($("sweepMsg"), "The fee must be a positive number of satoshis.", "err"); return; }
+    if (fee >= funding.amountSats) { say($("sweepMsg"), "The fee is larger than the escrow.", "err"); return; }
+
+    /* decodeAddress comes from the inlined core/escrow bundle: bech32,
+       bech32m and base58check, checksum verified. The string does not say
+       which network the escrow is on, so the destination's own network is
+       named in the result for the person to check. */
+    let decoded;
+    try { decoded = decodeAddress(dest); }
+    catch (err) { say($("sweepMsg"), err.message, "err"); return; }
+    const scriptPubKey = decoded.scriptPubKey;
+    const chainName = decoded.chain === "mainnet" ? "MAINNET" : decoded.chain === "test" ? "testnet/signet" : "regtest";
+
+    try {
+      const signed = spendWith({
+        tree: state.tree,
+        leaf: state.tree.leaves.D,
+        outpoint: { txid: funding.txid, vout: funding.vout, amountSats: funding.amountSats },
+        destinations: [{ scriptPubKey, amountSats: funding.amountSats - fee }],
+        secretKeys: { [state.role]: state.recovery.secretKey },
+      });
+      $("raw").textContent = signed.hex;
+      $("raw").hidden = false;
+      $("copy").hidden = false;
+      say($("sweepMsg"), "Signed, paying a " + chainName + " " + decoded.type + " address. " + signed.vbytes + " vbytes, txid " + signed.txid + ". Broadcast it on that network, anywhere.", "ok");
+    } catch (err) {
+      say($("sweepMsg"), err.message, "err");
+    }
+  });
+
+  $("copy").addEventListener("click", () => {
+    navigator.clipboard.writeText($("raw").textContent).then(
+      () => say($("sweepMsg"), "Copied.", "ok"),
+      () => say($("sweepMsg"), "Select the hex and copy it manually.", "err"),
+    );
+  });
+
+})();
+</script>
+</body>
+</html>
