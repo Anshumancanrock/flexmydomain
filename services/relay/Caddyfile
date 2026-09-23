@@ -1,0 +1,20 @@
+# TLS for the relay. Caddy gets and renews the certificate for RELAY_HOST by
+# itself; the host's DNS A record must point at this server first.
+#
+# Caddy replaces any X-Forwarded-For a client sends with the address the client
+# connected from, which is what strfry reads (realIpHeader) and what the write
+# policy rate-limits by. Put another proxy in front (Cloudflare's orange cloud)
+# and every client arrives from that proxy's addresses instead: see README.md.
+#
+# HTTP/3 is off: WebSockets, which are nearly all of a relay's traffic, do not
+# run over it, and only TCP ports are published (docker-compose.yml). Left on,
+# Caddy would advertise an HTTP/3 port that nobody can reach.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$RELAY_HOST} {
+	reverse_proxy strfry:7777
+}

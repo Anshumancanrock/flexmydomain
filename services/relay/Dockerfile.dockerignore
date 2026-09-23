@@ -1,0 +1,11 @@
+# Build context for services/relay/Dockerfile (a Dockerfile-specific ignore
+# file, which BuildKit reads instead of a root .dockerignore). Everything is
+# excluded except what the image is built from.
+*
+!package.json
+!bun.lock
+!tsconfig.json
+!core/**
+!client/**
+!services/relay/**
+!test/vectors/relay-policy.test.ts

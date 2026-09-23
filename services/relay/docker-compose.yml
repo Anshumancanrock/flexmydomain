@@ -1,0 +1,48 @@
+# The flexmydomain relay: strfry with its live mirror of flexmydomain events
+# from the public relays, and Caddy for TLS. See README.md in this directory.
+#
+#   cp .env.example .env        # then fill it in
+#   docker compose up -d --build
+#
+# Maintenance commands go through `docker compose exec strfry`, never `run`:
+# see the note at the top of entrypoint.sh.
+name: fmd-relay
+
+services:
+  strfry:
+    build:
+      context: ../..
+      dockerfile: services/relay/Dockerfile
+    image: fmd-relay:1.1.3
+    # The relay, plus the mirror (router and backfills) in the same container:
+    # every process that opens the database has to share one PID namespace.
+    command: ["relay"]
+    env_file: .env
+    volumes:
+      - strfry-db:/app/strfry-db
+    # Not published to the host: only Caddy, on this network, reaches it.
+    expose: ["7777"]
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:
+    image: caddy:2.10
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [strfry]
+    restart: unless-stopped
+
+volumes:
+  strfry-db:
+  caddy-data:
+  caddy-config:
