@@ -11,14 +11,14 @@ The home page ranks domains by the sats people zap to them. Anyone can put
 any domain there, and paying is the only requirement. The ranking is worked
 out from public zap receipts, so anyone can recount it.
 
-## The market
+## The marketplace
 
 Listing a domain is free. The seller adds one TXT record to the domain's DNS,
 which ties the domain to their Nostr key, and every visitor's browser checks
 that record before it shows the listing. A domain you don't control can't be
 listed.
 
-## Buying a domain through escrow
+## Buying a domain through flexmydomain's escrow at 0 commission
 
 1. The seller lists the domain for free.
 2. A buyer opens an escrow from the listing and says where the domain should
@@ -34,26 +34,10 @@ listed.
 6. The page polls the registry (RDAP) until two readings, at least half an hour
    apart, show the domain at the buyer's destination. Buyer and seller then
    sign the release and the seller is paid. We charge no fee; the only cost is
-   the Bitcoin network fee.
+   the Bitcoin network fee which is negligible
 
 The money can't get stuck. With an arbiter, a dispute is settled by the
 arbiter and one of the two parties, and if nobody acts, a timelock refunds the
 buyer. Without an arbiter the timelock pays the seller instead, so the buyer is
 trusting the seller to deliver. `recover.html` can sweep an escrow offline
 from a single recovery string.
-
-## Running it
-
-It is a static site: serve `web/` over HTTPS with any static host
-(`python3 serve.py` locally), and `bun run test` runs the tests.
-
-## More
-
-- `spec/` describes the event formats, the DNS proof, how to verify
-  everything yourself, and the threat model.
-- `services/relay` is an optional strfry relay that stores only
-  flexmydomain events.
-- Escrow runs on signet (test bitcoin) by default. It hasn't been audited, so
-  don't put real money through it yet.
-
-MIT licensed.
