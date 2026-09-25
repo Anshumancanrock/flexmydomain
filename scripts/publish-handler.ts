@@ -1,14 +1,8 @@
 #!/usr/bin/env bun
 /**
- * Publish this deployment's NIP-89 handler advertisement (kind 31990).
- *
- * The operator runs it once per deployment, and users never need to, so it is
- * a script rather than a button.
- *
- * The event says which kinds this client opens (domain listings and
- * portfolios) and the URL that opens one. Other clients read it to offer this
- * app when a user taps a listing they cannot render, and users read it to
- * find other clients for the same events.
+ * Publish this deployment's NIP-89 handler advertisement (kind 31990), once per
+ * deployment. Tells other clients which kinds we open (listings, portfolios)
+ * and at what URL.
  *
  *   bun scripts/publish-handler.ts --nsec nsec1... --url https://example.com
  */
@@ -50,7 +44,7 @@ const pubkey = bytesToHex(schnorr.getPublicKey(decoded.data))
 const event = signEvent(
   buildHandlerAdvertisement({
     pubkey,
-    // `<bech32>` is the placeholder NIP-89 substitutes with the naddr.
+    // NIP-89 replaces `<bech32>` with the naddr.
     webUrl: `${base}/market.html?a=<bech32>`,
     name: 'flexmydomain',
     about:

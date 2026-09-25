@@ -1,15 +1,7 @@
 /**
- * Resolve, then decide: the one place net/ and core/oracle meet.
- *
- * This module only orchestrates. It fetches with net/, decides with
- * core/oracle and returns the verdict with the raw observations attached, so
- * a page can show "proven" together with what was looked up, from which
- * provider and when. A dispute is then about evidence rather than memory.
- *
- * The pages, services/verifier and services/indexer all call this module, and
- * it must stay the only implementation of the checking rules: two verifiers
- * that disagree are worse than one that is wrong, because nobody can tell
- * which is which.
+ * Where net/ and core/oracle meet. Verdicts come back with the raw lookups attached.
+ * Pages, services/verifier and services/indexer all call this. Keep it the only copy
+ * of the checking rules. Two verifiers that disagree are worse than one wrong one.
  */
 
 import {
@@ -28,12 +20,11 @@ import {
 import { fetchNip05, lookupTxt, type TxtLookup } from './dns.js'
 import { fetchRdapDomain, type RdapSnapshot } from './rdap.js'
 
-/** Everything learned about one domain in one pass. */
 export interface DomainReport {
   domain: string
   pubkey: string
   status: DomainProofStatus
-  /** True when at least one resolver answered. */
+  /** At least one resolver answered. */
   answered: boolean
   dnssec: boolean
   lookup: TxtLookup
@@ -44,23 +35,16 @@ export interface DomainReport {
 }
 
 /**
- * Check a domain's proof: DNS first, NIP-05 only if DNS did not settle it.
- *
- * The NIP-05 request is skipped when DNS succeeds, since DNS outranks it and
- * the round trip would learn nothing. It is still made when no resolver could
- * be reached, because that is not evidence against the claimant.
- *
- * Only records that every answering resolver returned are verified. A record
- * one provider returns and another does not is reported as disputed and left
- * unverified: it is either mid-propagation or one resolver is being lied to,
- * and neither is a basis for telling a buyer a domain is proven.
+ * DNS first, NIP-05 only if DNS didn't prove it. DNS outranks NIP-05.
+ * Only records every answering resolver returned are verified. A partial record is
+ * mid-propagation or a resolver being lied to, and neither proves anything to a buyer.
  */
 export async function checkDomainProof(params: {
   domain: string
   pubkey: string
   now?: number
   signal?: AbortSignal
-  /** Skip the NIP-05 request, for a bulk re-poll. */
+  /** Skip NIP-05, for bulk re-polls. */
   dnsOnly?: boolean
 }): Promise<DomainReport> {
   const domain = normaliseDomain(params.domain)
@@ -98,24 +82,20 @@ export async function checkDomainProof(params: {
   }
 }
 
-/** A registry check, with the snapshot kept for the evidence file. */
+/** Snapshot kept for the evidence file. */
 export interface RegistryReport {
   domain: string
-  /** Undefined when the TLD has no RDAP service or gave no usable answer. */
+  /** Unset when the TLD has no RDAP or gave no usable answer. */
   eligibility?: Eligibility
   snapshot: RdapSnapshot
-  /** False when this TLD cannot be verified: it can be flexed but not escrowed. */
+  /** False means flex only, no escrow. */
   supported: boolean
   checkedAt: number
 }
 
 /**
- * Ask the registry about a domain and apply the eligibility rules.
- *
- * A TLD with no RDAP service is `supported: false` with no eligibility at all,
- * rather than an eligibility that happens to pass. The product rule is "flex
- * any domain, escrow only what we can verify", and a verdict that could not
- * be reached must never render as one that was.
+ * Registry lookup plus eligibility rules. No RDAP means `supported: false` and no
+ * eligibility at all. A verdict we couldn't reach must never render as one that passed.
  */
 export async function checkRegistry(params: {
   domain: string
@@ -145,7 +125,7 @@ export async function checkRegistry(params: {
   }
 }
 
-/** Both oracles in one call, in parallel. What the add-a-domain flow needs. */
+/** Both oracles in parallel, for the add-a-domain flow. */
 export async function checkDomain(params: {
   domain: string
   pubkey: string

@@ -1,33 +1,20 @@
 /**
- * Chain data from an Esplora API, over plain HTTPS.
- *
- * Isomorphic: `fetch` only. Runs in a page and under Bun unchanged.
- *
- * Every endpoint used is public, read-only apart from broadcast, needs no key
- * or account, and answers with `Access-Control-Allow-Origin: *`. A static page
- * can therefore watch its own escrow and broadcast its own settlement with no
- * server of ours in the path.
- *
- * mempool.space is the default. Any Esplora instance, including a self-hosted
- * one, is a drop-in replacement: pass its base URL to `chainApi()`.
- *
- * The client reports what the node said. The one rule in this file is
- * `findFunding`; the transfer rules live in core/escrow.
+ * Esplora client over fetch. Endpoints are public, keyless and CORS-open, so a
+ * static page can watch its escrow and broadcast with no server of ours.
+ * Defaults to mempool.space. Any Esplora base URL works.
  */
 
 import type { NetworkName } from '../core/escrow/tree.js'
 
-/** Esplora base URLs by network: mempool.space, or a local Esplora for regtest. */
+/** Regtest expects a local Esplora. */
 export const CHAIN_APIS: Readonly<Record<NetworkName, string>> = Object.freeze({
   mainnet: 'https://mempool.space/api',
   signet: 'https://mempool.space/signet/api',
-  // The current test network is testnet4. testnet3 is largely abandoned and
-  // its faucets are unreliable.
+  // testnet4. testnet3 is mostly abandoned and its faucets are unreliable.
   testnet: 'https://mempool.space/testnet4/api',
   regtest: 'http://localhost:3002/api',
 })
 
-/** Block explorer base URLs, by network. */
 export const EXPLORERS: Readonly<Record<NetworkName, string>> = Object.freeze({
   mainnet: 'https://mempool.space',
   signet: 'https://mempool.space/signet',
@@ -58,11 +45,11 @@ export interface ChainTx {
   txid: string
   confirmed: boolean
   blockHeight?: number
-  /** The outputs, in index order. */
+  /** In output index order. */
   vout: { valueSats: bigint; scriptPubKey: string; address?: string }[]
 }
 
-/** Build a client for one network. `base` overrides the default endpoint. */
+/** `base` overrides the network's default endpoint. */
 export function chainApi(network: NetworkName, base = CHAIN_APIS[network]): ChainApi {
   const get = async (path: string): Promise<Response> =>
     fetch(`${base}${path}`, { credentials: 'omit', headers: { accept: 'application/json, text/plain' } })
@@ -90,9 +77,8 @@ export function chainApi(network: NetworkName, base = CHAIN_APIS[network]): Chai
       return body.map((u) => ({
         txid: u.txid,
         vout: u.vout,
-        // Esplora reports satoshis as a JSON number. No output comes near
-        // 2^53, so the value is exact; converting to BigInt here keeps every
-        // amount downstream in one type.
+        // Esplora sends a JSON number. Exact, since no output nears 2^53.
+        // BigInt from here keeps every amount in one type.
         valueSats: BigInt(u.value),
         confirmed: u.status.confirmed,
         blockHeight: u.status.block_height,
@@ -129,8 +115,7 @@ export function chainApi(network: NetworkName, base = CHAIN_APIS[network]): Chai
       })
       const text = (await response.text()).trim()
       if (!response.ok) {
-        // Esplora returns the node's own rejection text. Pass it through
-        // verbatim: it says more than any friendlier summary would.
+        // Pass the node's rejection text through as is. It beats any summary.
         return { ok: false, reason: text || `HTTP ${response.status}` }
       }
       return { ok: true, txid: text }
@@ -143,8 +128,7 @@ export function chainApi(network: NetworkName, base = CHAIN_APIS[network]): Chai
         const body = (await response.json()) as { halfHourFee?: number }
         return body.halfHourFee ?? 2
       } catch {
-        // Fallback when the fee endpoint fails: 10 sat/vB on mainnet, 2 on a
-        // test network, which is usually close to empty.
+        // Fee endpoint down. Guess 10 sat/vB on mainnet, 2 on quiet test networks.
         return network === 'mainnet' ? 10 : 2
       }
     },
@@ -152,14 +136,9 @@ export function chainApi(network: NetworkName, base = CHAIN_APIS[network]): Chai
 }
 
 /**
- * Is this escrow funded, and by which output?
- *
- * An escrow is funded when a single confirmed output pays the address at
- * least the agreed amount. Partial payments are not summed: the tree spends
- * outputs, and a multi-input settlement multiplies the signing work. The UI
- * says "one payment, one output", and this function enforces it.
- *
- * Overpayment is accepted, not treated as an error.
+ * Funded means one confirmed output pays the address at least the agreed
+ * amount. Partial payments are not summed, since a multi-input settlement
+ * multiplies the signing work. Overpaying is fine.
  */
 export function findFunding(
   utxos: readonly Utxo[],
@@ -192,7 +171,7 @@ export function findFunding(
     return { funded: false, candidates: paid, reason: 'the payment is in the mempool but not confirmed yet' }
   }
 
-  // Oldest first: if somebody paid twice, the first one funded the escrow.
+  // Oldest first. If somebody paid twice, the first payment funded the escrow.
   const chosen = [...confirmed].sort((a, b) => (a.blockHeight ?? Infinity) - (b.blockHeight ?? Infinity))[0]
   return { funded: true, utxo: chosen }
 }

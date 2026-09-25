@@ -1,28 +1,18 @@
 /**
- * NIP-65 relay lists and the outbox model.
- *
- * Pure: no sockets. net/outbox.ts does the fetching.
- *
- * Without NIP-65 the site would decide where every user's listings live: a
- * seller's inventory would be reachable only through relays the site picked,
- * and if those relays dropped it the market would go dark for everyone. With
- * it, a seller says where their events go and readers follow them there.
- *
- * The outbox rule:
+ * NIP-65 relay lists and the outbox model. Pure, net/outbox.ts does the fetching.
+ * Sellers say where their events live, so the market doesn't hang on relays the site picked.
  *
  *   publishing mine   -> my write relays
  *   reading theirs    -> their write relays   (not mine, not the defaults)
- *   mentioning them   -> their read relays
- *
- * The third is how a reply reaches someone.
+ *   mentioning them   -> their read relays    (how a reply reaches someone)
  */
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 
-/** NIP-65. Replaceable, so one list per key and it updates in place. */
+/** NIP-65. Replaceable, so one list per key. */
 export const RELAY_LIST_KIND = 10002
 
-/** One entry. Both false means nothing; NIP-65 reads an unmarked `r` as both. */
+/** NIP-65 reads an unmarked `r` as both. Both false means nothing. */
 export interface RelayEntry {
   url: string
   read: boolean
@@ -30,16 +20,9 @@ export interface RelayEntry {
 }
 
 /**
- * Canonical form for a relay URL.
- *
- * Relay URLs are compared constantly: deduplicating a pool, matching a hint
- * against a list, counting how many relays accepted an event.
- * `wss://Relay.Example/` and `wss://relay.example` are one relay, and treating
- * them as two opens twice the sockets and miscounts acceptances.
- *
- * Normalising lowercases the scheme and host, and drops a default port, a
- * trailing slash and any fragment. The path is kept with its case: some
- * relays route on it, and lowercasing it would point at a different endpoint.
+ * Canonical relay URL, so dedupe and acceptance counts see one relay per endpoint.
+ * Lowercases scheme and host, drops a default port, trailing slash and fragment.
+ * Path case is kept. Some relays route on it.
  */
 export function normaliseRelayUrl(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
@@ -65,7 +48,7 @@ export function normaliseRelayUrl(raw: unknown): string | undefined {
   return `${protocol}//${url.host.toLowerCase()}${path}${url.search}`
 }
 
-/** Build a kind 10002 event. An entry that is both read and write emits no marker. */
+/** Kind 10002. An entry that is both read and write gets no marker. */
 export function buildRelayList(params: {
   pubkey: string
   relays: readonly RelayEntry[]
@@ -80,18 +63,16 @@ export function buildRelayList(params: {
     if (!url) throw new Error(`buildRelayList: ${JSON.stringify(entry.url)} is not a relay URL`)
     if (seen.has(url)) continue
     seen.add(url)
-    if (!entry.read && !entry.write) continue // an entry that is neither says nothing
+    if (!entry.read && !entry.write) continue
     if (entry.read && entry.write) tags.push(['r', url])
     else tags.push(['r', url, entry.write ? 'write' : 'read'])
   }
 
-  // NIP-65 asks for a short list. Its length is not capped here, but a key
-  // that writes to thirty relays makes every reader open thirty sockets to
-  // find one event, the cost the outbox model exists to avoid.
+  // NIP-65 asks for a short list. Not capped here, but each relay costs every reader a socket.
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: RELAY_LIST_KIND, tags, content: '' }
 }
 
-/** Read a kind 10002 event. Unknown markers are ignored, not fatal. */
+/** An unknown marker counts as no marker: read and write. */
 export function parseRelayList(event: NostrEvent): RelayEntry[] {
   if (event.kind !== RELAY_LIST_KIND) return []
   const byUrl = new Map<string, RelayEntry>()
@@ -107,31 +88,22 @@ export function parseRelayList(event: NostrEvent): RelayEntry[] {
       write: marker !== 'read',
     }
     const existing = byUrl.get(url)
-    // A list naming one relay twice, once read and once write, means both.
+    // One relay listed once as read and once as write means both.
     byUrl.set(url, existing ? { url, read: existing.read || entry.read, write: existing.write || entry.write } : entry)
   }
   return [...byUrl.values()]
 }
 
 /**
- * How many relays to contact.
- *
- * Four for reading: enough that one dead relay does not lose an event, few
- * enough that a page with thirty listings on screen does not open two hundred
- * sockets. Publishing uses five, because durability matters more than latency
- * there.
+ * Read 4: survives a dead relay without a page of thirty listings opening two hundred sockets.
+ * Write 5: durability matters more than latency.
  */
 export const READ_FANOUT = 4
 export const WRITE_FANOUT = 5
 
 /**
- * A published list replaces the fallback; the defaults are not appended
- * behind it.
- *
- * Appending them would look harmless, but a user who chose one relay, a paid
- * relay or a relay inside their own network would still have their events
- * pushed to five public relays they did not pick. The fallback applies only
- * when the user's list names no relay for the purpose at hand.
+ * A user's list replaces the fallback, never gets it appended. Otherwise someone on a
+ * paid or private relay still gets pushed to public relays they didn't pick.
  */
 function preferOwn(own: readonly string[], fallback: readonly string[], max: number): string[] {
   const mine = dedupe(own.map(normaliseRelayUrl).filter(isUrl))
@@ -139,37 +111,25 @@ function preferOwn(own: readonly string[], fallback: readonly string[], max: num
   return dedupe(fallback.map(normaliseRelayUrl).filter(isUrl)).slice(0, max)
 }
 
-/** Where to publish my own events: my write relays, or the fallback if I have none. */
 export function writeRelaysFor(list: readonly RelayEntry[], fallback: readonly string[], max = WRITE_FANOUT): string[] {
   return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max)
 }
 
 /**
- * Where to find an author's events: their write relays.
- *
- * This is the rule people get backwards. To read Alice's listings, go where
- * Alice writes, not where Alice reads and not where you read. Getting it wrong
- * produces a marketplace that shows only the sellers who happen to use the
- * reader's relays.
+ * Where to read an author's events: their write relays, not their read relays or yours.
+ * Easy to get backwards, and then only sellers on the reader's relays show up.
  */
 export function readRelaysFor(list: readonly RelayEntry[], fallback: readonly string[], max = READ_FANOUT): string[] {
   return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max)
 }
 
-/** Where to reach someone who should see an event: their read relays. */
 export function inboxRelaysFor(list: readonly RelayEntry[], fallback: readonly string[], max = READ_FANOUT): string[] {
   return preferOwn(list.filter((r) => r.read).map((r) => r.url), fallback, max)
 }
 
 /**
- * Merge several authors' relays into one query plan.
- *
- * Querying each author on their own relays separately is correct and slow: ten
- * authors on four relays each is forty round trips, most of them to the same
- * handful of popular relays. Grouping by relay turns that into one filter per
- * relay carrying the authors that relay actually serves.
- *
- * Returns relay -> the authors to ask it about.
+ * Group authors by relay, relay -> authors to ask it about. One filter per relay
+ * beats per-author queries that keep hitting the same popular relays.
  */
 export function planAuthorQuery(
   lists: ReadonlyMap<string, readonly RelayEntry[]>,
@@ -188,12 +148,10 @@ export function planAuthorQuery(
   return plan
 }
 
-/** The filter that fetches relay lists for a set of keys, in one query. */
 export function relayListFilter(pubkeys: readonly string[]): Record<string, unknown> {
   return { kinds: [RELAY_LIST_KIND], authors: [...pubkeys] }
 }
 
-/** True when this event is the author's own relay list. */
 export function isOwnRelayList(event: NostrEvent, pubkey: string): boolean {
   return event.kind === RELAY_LIST_KIND && event.pubkey === pubkey && tagValue(event, 'd') === undefined
 }

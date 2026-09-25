@@ -1,9 +1,5 @@
-/**
- * Zaps, trade receipts and badges: the parts that can be gamed for money.
- *
- * Many tests below exercise one attack each. A zap counter or reputation score
- * that skips any of these checks gives a ranking that costs nothing to climb.
- */
+// Zaps, trade receipts and badges, the parts that can be gamed for money. Many tests are one
+// attack each. Skip any of these checks and the ranking costs nothing to climb.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -45,24 +41,20 @@ const key = (fill: number) => {
   const sk = new Uint8Array(32).fill(fill)
   return { sk, pk: bytesToHex(schnorr.getPublicKey(sk)) }
 }
-const ALICE = key(0x11)   // buyer
-const BOB = key(0x22)     // seller
-const PROVIDER = key(0x33) // the recipient's zapper service
+const ALICE = key(0x11)   // Buyer.
+const BOB = key(0x22)     // Seller.
+const PROVIDER = key(0x33) // Recipient's zapper service.
 const MALLORY = key(0x44)
 const NOW = 1789430400
 const LISTING = `30402:${BOB.pk}:fmd:listing:lumenary.com`
 
-// ---------------------------------------------------------------------------
-// zaps
-// ---------------------------------------------------------------------------
-
 describe('BOLT-11 amounts', () => {
   test('the multipliers are divisors of a bitcoin, not multiples of a sat', () => {
-    // The classic bug lands a thousandfold out. These are the BOLT-11 examples.
-    expect(bolt11AmountMsats('lnbc2500u1pvjluez')).toBe(250_000_000) // 0.0025 BTC
-    expect(bolt11AmountMsats('lnbc20m1pvjluez')).toBe(2_000_000_000) // 0.02 BTC
-    expect(bolt11AmountMsats('lnbc1u1p')).toBe(100_000) // 100 sats
-    expect(bolt11AmountMsats('lnbc100n1p')).toBe(10_000) // 10 sats
+    // BOLT-11's own examples. The classic bug is off by a factor of 1000.
+    expect(bolt11AmountMsats('lnbc2500u1pvjluez')).toBe(250_000_000) // 0.0025 BTC.
+    expect(bolt11AmountMsats('lnbc20m1pvjluez')).toBe(2_000_000_000) // 0.02 BTC.
+    expect(bolt11AmountMsats('lnbc1u1p')).toBe(100_000) // 100 sats.
+    expect(bolt11AmountMsats('lnbc100n1p')).toBe(10_000) // 10 sats.
   })
 
   test('testnet and regtest prefixes parse', () => {
@@ -71,7 +63,7 @@ describe('BOLT-11 amounts', () => {
   })
 
   test('an amountless invoice is undefined, not zero', () => {
-    // "any amount" cannot be counted: nothing says what was paid.
+    // Nothing says what an "any amount" invoice paid.
     expect(bolt11AmountMsats('lnbc1pabcdef')).toBeUndefined()
     expect(bolt11AmountMsats('not an invoice')).toBeUndefined()
   })
@@ -140,7 +132,7 @@ describe('zap receipts', () => {
   })
 
   test('a request that claims more than the invoice pays is refused', () => {
-    // The request says 1,000,000 msats; the invoice is for 100,000.
+    // Request says 1,000,000 msats, invoice pays 100,000.
     const { receipt } = zapPair({ amountMsats: 1_000_000, invoice: 'lnbc1u1pfake' })
     const r = verifyZapReceipt({ receipt, recipient: BOB.pk, expectedProvider: PROVIDER.pk })
     expect(r.ok).toBe(false)
@@ -218,10 +210,6 @@ test('the zap filter narrows by coordinate and recipient', () => {
     since: NOW,
   })
 })
-
-// ---------------------------------------------------------------------------
-// trade receipts
-// ---------------------------------------------------------------------------
 
 describe('trade receipts', () => {
   const TXID = 'a'.repeat(64)
@@ -312,12 +300,12 @@ describe('trade receipts', () => {
       receiptOf(ALICE, 'buyer', BOB.pk, { transferSnapshot: undefined }),
       receiptOf(BOB, 'seller', ALICE.pk, { transferSnapshot: undefined }),
     ])
-    expect(trades[0].mutual).toBe(true) // it is a real, agreeing pair
-    expect(countsTowardReputation(trades[0])).toBe(false) // and it still counts for nothing
+    expect(trades[0].mutual).toBe(true) // Real, agreeing pair.
+    expect(countsTowardReputation(trades[0])).toBe(false) // Still counts for nothing.
 
     const summary = summariseTrades(trades, ALICE.pk)
     expect(summary.verified).toBe(0)
-    expect(summary.unweighted).toBe(1) // shown, never hidden
+    expect(summary.unweighted).toBe(1) // Shown, never hidden.
   })
 
   test('ten trades with one partner is one relationship', () => {
@@ -348,10 +336,6 @@ describe('trade receipts', () => {
     ])
   })
 })
-
-// ---------------------------------------------------------------------------
-// badges
-// ---------------------------------------------------------------------------
 
 describe('badges', () => {
   const definition = signEvent(
@@ -384,14 +368,14 @@ describe('badges', () => {
   })
 
   test('a badge you were never awarded does not verify', () => {
-    // Mallory publishes a 30008 naming Bob's award. It is a valid event.
+    // Mallory's valid 30008 names Bob's award.
     const profile = signEvent(
       buildProfileBadges({ pubkey: MALLORY.pk, badges: [{ definition: coordinate, awardId: award.id }], createdAt: NOW }),
       MALLORY.sk,
       AUX,
     )
-    expect(parseProfileBadges(profile)).toHaveLength(1) // it claims one
-    expect(verifiedBadges({ pubkey: MALLORY.pk, profile, awards: [award] })).toEqual([]) // and it backs none
+    expect(parseProfileBadges(profile)).toHaveLength(1) // Claims one.
+    expect(verifiedBadges({ pubkey: MALLORY.pk, profile, awards: [award] })).toEqual([]) // Backs none.
   })
 
   test("an award of somebody else's badge does not verify", () => {
@@ -405,7 +389,7 @@ describe('badges', () => {
       MALLORY.sk,
       AUX,
     )
-    // The definition belongs to Alice; Mallory cannot issue it.
+    // Alice owns the definition, so Mallory can't issue it.
     expect(verifiedBadges({ pubkey: MALLORY.pk, profile, awards: [forged] })).toEqual([])
   })
 
@@ -433,11 +417,8 @@ describe('badges', () => {
 
 describe('a market "Feature" payment reaches the flex board', () => {
   /*
-   * The flex board counts zaps by domain and drops any zap with no `fmd_flex`
-   * tag, so a feature zap carrying only the listing's `a` coordinate would be
-   * paid for and never appear. The market page must pass flexDomain too.
-   * These two tests pin both halves: without flexDomain the zap is dropped,
-   * with it the zap counts.
+   * The flex board drops zaps with no `fmd_flex` tag, so a feature zap with only the listing's
+   * `a` coordinate would be paid for and never appear. The market page must pass flexDomain too.
    */
   const receiptFor = (withFlex: boolean) => {
     const request = signEvent(

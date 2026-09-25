@@ -1,19 +1,8 @@
 /**
- * The flexmydomain domain proof. spec/PROOF.md is normative: where this file
- * disagrees with it, this file has the bug.
- *
- * Pure: a caller that wants a freshness check passes `now` in. Resolving the
- * record (DoH through two providers) happens in net/, which calls into here.
- *
- * A proof binds a domain to a key. The key signs a message naming the domain,
- * so the record cannot be copied to another name or claimed by another key.
- * The signature is over the id of a canonical NIP-01 event rather than over
- * the bare message, because a NIP-07 extension exposes only `signEvent`;
- * signing a bare string would mean pasting a private key into a web page. The
- * record alone rebuilds that event (its pubkey, its `iat` as created_at, a
- * fixed kind, and a `d` tag and content derived from the domain), so the proof
- * stays self-contained. Published to relays, the same event and signature
- * prove the claim on Nostr as well as in DNS.
+ * Domain proof. spec/PROOF.md is normative, the spec wins if they disagree.
+ * The key signs the id of a canonical NIP-01 event naming the domain, since NIP-07
+ * only exposes `signEvent`. The TXT record alone rebuilds that event, and the same
+ * event and signature can be published to relays. No network here, net/ resolves.
  */
 
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -29,26 +18,21 @@ import {
 } from '../nostr/event.js'
 import { normaliseDomain, tryNormaliseDomain } from './domain.js'
 
-/** The record's version field. A verifier rejects every other value. */
+/** TXT record version. Anything else is rejected. */
 export const PROOF_VERSION = 'fmd1'
 
-/** The message's version, inside the signed content. Bumped with the format. */
+/** Signed message version. Bump with the format. */
 export const PROOF_MESSAGE_PREFIX = 'flexmydomain:v1'
 
-/**
- * NIP-78 application data. Addressable, so re-proving a domain replaces the
- * previous event instead of adding another, and a relay holds one current
- * proof per domain per key.
- */
+/** NIP-78 app data. Addressable, so a relay keeps one current proof per domain per key. */
 export const PROOF_KIND = 30078
 
-/** The `d` tag prefix, in the project's `fmd:` namespace. */
 export const PROOF_D_PREFIX = 'fmd:proof:'
 
-/** spec section 3, "Freshness": a clock-skew guard, not an expiry. */
+/** Clock-skew guard, not an expiry (spec section 3, "Freshness"). */
 export const MAX_CLOCK_SKEW_SECONDS = 300
 
-/** A parsed record. Every field is already syntactically checked. */
+/** Fields already shape-checked. */
 export interface ProofRecord {
   version: string
   iat: number
@@ -56,28 +40,20 @@ export interface ProofRecord {
   sig: string
 }
 
-/** The addressable `d` tag for one domain's proof. */
 export function proofDTag(domain: string): string {
   return PROOF_D_PREFIX + normaliseDomain(domain)
 }
 
 /**
- * The signed message (spec section 2).
- *
- * It binds the domain, so a record copied into another zone does not verify,
- * and the timestamp, so a reader can apply a freshness policy. It carries no
- * nonce from us on purpose: a challenge code we issued would make this a
- * claim only we could check.
+ * Signed message (spec section 2). Binds the domain, so a copied record fails, and
+ * the time, for freshness. No nonce from us, or only we could check the claim.
  */
 export function proofMessage(domain: string, iat: number): string {
   assertIat(iat)
   return `${PROOF_MESSAGE_PREFIX}:${normaliseDomain(domain)}:${iat}`
 }
 
-/**
- * The canonical proof event, fully determined by (domain, pubkey, iat). No
- * field may depend on anything a verifier cannot rebuild.
- */
+/** Fully determined by (domain, pubkey, iat). A verifier must be able to rebuild every field. */
 export function proofEvent(params: { domain: string; pubkey: string; iat: number }): UnsignedEvent {
   const domain = normaliseDomain(params.domain)
   if (!isHex32(params.pubkey)) {
@@ -93,22 +69,17 @@ export function proofEvent(params: { domain: string; pubkey: string; iat: number
   }
 }
 
-/** What the signature covers: sha256 of that event's NIP-01 serialisation. */
+/** What the signature covers, sha256 of the event's NIP-01 serialisation. */
 export function proofDigest(params: { domain: string; pubkey: string; iat: number }): Uint8Array {
   return eventDigest(proofEvent(params))
 }
 
-/** The same, as hex: the proof event's `id` if it is published. */
+/** Equals the event `id` once published. */
 export function proofDigestHex(params: { domain: string; pubkey: string; iat: number }): string {
   return bytesToHex(proofDigest(params))
 }
 
-/**
- * Render a record for a registrar's DNS panel.
- *
- * One token, no spaces, 209 characters (spec section 1). A generator emits
- * only the `.`-joined form.
- */
+/** TXT value for a registrar panel. One `.`-joined token, 209 characters (spec section 1). */
 export function encodeProofRecord(record: ProofRecord): string {
   if (record.version !== PROOF_VERSION) {
     throw new Error(`encodeProofRecord: refusing to emit version ${JSON.stringify(record.version)}`)
@@ -120,23 +91,14 @@ export function encodeProofRecord(record: ProofRecord): string {
 }
 
 /**
- * Parse one TXT value.
- *
- * Liberal on input (spec section 1). A value has usually passed through a
- * registrar's panel and a resolver's JSON, so it may be quoted, split into
- * several character-strings, space-joined instead of dot-joined, or
- * upper-cased. None of that changes the claim, and rejecting a correct record
- * over a stray quote would make nothing safer.
- *
- * Still rejected: a wrong version, a wrong field count, or a field that does
- * not have the shape spec section 1 gives it.
+ * Liberal on input (spec section 1). Registrar panels and resolver JSON add quotes,
+ * split strings, swap dots for spaces or upper-case it, and none of that changes
+ * the claim. Version, field count and field shapes stay strict.
  */
 export function parseProofRecord(raw: unknown): { ok: true; record: ProofRecord } | { ok: false; reason: string } {
   if (typeof raw !== 'string') return { ok: false, reason: 'not a string' }
 
-  // Resolvers return multi-string TXT RDATA in several shapes: `"a" "b"`,
-  // `a b`, or already concatenated. Drop the quotes, then treat runs of
-  // whitespace and dots alike as separators.
+  // Multi-string RDATA arrives as `"a" "b"`, `a b` or already concatenated.
   const cleaned = raw.trim().replace(/"/g, '').trim()
   if (cleaned === '') return { ok: false, reason: 'empty' }
 
@@ -160,22 +122,18 @@ export function parseProofRecord(raw: unknown): { ok: true; record: ProofRecord 
   return { ok: true, record: { version, iat, pubkey, sig } }
 }
 
-/** One record's verdict, with enough detail for the UI to explain itself. */
 export interface ProofVerification {
   ok: boolean
   reason?: string
   record?: ProofRecord
-  /** Seconds between `iat` and the `now` the caller supplied. */
+  /** `now - iat`, only when `now` was given. */
   ageSeconds?: number
 }
 
 /**
- * Verify one record against a domain and a pubkey.
- *
- * `now` is optional. When given, it applies only the clock-skew guard of spec
- * section 3: a record dated in the future is rejected, an old one is not. A
- * proof does not become false with age: if the record is still in the zone,
- * the claimant still controls it. The age is reported, and the reader decides.
+ * `now` only enables the clock-skew guard (spec section 3). Future-dated records
+ * fail. Old ones pass, since a record still in the zone still proves control.
+ * Age is reported for the reader to judge.
  */
 export function verifyProofRecord(params: {
   domain: string
@@ -197,8 +155,8 @@ export function verifyProofRecord(params: {
   }
 
   if (record.pubkey !== params.pubkey) {
-    // Not a failure of the zone (spec section 3, step 3.3): a domain may carry
-    // proofs for several keys at once, as it does during a handover.
+    // Not a zone failure. A domain can hold proofs for several keys during a
+    // handover (spec section 3, step 3.3).
     return { ok: false, reason: 'record is for a different pubkey', record }
   }
 
@@ -221,15 +179,9 @@ export function verifyProofRecord(params: {
 }
 
 /**
- * Verify a whole RRset, which is what a resolver returns.
- *
- * Per spec section 3, step 4, the domain is proven if at least one record
- * verifies, and a malformed or non-matching record is skipped rather than
- * fatal. Zones accumulate junk, and a stale proof for a previous owner beside a
- * valid one must not break the valid one.
- *
- * When several verify, the newest wins, so the reported age is that of the
- * best evidence rather than of whichever record the resolver listed first.
+ * Verify a whole RRset (spec section 3, step 4). One good record proves the domain.
+ * Junk and stale proofs from past owners are skipped. The newest valid record wins,
+ * so the reported age is the best evidence.
  */
 export function verifyProofRecords(params: {
   domain: string
@@ -257,15 +209,9 @@ export function verifyProofRecords(params: {
 }
 
 /**
- * Verify a proof that arrived as a published event rather than from DNS.
- *
- * It checks that the event is the canonical proof event for its domain (same
- * kind, `d` tag, content and created_at) before trusting any field of it. An
- * event that only looks like a proof proves nothing; only the one whose id the
- * signature covers does.
- *
- * The caller still has to resolve the TXT record: this says "this key signed a
- * proof for this domain", and DNS says "the zone agrees".
+ * Verify a proof published as a Nostr event. It must match the canonical proof event
+ * exactly before any field is trusted. This only shows the key signed a claim, and
+ * the caller still needs the TXT record for the zone's side.
  */
 export function proofFromEvent(event: NostrEvent): { ok: true; domain: string; record: ProofRecord } | { ok: false; reason: string } {
   if (event.kind !== PROOF_KIND) return { ok: false, reason: `kind ${event.kind} is not ${PROOF_KIND}` }
@@ -299,12 +245,8 @@ export function proofFromEvent(event: NostrEvent): { ok: true; domain: string; r
 }
 
 /**
- * Produce a proof with a {@link Signer}. This works with a NIP-07 extension,
- * and it is the only way the UI should create a proof.
- *
- * Returns both artefacts: the TXT value to paste and the signed event to
- * publish. They carry the same signature, so a verifier reaches the same
- * conclusion from either.
+ * The only way the UI should make a proof. Works with a NIP-07 {@link Signer}.
+ * The TXT value and the signed event share one signature and verify alike.
  */
 export async function createProof(params: {
   domain: string
@@ -316,10 +258,8 @@ export async function createProof(params: {
   const unsigned = proofEvent({ domain, pubkey, iat: params.iat })
   const event = await params.signer.signEvent(unsigned)
 
-  // Check what the signer returns: an extension may sign under a different
-  // pubkey than it reported, or alter created_at. Either would produce a TXT
-  // record that never verifies, found days later when a buyer reports the
-  // listing as unproven.
+  // Extensions may sign with another pubkey than reported, or change created_at.
+  // Catch it here, not days later when a buyer flags the listing as unproven.
   const check = proofFromEvent(event)
   if (!check.ok) throw new Error(`createProof: the signer returned an event that does not verify: ${check.reason}`)
   if (check.domain !== domain) throw new Error('createProof: the signer changed the domain')

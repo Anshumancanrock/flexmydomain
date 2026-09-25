@@ -1,3 +1,2 @@
-// Types for ./config.js, which stays plain JavaScript so it can be edited
-// without a build.
+// config.js stays plain JS so operators can edit it without a build.
 export * from '../assets/config.js'

@@ -1,8 +1,6 @@
 /**
- * Serve web/ for local development: `bun run serve`, or `bun run serve -p 3000`.
- *
- * Nothing is cached, so an edited file shows on the next reload. Only
- * 127.0.0.1 is bound; this is not a production server.
+ * Local dev server for web/: `bun run serve [-p 3000]`. No caching, so edits
+ * show on reload. Binds 127.0.0.1 only. Not for production.
  */
 import { join, normalize } from 'node:path'
 
@@ -18,8 +16,7 @@ Bun.serve({
   async fetch(request) {
     let path: string
     try {
-      // normalize() on an absolute path cannot climb above it, so the result
-      // always stays inside web/.
+      // normalize() can't climb above an absolute path, so this stays inside web/.
       path = normalize(decodeURIComponent(new URL(request.url).pathname))
     } catch {
       return new Response('bad request', { status: 400, headers })

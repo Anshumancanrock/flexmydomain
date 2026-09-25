@@ -1,13 +1,5 @@
-/**
- * Following a domain transfer (core/escrow/transfer.ts).
- *
- * These are the rules that decide whether money is released, derived from
- * public RDAP observations and nothing else. Each test below is a way a real
- * sale goes wrong: a registry that lags, a cached answer read twice, a
- * transfer that completes and is then reversed, a fetch that failed.
- *
- * The rule under test throughout: nothing moves on one observation.
- */
+// Transfer tracking (core/escrow/transfer.ts). These rules release money from public RDAP
+// observations alone, and nothing moves on one observation. Each test is a way a real sale goes wrong.
 
 import { test, expect, describe } from 'bun:test'
 import {
@@ -25,14 +17,13 @@ import { parseRdapDomain } from '../../core/oracle/index.ts'
 const NOW = 1789430400
 const HALF_HOUR = MIN_POLL_GAP_SECONDS
 
-/** The buyer will receive the name at registrar 292, on their nameservers. */
+/** Buyer receives the name at registrar 292, on their nameservers. */
 const COMMITMENT = buildCommitment({
   registrarIanaId: '292',
   nameservers: ['ns1.buyer.example', 'ns2.buyer.example'],
   committedAt: NOW - 86400,
 })
 
-/** An RDAP response shaped like the real thing. */
 function rdap(over: Record<string, unknown> = {}) {
   return parseRdapDomain({
     objectClassName: 'domain',
@@ -64,15 +55,13 @@ const obs = (facts: ReturnType<typeof rdap>, at: number) => ({
 const derive = (observations: ReturnType<typeof obs>[]) =>
   deriveTransferState({ observations, commitment: COMMITMENT, now: NOW })
 
-// ---------------------------------------------------------------------------
-
 describe('the two-poll rule', () => {
   test('one observation confirms nothing, however clear it looks', () => {
     const v = derive([obs(MOVED(), NOW - 60)])
     expect(v.confirmed).toBe(false)
     expect(v.state).toBe('unknown')
     expect(releasable(v)).toBe(false)
-    // and it says what it saw, so a UI can show "probably, checking again"
+    // It still says what it saw, so a UI can show "probably, checking again".
     expect(v.reason).toContain('transferred')
   })
 
@@ -117,16 +106,16 @@ describe('the states, in the order a sale goes through them', () => {
     const v = derive(observations)
     expect(v.state).toBe('unlocked')
     expect(transferAllowed(v)).toBe(true)
-    // Never seen locked, so nobody has shown registrar control: not fundable.
+    // Never seen locked, so nobody has shown registrar control.
     expect(fundable({ verdict: v, observations, commitment: COMMITMENT })).toBe(false)
-    expect(releasable(v)).toBe(false) // nothing has moved yet
+    expect(releasable(v)).toBe(false) // Nothing has moved yet.
   })
 
   test('pending: the point of no return, but not payable', () => {
     const v = derive([obs(PENDING(), NOW - 9000), obs(PENDING(), NOW - 60)])
     expect(v.state).toBe('pending')
     expect(transferAllowed(v)).toBe(true)
-    // A transfer in flight can still fail, be rejected, or be reversed.
+    // In flight it can still fail or be reversed.
     expect(releasable(v)).toBe(false)
   })
 
@@ -137,7 +126,7 @@ describe('the states, in the order a sale goes through them', () => {
   })
 
   test('a re-locked domain at the new registrar is still transferred', () => {
-    // Most registrars lock a name the moment it lands. That is not a failure.
+    // Most registrars lock a name the moment it lands.
     const relocked = () =>
       parseRdapDomain({
         ldhName: 'lumenary.com',
@@ -165,7 +154,7 @@ describe('reversal, the case the arbiter exists for', () => {
   })
 
   test('one later poll disagreeing is not a reversal', () => {
-    // A single stale or cached answer must not undo a confirmed transfer.
+    // Could be one stale cached answer.
     const v = derive([obs(MOVED(), NOW - 40000), obs(MOVED(), NOW - 36000), obs(UNLOCKED(), NOW - 60)])
     expect(v.state).toBe('transferred')
     expect(releasable(v)).toBe(true)
@@ -194,7 +183,7 @@ describe('the fingerprint commitment', () => {
   })
 
   test('a same-registrar push is caught by the nameservers instead', () => {
-    // The registrar id never moves, so only the other fingerprint can show it.
+    // The registrar id stays put, so only the nameservers can show it.
     const pushed = () =>
       parseRdapDomain({
         ldhName: 'lumenary.com',
@@ -248,10 +237,6 @@ describe('failures are not observations', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// the registrant check: funding waits for the lock to be seen changing
-// ---------------------------------------------------------------------------
-
 describe('the registrant check: only a change to the lock shows who holds the account', () => {
   const acted = (observations: ReturnType<typeof obs>[]) => registrantActed({ observations, commitment: COMMITMENT })
   const gate = (observations: ReturnType<typeof obs>[]) =>
@@ -283,9 +268,9 @@ describe('the registrant check: only a change to the lock shows who holds the ac
 
   test('a transfer already in flight before funding is not fundable: someone else is moving it', () => {
     const o = [obs(LOCKED(), NOW - 3 * H), obs(LOCKED(), NOW - 2 * H), obs(PENDING(), NOW - H), obs(PENDING(), NOW)]
-    expect(acted(o).acted).toBe(true) // the lock did change, and pending shows it off
-    expect(transferAllowed(derive(o))).toBe(true) // the name is moving
-    expect(gate(o)).toBe(false) // but not to anyone who has paid
+    expect(acted(o).acted).toBe(true) // The lock did change, pending shows it off.
+    expect(transferAllowed(derive(o))).toBe(true) // The name is moving.
+    expect(gate(o)).toBe(false) // But not to anyone who has paid.
   })
 
   test('one locked reading is not a confirmed lock: it could be a stale cache', () => {

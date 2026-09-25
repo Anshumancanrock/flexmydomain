@@ -1,15 +1,12 @@
 /**
- * buildTree(): the taproot script tree of an escrow.
+ * buildTree(): the escrow's taproot script tree, with or without an arbiter,
+ * timeout paying the buyer (stage 1) or the seller (stage 2, domain moving).
+ * The 2-leaf tree relies on that flip. With no arbiter, only a seller-paid
+ * timeout stops a buyer who already has the domain from waiting it out and
+ * taking the money back.
  *
- * One function builds all four variants: with or without an arbiter, and with
- * the timeout leaf paying the buyer (stage 1) or the seller (stage 2, once the
- * domain is moving). The two-leaf tree depends on that flip: with no arbiter,
- * only a timeout that pays the seller stops a buyer who already has the domain
- * from waiting it out and taking the money back.
- *
- * BIP-341 is implemented here over @noble primitives, without
- * @scure/btc-signer, so test/vectors/escrow.test.ts compares two independent
- * derivations.
+ * BIP-341 over @noble directly, no @scure/btc-signer, so
+ * test/vectors/escrow.test.ts compares two independent derivations.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -35,10 +32,6 @@ import {
   XONLY_PUBKEY_BYTES,
 } from './script.js'
 
-// ---------------------------------------------------------------------------
-// types
-// ---------------------------------------------------------------------------
-
 export type PartyRole = 'buyer' | 'seller' | 'arbiter'
 export type TimeoutTo = 'buyer' | 'seller'
 export type LeafName = 'A' | 'B' | 'C' | 'D'
@@ -47,37 +40,34 @@ export type TreeShape = 'arbiter-4leaf' | 'no-arbiter-2leaf'
 export type NetworkName = 'mainnet' | 'testnet' | 'signet' | 'regtest'
 
 export interface BuildTreeParams {
-  /** 32-byte x-only (BIP-340) pubkey. Required. */
+  /** 32-byte x-only pubkeys. */
   buyer: Uint8Array
-  /** 32-byte x-only (BIP-340) pubkey. Required. */
   seller: Uint8Array
-  /** 32-byte x-only (BIP-340) pubkey. Omit for the two-leaf, no-arbiter tree. */
+  /** Omit for the 2-leaf, no-arbiter tree. */
   arbiter?: Uint8Array
-  /** Who the timeout leaf pays: the buyer in stage 1, the seller in stage 2. */
+  /** Buyer in stage 1, seller in stage 2. */
   timeoutTo: TimeoutTo
-  /** Relative timelock in blocks, 1..65535. Project values: 1008 / 2016 / 4320. */
+  /** Relative lock in blocks, 1..65535. We use 1008/2016/4320. */
   timeoutBlocks: number
 }
 
 export interface EscrowLeaf {
   name: LeafName
   role: LeafRole
-  /** The exact bytes committed to by the tree. */
   script: Uint8Array
   leafVersion: number
-  /** tagged_hash("TapLeaf", version || compact_size(|s|) || s) */
   hash: Uint8Array
-  /** Sibling hashes, leaf to root. Not sorted: the sort happens inside TapBranch. */
+  /** Sibling hashes, leaf to root. Unsorted, TapBranch sorts each pair. */
   merklePath: Uint8Array[]
-  /** (leafVersion | parity) || internal key || merklePath. 33 + 32*depth bytes. */
+  /** (leafVersion | parity) || internal key || merklePath, 33 + 32*depth bytes. */
   controlBlock: Uint8Array
-  /** The parties whose keys appear in the script, in script order. */
+  /** In script order. */
   scriptKeyOrder: PartyRole[]
-  /** The parties' signatures in witness order, bottom of stack first. */
+  /** Witness order, bottom of stack first. */
   signatureOrder: PartyRole[]
-  /** The whole witness stack as labels, bottom of stack first. */
+  /** Whole witness as labels, bottom of stack first. */
   witnessStack: string[]
-  /** nSequence the spending input must carry for this leaf. */
+  /** nSequence the spending input must carry. */
   sequence: number
 }
 
@@ -87,17 +77,14 @@ export interface BranchStep {
 }
 
 /**
- * Every container here is frozen: the tree, its params echo, leaves, leafList,
- * branches, addresses, and each leaf's merklePath, key orders and witness
- * stack. The Uint8Arrays cannot be (Object.freeze() on a typed array throws),
- * so their contents are read-only by contract. Copy before mutating: an
- * in-place write to a leaf script, an output key or the params echo makes the
- * tree disagree with the address it was derived for, and a page displaying the
- * derivation cannot detect it.
+ * Every container is frozen. The Uint8Arrays can't be (freezing a typed array
+ * throws), so they're read-only by contract. Copy before mutating. A write to a
+ * leaf script, the output key or params makes the tree disagree with its
+ * address, and a page showing the derivation can't tell.
  */
 export interface EscrowTree {
   shape: TreeShape
-  /** Echo of the validated inputs, so an auditor need not trust the caller. */
+  /** Validated inputs, so an auditor needn't trust the caller. */
   params: {
     buyer: Uint8Array
     seller: Uint8Array
@@ -105,70 +92,58 @@ export interface EscrowTree {
     timeoutTo: TimeoutTo
     timeoutBlocks: number
   }
-  /** Leaves keyed by name. Never index a leaf list by position. */
+  /** Keyed by name. Never index leaves by position. */
   leaves: { A: EscrowLeaf; B?: EscrowLeaf; C?: EscrowLeaf; D: EscrowLeaf }
-  /** The same leaves in canonical A,B,C,D order, for iteration. */
+  /** Same leaves in A,B,C,D order. */
   leafList: EscrowLeaf[]
-  /** Every intermediate branch hash, in the order they are combined. */
+  /** Intermediate branch hashes in combine order. */
   branches: BranchStep[]
   merkleRoot: Uint8Array
-  /** The BIP-341 NUMS point. There is no key path. */
+  /** BIP-341 NUMS point. No key path. */
   internalKey: Uint8Array
-  /** t = tagged_hash("TapTweak", internal || root), as bytes. */
+  /** t = tagged_hash("TapTweak", internal || root). */
   tweak: Uint8Array
-  /** x(Q) where Q = lift_x(internal) + t*G. */
+  /** x(Q), Q = lift_x(internal) + t*G. */
   outputKey: Uint8Array
-  /** y-parity of Q. Carried in control-block byte 0, not in the address. */
+  /** y-parity of Q. Goes in control-block byte 0, not the address. */
   parity: 0 | 1
-  /** OP_1 OP_PUSHBYTES_32 <outputKey>. Network-independent, 34 bytes. */
+  /** OP_1 OP_PUSHBYTES_32 <outputKey>, 34 bytes, any network. */
   scriptPubKey: Uint8Array
-  /** Every control block in this tree is this many bytes: 97 for 4 leaves, 65 for 2. */
+  /** Same for every leaf: 97 bytes with 4 leaves, 65 with 2. */
   controlBlockLength: number
-  /** bech32m for every network. testnet and signet are the same string by design. */
+  /** bech32m per network. testnet and signet are the same string. */
   addresses: Record<NetworkName, string>
-  /** Required nVersion of any spending transaction. BIP-68 needs 2. */
+  /** Spends need nVersion 2 for BIP-68. */
   txVersion: 2
 }
 
-// ---------------------------------------------------------------------------
-// constants
-// ---------------------------------------------------------------------------
-
 /**
- * The BIP-341 NUMS point, derived here rather than pasted so a reader can see
- * why it is unspendable: its x-coordinate is the SHA-256 of the fixed, public
- * bytes of the uncompressed generator, so nobody chose it and nobody knows its
- * discrete log. Anyone can recompute it in one hash and confirm no key path
- * exists. That check is the reason for using the bare point rather than one
- * offset by a random r*G, which would add a little privacy.
- *
- * The hash is over the uncompressed (65-byte, 0x04-prefixed) generator.
- * Hashing the compressed form gives a different, wrong point.
+ * BIP-341 NUMS point, derived so a reader can check it. x is SHA-256 of the
+ * uncompressed generator (65 bytes, 0x04 prefix), so nobody chose it or knows
+ * its discrete log, and one hash confirms there's no key path. That check is
+ * why we skip the r*G offset, which would add a little privacy. Hashing the
+ * compressed G gives a wrong point.
  */
 const NUMS_BYTES: Uint8Array = sha256(secp256k1.Point.BASE.toBytes(false))
 
 /**
- * Returns a fresh copy on every call. A shared exported Uint8Array could be
- * overwritten by any consumer, corrupting every later address derivation in
- * the process; @scure/btc-signer deprecated its TAPROOT_UNSPENDABLE_KEY export
+ * Fresh copy per call. A shared exported array could be overwritten and corrupt
+ * every later derivation. @scure/btc-signer deprecated TAPROOT_UNSPENDABLE_KEY
  * for the same reason.
  */
 export function numsInternalKey(): Uint8Array {
   return Uint8Array.from(NUMS_BYTES)
 }
 
-/** The published BIP-341 value, kept so the tests can pin the derivation to it. */
+/** Published BIP-341 value. Tests pin the derivation to it. */
 export const NUMS_INTERNAL_KEY_HEX =
   '50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0'
 
 const CURVE_ORDER: bigint = secp256k1.Point.Fn.ORDER
 
 /**
- * bech32 human-readable parts. Signet uses testnet's `tb`.
- *
- * Frozen because it is read at derivation time: a writable table would let any
- * consumer in the process relabel every address this module produces, showing
- * a mainnet escrow as `tb1...` or the reverse.
+ * bech32 HRPs. Signet uses testnet's `tb`. Frozen since a writable table could
+ * relabel every address, showing a mainnet escrow as `tb1...` or the reverse.
  */
 export const NETWORK_HRP: Readonly<Record<NetworkName, string>> = Object.freeze({
   mainnet: 'bc',
@@ -176,10 +151,6 @@ export const NETWORK_HRP: Readonly<Record<NetworkName, string>> = Object.freeze(
   signet: 'tb',
   regtest: 'bcrt',
 })
-
-// ---------------------------------------------------------------------------
-// small pure helpers
-// ---------------------------------------------------------------------------
 
 function bytesToNumberBE(b: Uint8Array): bigint {
   let n = 0n
@@ -198,38 +169,28 @@ function numberToBytesBE(n: bigint, length: number): Uint8Array {
   return out
 }
 
-/** Defensive copy, so a caller mutating its input cannot change the returned tree. */
+/** Defensive copy, so later writes by the caller can't reach the tree. */
 function copy(b: Uint8Array): Uint8Array {
   return Uint8Array.from(b)
 }
 
 /**
- * Freeze in place, keeping the declared type.
- *
- * `Object.freeze(xs)` widens a `T[]` to `readonly T[]`, which does not fit the
- * interface; returning the original binding keeps the type. Only called on
- * containers: freezing a non-empty Uint8Array throws in both V8 and JSC, which
- * is why EscrowTree documents its byte arrays as read-only by contract.
+ * Freeze and return the same binding, keeping `T[]` (Object.freeze would widen
+ * it to readonly). Containers only, freezing a non-empty Uint8Array throws.
  */
 function freezeInPlace<T>(value: T): T {
   Object.freeze(value)
   return value
 }
 
-// ---------------------------------------------------------------------------
-// validation
-// ---------------------------------------------------------------------------
-
 /**
- * No library downstream repeats these checks. @scure/btc-signer does not
- * recognise the `<n> CSV DROP <key> CHECKSIG` leaf, so building this tree with
- * it needs allowUnknownOutputs=true, which turns off its leaf sanity checks for
- * the whole tree (including "unspendable key in leaf script"). It also accepts
- * two identical leaves.
+ * Nothing downstream repeats these checks. @scure/btc-signer doesn't know our
+ * CSV/DROP leaf and needs allowUnknownOutputs=true, which turns off its leaf
+ * checks for the whole tree. It also accepts duplicate leaves.
  *
- * A bad key fails silently and expensively: buyer === seller turns leaf A into
- * a single-signer path that one party can drain alone, and a truncated or
- * off-curve key gives a fundable address whose leaf can never be satisfied.
+ * A bad key fails quietly and costs money. buyer === seller makes leaf A
+ * single-signer, and a truncated or off-curve key gives a fundable address
+ * whose leaf can never be satisfied.
  */
 function validatePubkey(name: string, key: unknown): Uint8Array {
   if (!(key instanceof Uint8Array)) {
@@ -240,8 +201,7 @@ function validatePubkey(name: string, key: unknown): Uint8Array {
       `${name}: expected a ${XONLY_PUBKEY_BYTES}-byte x-only pubkey, got ${key.length} bytes`,
     )
   }
-  // lift_x is the BIP-340 even-Y lift. It rejects x >= p and any x that is not
-  // on the curve; a key that fails it can never produce a signature.
+  // BIP-340 lift_x rejects x >= p and off-curve x. Such a key can never sign.
   try {
     schnorr.utils.lift_x(bytesToNumberBE(key))
   } catch (cause) {
@@ -260,17 +220,11 @@ function typeofDescription(v: unknown): string {
 }
 
 /**
- * The only parameters buildTree accepts.
- *
- * Leaving out `arbiter` swaps the four-leaf tree for the two-leaf one, at a
- * different address, and nothing else signals that choice. So an arbiter key
- * under any other name is an error: the escrow event's wire field is
- * `arbiter_x`, and spreading an event straight in would otherwise fund a
- * two-party escrow while the UI shows three parties.
- *
- * TypeScript does not catch this (excess-property checks skip spreads and
- * variables, and `arbiter` is optional), and the pages in web/ call buildTree
- * from untyped JavaScript.
+ * Leaving out `arbiter` quietly builds the 2-leaf tree at another address, so
+ * an unknown key throws. The event's wire field is `arbiter_x`, and spreading an
+ * event straight in would fund a two-party escrow while the UI shows three.
+ * TypeScript won't catch it (no excess-property check on spreads or variables),
+ * and web/ calls buildTree from plain JS.
  */
 const ALLOWED_PARAMS: readonly string[] = [
   'buyer',
@@ -329,10 +283,6 @@ function validateParams(params: BuildTreeParams): Required<Omit<BuildTreeParams,
   return { buyer, seller, arbiter, timeoutTo: params.timeoutTo, timeoutBlocks: params.timeoutBlocks }
 }
 
-// ---------------------------------------------------------------------------
-// merkle construction
-// ---------------------------------------------------------------------------
-
 interface LeafDraft {
   name: LeafName
   role: LeafRole
@@ -358,13 +308,9 @@ function branchNode(left: Node, right: Node): Node {
 }
 
 /**
- * Collect each leaf's sibling path, leaf to root.
- *
- * Each sibling is prepended before descending, so the nearest sibling ends up
- * first and the root's child last: the order BIP-341 requires in the control
- * block. TapBranch sorts the pair it hashes, but the path itself is never
- * sorted. A sorted path still gives a fundable address, yet every script-path
- * spend from it is rejected, and no address-level test catches that.
+ * Each leaf's sibling path, nearest sibling first, as BIP-341's control block
+ * wants. Never sort the path. A sorted one still gives a fundable address, but
+ * every script-path spend fails and no address-level test catches it.
  */
 function collectPaths(node: Node, path: Uint8Array[], out: Map<LeafName, Uint8Array[]>): void {
   if (node.kind === 'leaf') {
@@ -376,22 +322,14 @@ function collectPaths(node: Node, path: Uint8Array[], out: Map<LeafName, Uint8Ar
 }
 
 /**
- * Witness order for a `<X1> CHECKSIGVERIFY <X2> CHECKSIG` leaf.
- *
- * Both signatures are pushed before the script runs. CHECKSIGVERIFY pops the
- * key it just pushed (X1) and the signature directly under it, which is the one
- * pushed last, at the top of the stack. So X1's signature sits on top and X2's
- * at the bottom: the party named second in the script signs first in the
- * witness. Getting this wrong fails with a generic "Invalid Schnorr signature",
- * not a structural error, so it is slow to diagnose.
+ * Witness order for `<X1> CHECKSIGVERIFY <X2> CHECKSIG`. CHECKSIGVERIFY checks
+ * X1 against the signature on top of the stack, so X1's goes on top and X2's at
+ * the bottom (second in script, first in witness). A mistake only shows as
+ * "Invalid Schnorr signature", which is slow to diagnose.
  */
 function signatureOrderFor2of2(scriptKeyOrder: PartyRole[]): PartyRole[] {
   return [...scriptKeyOrder].reverse()
 }
-
-// ---------------------------------------------------------------------------
-// output key
-// ---------------------------------------------------------------------------
 
 export interface TweakResult {
   tweak: Uint8Array
@@ -402,18 +340,15 @@ export interface TweakResult {
 /**
  * Q = lift_x(P_x) + t*G, where t = int(tagged_hash("TapTweak", P_x || root)).
  *
- * The parity returned is Q's, not P's. P travels as 32 x-only bytes and lift_x
- * always picks the even-Y point, so a parity computed from P would always be 0.
- * Q's parity varies between escrows built from the same internal key, which is
- * why some control blocks start 0xc0 and others 0xc1. Hard-coding either value
- * passes about half the tests and fails the rest only at broadcast.
+ * Returns Q's parity, not P's. lift_x always picks even Y, so P's would always
+ * be 0. Q's varies per escrow, hence control blocks starting 0xc0 or 0xc1.
+ * Hard-coding either passes about half the tests and fails the rest at broadcast.
  */
 export function deriveOutputKey(internalKeyX: Uint8Array, merkleRoot: Uint8Array): TweakResult {
   const tweak = tapTweakHash(internalKeyX, merkleRoot)
   const t = bytesToNumberBE(tweak)
-  // BIP-341 says fail here rather than reduce mod n: a reduced t gives a Q
-  // that no verifier re-derives. The odds are about 2^-128, so this is an
-  // assertion, not a retry loop.
+  // BIP-341 says fail, not reduce mod n. A reduced t gives a Q no verifier
+  // re-derives. Odds are about 2^-128, so assert, no retry loop.
   if (t >= CURVE_ORDER) throw new Error('TapTweak: t >= curve order; this key set is unusable')
   if (t === 0n) throw new Error('TapTweak: t == 0; this key set is unusable')
 
@@ -426,16 +361,10 @@ export function deriveOutputKey(internalKeyX: Uint8Array, merkleRoot: Uint8Array
   }
 }
 
-// ---------------------------------------------------------------------------
-// address
-// ---------------------------------------------------------------------------
-
 /**
- * Segwit v1 uses bech32m, not bech32 (BIP-350). The witness version enters as
- * a raw 5-bit word ahead of the converted program.
- *
- * Encoding a v1 program with plain bech32 gives a string that differs only in
- * its 6-character checksum: it looks right and is never accepted.
+ * Segwit v1 is bech32m (BIP-350), with the version as a raw 5-bit word before
+ * the program. Plain bech32 gives a string that differs only in the checksum.
+ * It looks right and is never accepted.
  */
 export function encodeTaprootAddress(outputKey: Uint8Array, hrp: string): string {
   if (outputKey.length !== 32) {
@@ -448,24 +377,17 @@ function allAddresses(outputKey: Uint8Array): Record<NetworkName, string> {
   return {
     mainnet: encodeTaprootAddress(outputKey, NETWORK_HRP.mainnet),
     testnet: encodeTaprootAddress(outputKey, NETWORK_HRP.testnet),
-    // Identical to testnet by design: signet shares the `tb` HRP, so an address
-    // string alone cannot tell you which chain it belongs to. Carry the network
-    // alongside it; never infer it from the prefix.
+    // Same string as testnet, signet shares `tb`. Carry the network with the
+    // address, never infer it from the prefix.
     signet: encodeTaprootAddress(outputKey, NETWORK_HRP.signet),
     regtest: encodeTaprootAddress(outputKey, NETWORK_HRP.regtest),
   }
 }
 
-// ---------------------------------------------------------------------------
-// buildTree
-// ---------------------------------------------------------------------------
-
 /**
- * Build the escrow's taproot script tree.
- *
- * Deterministic: same inputs, same bytes. There is no clock, randomness, I/O or
- * network selection, because web/recover.html has to rebuild the funding
- * address from the parties' pubkeys with no server and no network.
+ * Build the escrow's taproot script tree. Deterministic with no clock,
+ * randomness or I/O, since web/recover.html rebuilds the address offline from
+ * the parties' pubkeys.
  */
 export function buildTree(params: BuildTreeParams): EscrowTree {
   const p = validateParams(params)
@@ -511,28 +433,21 @@ export function buildTree(params: BuildTreeParams): EscrowTree {
     script: scriptD,
     hash: tapLeafHash(scriptD),
     scriptKeyOrder: [p.timeoutTo],
-    // The sequence field is the relative timelock here, so it cannot also
-    // carry the 0xfffffffd RBF marker: bit 31 of that value disables the lock
-    // and CSV then fails outright.
     sequence: timeoutSequence(p.timeoutBlocks),
   })
 
   const byName = new Map(drafts.map((d) => [d.name, leafNode(d)]))
   const shape: TreeShape = p.arbiter ? 'arbiter-4leaf' : 'no-arbiter-2leaf'
 
-  // The grouping is part of the address. TapBranch's lexicographic sort hides
-  // a swapped pair inside a branch, but ((A,B),(C,D)) and ((A,C),(B,D)) are
-  // different roots, so different escrows, and a control block for one cannot
-  // spend the other. The nesting is written out here rather than derived from
-  // iteration order or handed to a helper.
+  // The grouping is part of the address. The TapBranch sort hides a swap inside
+  // a pair, but ((A,B),(C,D)) and ((A,C),(B,D)) are different roots, and a
+  // control block for one can't spend the other. So the nesting is spelled out.
   //
-  // Do not replace it with @scure/btc-signer's taprootListToTree, which is a
-  // weighted (Huffman) builder. With four equal-weight leaves it happens to
-  // produce the same root, but returns the leaves in a different order
-  // (C,D,A,B), and with any other leaf count or weights it builds a skewed tree
-  // (control blocks of 65/129/129/97 bytes). That changes the address and loses
-  // the uniform control-block size that keeps a leaf from being identified by
-  // its witness size.
+  // Don't swap in @scure/btc-signer's taprootListToTree, a weighted (Huffman)
+  // builder. Four equal leaves give the same root but in C,D,A,B order, and any
+  // other count or weights give a skewed tree (65/129/129/97-byte control
+  // blocks). That moves the address and loses the uniform control-block size
+  // that keeps a leaf from being identified by its witness size.
   let root: Node
   const branches: BranchStep[] = []
   if (p.arbiter) {
@@ -592,11 +507,9 @@ export function buildTree(params: BuildTreeParams): EscrowTree {
   for (const b of branches) freezeInPlace(b)
   freezeInPlace(branches)
 
-  // Containers are frozen all the way down. An auditor re-derives against this
-  // tree, and its object graph is shared (leaves.A is leafList[0], leaves.B.hash
-  // is leaves.A.merklePath[0]), so one stray write would propagate and make the
-  // params echo, the leaf bytes and the address disagree. The Uint8Arrays
-  // cannot be frozen; see EscrowTree.
+  // Frozen all the way down. The graph is shared (leaves.A is leafList[0],
+  // leaves.B.hash is leaves.A.merklePath[0]), so one stray write would spread
+  // until the params, leaf bytes and address disagree.
   const tree: EscrowTree = {
     shape,
     params: freezeInPlace({
@@ -622,26 +535,18 @@ export function buildTree(params: BuildTreeParams): EscrowTree {
   return freezeInPlace(tree)
 }
 
-// ---------------------------------------------------------------------------
-// independent verification
-// ---------------------------------------------------------------------------
-
 /**
- * BIP-341 limits the merkle path to 0..128 nodes, so a control block is
- * 33 + 32m bytes with m <= 128: at most 4129 (Bitcoin Core's
- * TAPROOT_CONTROL_MAX_SIZE). A longer one is an invalid witness, which Core's
- * VerifyTaprootCommitment rejects on size before it folds a single branch.
+ * BIP-341 caps the path at 128 nodes, so a control block is at most
+ * 33 + 32*128 = 4129 bytes (Core's TAPROOT_CONTROL_MAX_SIZE). Core's
+ * VerifyTaprootCommitment rejects a longer one on size alone.
  */
 const CONTROL_BLOCK_MAX_NODES = 128
 const CONTROL_BLOCK_MAX_SIZE = 33 + 32 * CONTROL_BLOCK_MAX_NODES
 
 /**
- * Re-derive the output key from a script and its control block alone, as a
- * BIP-341 verifier does: fold the path leaf to root with sorted TapBranch,
- * tweak the internal key by the resulting root, and compare x(Q) and y-parity.
- *
- * Exported so recover.html and the tests can check a control block
- * independently of the code that built it.
+ * Re-derive the output key from a script and control block alone, as a BIP-341
+ * verifier does. Exported so recover.html and the tests can check a control
+ * block independently of the code that built it.
  */
 export function verifyControlBlock(
   script: Uint8Array,
@@ -656,9 +561,8 @@ export function verifyControlBlock(
     return false
   }
   const leafVersion = controlBlock[0] & 0xfe
-  // Not a leaf version: as c[0] this is the annex marker, so BIP-341 has the
-  // verifier reject the witness rather than hash it. tapLeafHash throws on it;
-  // this function answers true or false, so catch it here.
+  // 0x50 is the annex marker, not a leaf version. tapLeafHash throws on it and
+  // this function returns a boolean, so reject it here.
   if (leafVersion === 0x50) return false
   const parity = (controlBlock[0] & 1) as 0 | 1
   const internalKey = controlBlock.subarray(1, 33)

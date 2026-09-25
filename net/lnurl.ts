@@ -1,36 +1,25 @@
 /**
- * LNURL-pay and lightning addresses: the fetching half of NIP-57.
- *
- * Isomorphic: `fetch` only. This module talks to the recipient's lightning
- * provider; core/nostr/zap.ts decides whether a receipt is real.
- *
- * The project runs no payment infrastructure. Every request here goes to the
- * recipient's own LNURL server, and there is no float, merchant account or
- * invoice of ours anywhere.
+ * LNURL-pay fetching for NIP-57 zaps. core/nostr/zap.ts decides if a receipt is real.
+ * We run no payment infra. Every request goes to the recipient's own LNURL server.
  */
 
 import { ZAP_REQUEST_KIND, type NostrEvent } from '../core/nostr/index.js'
 
-/** What an LNURL-pay endpoint reports about itself. */
 export interface LnurlPayInfo {
   callback: string
   minSendable: number
   maxSendable: number
   metadata: string
-  /** True when the provider writes zap receipts and publishes their signing key. */
+  /** Provider writes zap receipts and publishes their signing key. */
   allowsNostr: boolean
-  /** The key that signs those receipts. Without it a receipt proves nothing. */
+  /** Signs the receipts. Without it a receipt proves nothing. */
   nostrPubkey?: string
   commentAllowed?: number
 }
 
 /**
- * The LNURL-pay URL for a lightning address.
- *
- * `alice@example.com` resolves to `https://example.com/.well-known/lnurlp/alice`.
- * The local part goes into a path, so a character that would change the path
- * is refused rather than escaped: an address with a slash in it is not a
- * lightning address.
+ * `alice@example.com` maps to `https://example.com/.well-known/lnurlp/alice`.
+ * The local part lands in a path, so path-changing characters are refused, not escaped.
  */
 export function lightningAddressUrl(address: string): string | undefined {
   const match = /^([a-z0-9._-]+)@([a-z0-9.-]+\.[a-z]{2,})$/i.exec(address.trim().toLowerCase())
@@ -38,7 +27,7 @@ export function lightningAddressUrl(address: string): string | undefined {
   return `https://${match[2]}/.well-known/lnurlp/${match[1]}`
 }
 
-/** Fetch and validate an LNURL-pay endpoint's metadata. */
+/** Fetch and validate LNURL-pay metadata. */
 export async function fetchLnurlPay(
   addressOrUrl: string,
   options: { signal?: AbortSignal } = {},
@@ -70,9 +59,7 @@ export async function fetchLnurlPay(
       minSendable: body.minSendable,
       maxSendable: body.maxSendable,
       metadata: typeof body.metadata === 'string' ? body.metadata : '',
-      // Both conditions are needed: a provider that says allowsNostr but
-      // publishes no key writes receipts nobody can attribute, which is the
-      // same as writing none.
+      // Need both. allowsNostr with no key means receipts nobody can attribute.
       allowsNostr: body.allowsNostr === true && /^[0-9a-f]{64}$/.test(nostrPubkey ?? ''),
       nostrPubkey,
       commentAllowed: typeof body.commentAllowed === 'number' ? body.commentAllowed : undefined,
@@ -81,12 +68,9 @@ export async function fetchLnurlPay(
 }
 
 /**
- * Ask the provider for an invoice, attaching the zap request.
- *
- * The amount is sent twice, in `amount` and inside the signed zap request, and
- * the invoice must be for that amount. verifyZapReceipt rejects a receipt whose
- * invoice disagrees with its request, so zaps through a provider that ignores
- * this do not count.
+ * Ask for an invoice with the zap request attached. The amount goes in `amount`
+ * and inside the signed request. verifyZapReceipt rejects an invoice that
+ * disagrees, so zaps via a provider that ignores this don't count.
  */
 export async function requestZapInvoice(params: {
   info: LnurlPayInfo
@@ -125,10 +109,8 @@ export async function requestZapInvoice(params: {
 }
 
 /**
- * The zapper key for a recipient, which verifyZapReceipt requires.
- *
- * Cached for the session: every receipt on the featured board needs it, and it
- * rarely changes.
+ * Zapper key per lightning address, for verifyZapReceipt. Cached for the
+ * session. Every receipt on the featured board needs one, and they rarely change.
  */
 const zapperKeys = new Map<string, string | undefined>()
 
@@ -143,7 +125,7 @@ export async function zapperKeyFor(
   return key
 }
 
-/** Drop the cache. For tests, and after a recipient changes provider. */
+/** For tests, and after a recipient changes provider. */
 export function clearZapperKeyCache(): void {
   zapperKeys.clear()
 }

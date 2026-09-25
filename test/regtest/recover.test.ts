@@ -1,13 +1,5 @@
-/**
- * recover.html, end to end.
- *
- * Fund a real escrow on regtest, mine past its timelock, hand the recovery
- * string to the page in a browser, and broadcast whatever hex it prints.
- *
- * This checks the claim that a user can get their money back with the server
- * off. Every other test could pass with this page broken; here Bitcoin Core
- * decides whether the sweep is valid.
- */
+// recover.html end to end. Fund a regtest escrow, pass its timelock, run the page in headless
+// Chrome and broadcast what it prints. Proves users can sweep with our server off.
 
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -44,8 +36,6 @@ afterAll(async () => {
 describe('recover.html', () => {
   test('makes no network requests at all', async () => {
     const html = await Bun.file('web/recover.html').text()
-    // Nothing that could reach a host: no fetch, no XHR, no dynamic import,
-    // no remote script, stylesheet, image or font.
     expect(html).not.toMatch(/\bfetch\s*\(/)
     expect(html).not.toMatch(/XMLHttpRequest/)
     expect(html).not.toMatch(/<script[^>]+src=/i)
@@ -54,7 +44,6 @@ describe('recover.html', () => {
   })
 
   async function sweepViaPage(withFunding: boolean) {
-    // --- a real escrow, funded on chain -----------------------------------
     const tree = buildTree({
       buyer: xonly(BUYER),
       seller: xonly(SELLER),
@@ -72,7 +61,7 @@ describe('recover.html', () => {
     const vout = raw.vout.find((o) => o.scriptPubKey.hex === bytesToHex(tree.scriptPubKey))
     expect(vout).toBeTruthy()
 
-    // The one string the user was told to write down.
+    // The string the user writes down.
     const recovery = encodeRecovery({
       version: 1,
       secretKey: BUYER,
@@ -85,16 +74,15 @@ describe('recover.html', () => {
         : {}),
     })
 
-    // The timelock has to have elapsed, or the sweep is valid but unminable.
+    // Before the timelock the sweep is valid but can't be mined.
     await wallet.mine(TIMEOUT_BLOCKS)
 
     const destination = await wallet.address
     const info = await node.rpc<{ scriptPubKey: string }>('getaddressinfo', [destination])
-    // Sweep to a taproot address, which is what the page's decoder supports.
+    // Taproot, since that's what the page's address decoder supports.
     const taproot = await node.rpc<string>('getnewaddress', ['', 'bech32m'])
     void info
 
-    // --- drive the page in a real browser ---------------------------------
     const dir = mkdtempSync(join(tmpdir(), 'fmd-recover-'))
     const driver = join(dir, 'drive.html')
     const page = join(process.cwd(), 'web/recover.html')
@@ -137,7 +125,7 @@ f.onload = () => setTimeout(() => {
         '--headless',
         '--disable-gpu',
         '--no-sandbox',
-        // The page is loaded from file:// on purpose: that is what is tested.
+        // file:// is the case under test.
         '--allow-file-access-from-files',
         `--user-data-dir=${join(dir, 'profile')}`,
         '--virtual-time-budget=8000',
@@ -162,7 +150,6 @@ f.onload = () => setTimeout(() => {
     expect(result.sweepMsg).toContain('Signed')
     expect(result.raw).toMatch(/^[0-9a-f]+$/)
 
-    // --- Bitcoin Core accepts the sweep -----------------------------------
     const txid = await node.rpc<string>('sendrawtransaction', [result.raw])
     expect(txid).toMatch(/^[0-9a-f]{64}$/)
   }
@@ -172,9 +159,8 @@ f.onload = () => setTimeout(() => {
   }, 180_000)
 
   test.skipIf(!haveBitcoind)('sweeps a real escrow from the string users save, issued before funding', async () => {
-    // The string is issued when the escrow is created, before anybody pays it,
-    // so it has no funding outpoint. The page must still get the money out:
-    // the user reads the outpoint off an explorer and types it in.
+    // Issued at creation, before funding, so it has no outpoint. The user types
+    // it in from an explorer.
     await sweepViaPage(false)
   }, 180_000)
 })

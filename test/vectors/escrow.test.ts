@@ -1,11 +1,5 @@
-/**
- * core/escrow test vectors: two independent key sets, five variants each, and
- * a differential check of every derived byte against @scure/btc-signer.
- *
- * core/escrow implements BIP-341 over @noble primitives and does not import
- * @scure/btc-signer, so the differential tests compare two independent
- * derivations.
- */
+// core/escrow vectors. Two key sets, five variants each, every derived byte diffed against
+// @scure/btc-signer. core/escrow doesn't import that library, so the derivations are independent.
 
 import { test, expect, describe } from 'bun:test'
 import { readFileSync } from 'node:fs'
@@ -42,10 +36,6 @@ import {
   type LeafName,
 } from '../../core/escrow/index.ts'
 
-// ---------------------------------------------------------------------------
-// fixtures
-// ---------------------------------------------------------------------------
-
 const hex = (b: Uint8Array) => bytesToHex(b)
 
 function secret(fill: number): Uint8Array {
@@ -59,14 +49,14 @@ function secretInt(n: number): Uint8Array {
   return b
 }
 
-/** Key set 1: private keys 1, 2, 3. buyer is the generator's x-coordinate. */
+/** Key set 1, private keys 1, 2, 3. buyer is the generator's x-coordinate. */
 const K1 = {
   buyer: schnorr.getPublicKey(secretInt(1)),
   seller: schnorr.getPublicKey(secretInt(2)),
   arbiter: schnorr.getPublicKey(secretInt(3)),
 }
 
-/** Key set 2: private keys 0x11.., 0x22.., 0x33.., an independent derivation. */
+/** Key set 2, private keys 0x11.., 0x22.., 0x33.. */
 const K2 = {
   buyer: schnorr.getPublicKey(secret(0x11)),
   seller: schnorr.getPublicKey(secret(0x22)),
@@ -76,14 +66,9 @@ const K2 = {
 /** @scure/btc-signer ships no regtest constant. BIP-350 gives the HRP. */
 const REGTEST = { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
 
-// ---------------------------------------------------------------------------
-// tagged hashes and primitives
-// ---------------------------------------------------------------------------
-
 describe('BIP-341 tagged hashes', () => {
-  // Hard-coded so a typo in a tag string cannot slip through. A wrong tag still
-  // hashes, still encodes an address, and fails only when a spend is rejected
-  // by consensus after real coins are locked.
+  // Pinned because a wrong tag still hashes and encodes an address. It fails only at
+  // spend time, after coins are locked.
   test('the three tag digests are pinned', () => {
     expect(hex(sha256(utf8ToBytes('TapLeaf')))).toBe(
       'aeea8fdc4208983105734b58081d1e2638d35f1cb54008d4d357ca03be78e9ee',
@@ -101,19 +86,19 @@ describe('BIP-341 tagged hashes', () => {
     expect(hex(taggedHash('TapLeaf', msg))).toBe(hex(schnorr.utils.taggedHash('TapLeaf', msg)))
     expect(hex(taggedHash('TapBranch', msg))).toBe(hex(schnorr.utils.taggedHash('TapBranch', msg)))
     expect(hex(taggedHash('TapTweak', msg))).toBe(hex(schnorr.utils.taggedHash('TapTweak', msg)))
-    // varargs concatenate in order
+    // Varargs concatenate in order.
     const a = hexToBytes('0102')
     const b = hexToBytes('0304')
     expect(hex(taggedHash('TapBranch', a, b))).toBe(hex(taggedHash('TapBranch', concatBytes(a, b))))
-    // single-prefixing gives a different digest: the bug this pins
+    // Single-prefixing gives a different digest, the bug this pins.
     const p = sha256(utf8ToBytes('TapLeaf'))
     expect(hex(taggedHash('TapLeaf', msg))).not.toBe(hex(sha256(concatBytes(p, msg))))
   })
 
   test('compactSize is minimal at every boundary', () => {
     expect(hex(compactSize(0))).toBe('00')
-    expect(hex(compactSize(39))).toBe('27') // the timeout leaf
-    expect(hex(compactSize(68))).toBe('44') // the 2-of-2 leaves
+    expect(hex(compactSize(39))).toBe('27') // Timeout leaf.
+    expect(hex(compactSize(68))).toBe('44') // 2-of-2 leaves.
     expect(hex(compactSize(252))).toBe('fc')
     expect(hex(compactSize(253))).toBe('fdfd00')
     expect(hex(compactSize(0xffff))).toBe('fdffff')
@@ -133,20 +118,17 @@ describe('BIP-341 tagged hashes', () => {
     const s = Uint8Array.of(0x51)
     expect(hex(tapLeafHash(s))).toBe(hex(tapLeafHash(s, TAP_LEAF_VERSION)))
 
-    // The version is one byte of the preimage and Uint8Array.of() truncates
-    // mod 256 silently, so without the check 0x1c0 and -64 would hash the same
-    // as 0xc0: a plausible digest for a version that was never committed to.
+    // Uint8Array.of() truncates mod 256, so unchecked 0x1c0 and -64 would hash like 0xc0.
     expect(() => tapLeafHash(s, 0x1c0)).toThrow(/0\.\.254/)
     expect(() => tapLeafHash(s, -64)).toThrow(/0\.\.254/)
     expect(() => tapLeafHash(s, 1.5)).toThrow(/0\.\.254/)
     expect(() => tapLeafHash(s, '192' as never)).toThrow(/got "192"/)
-    // A verifier recovers the version as c[0] & 0xfe, so an odd one is
-    // unreachable; 0x50 collides with the annex marker. Either hashes fine and
-    // commits to a branch that can never be spent.
+    // Verifiers read the version as c[0] & 0xfe, so odd versions are unreachable, and 0x50
+    // is the annex marker. Both hash fine and commit to a branch nobody can spend.
     expect(() => tapLeafHash(s, 0xc1)).toThrow(/even/)
     expect(() => tapLeafHash(s, 0x50)).toThrow(/annex/)
 
-    // Differential: the same rule as @scure/btc-signer, accepted and rejected.
+    // Same accept and reject rule as @scure/btc-signer.
     for (const v of [0x00, 0xc0, 0xfe]) {
       expect(`${v}:${hex(tapLeafHash(s, v))}`).toBe(`${v}:${hex(scureTapLeafHash(s, v))}`)
     }
@@ -181,10 +163,6 @@ describe('the NUMS internal key', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// script numbers
-// ---------------------------------------------------------------------------
-
 describe('CScriptNum and minimal pushes', () => {
   test('production timelock pushes, byte for byte', () => {
     expect(hex(minimalPushNum(1008))).toBe('02f003')
@@ -193,8 +171,8 @@ describe('CScriptNum and minimal pushes', () => {
   })
 
   test('a magnitude with the top bit set gets a 0x00 sign byte', () => {
-    // Core reads an unpadded 0x80-topped payload as negative, and CSV rejects a
-    // negative operand outright, locking the timeout path forever.
+    // Core reads an unpadded 0x80-topped payload as negative. CSV rejects that, locking
+    // the timeout path forever.
     expect(hex(scriptNum(127))).toBe('7f')
     expect(hex(scriptNum(128))).toBe('8000')
     expect(hex(scriptNum(255))).toBe('ff00')
@@ -224,10 +202,7 @@ describe('CScriptNum and minimal pushes', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// leaf scripts: the bytes are normative
-// ---------------------------------------------------------------------------
-
+// Leaf bytes are normative.
 describe('leaf scripts', () => {
   const { buyer, seller, arbiter } = K1
 
@@ -266,9 +241,7 @@ describe('leaf scripts', () => {
   })
 
   test('leaf D length is a function of the timelock, not a constant 39', () => {
-    // A regtest harness will want a short timelock, and OP_1..OP_16 shortens the
-    // leaf. Any fixture asserting "39 bytes" breaks the first time someone
-    // passes 10.
+    // Short regtest timelocks use OP_1..OP_16, which shrinks the leaf.
     expect(timeoutLeaf(10, buyer).length).toBe(37)
     expect(timeoutLeaf(17, buyer).length).toBe(38)
     expect(timeoutLeaf(4320, buyer).length).toBe(39)
@@ -309,7 +282,7 @@ describe('leaf scripts', () => {
     expect(hex(tapLeafHash(timeoutLeaf(2016, seller)))).toBe(
       'e6f57bcb31e5340a0115b16327d3a401e406b6fa997d888e498bfcbfa7a9306d',
     )
-    // The CompactSize prefix is part of the preimage; without it the hash differs.
+    // The CompactSize prefix is part of the preimage.
     expect(hex(tapLeafHash(A))).not.toBe(
       hex(taggedHash('TapLeaf', Uint8Array.of(TAP_LEAF_VERSION), A)),
     )
@@ -321,10 +294,6 @@ describe('leaf scripts', () => {
     expect(hex(spk)).toBe('5120' + '11'.repeat(32))
   })
 })
-
-// ---------------------------------------------------------------------------
-// the five reference vectors
-// ---------------------------------------------------------------------------
 
 interface Vector {
   name: string
@@ -430,7 +399,7 @@ const VECTORS: Vector[] = [
     regtest: 'bcrt1psse6y7u4sf3fa54wdqygqzczz273czs9602auyrurw3vxm7y7r6qlnndm8',
     controlBlockLength: 65,
   },
-  // Key set 2: an independent derivation of the same four variants.
+  // Key set 2, same four variants.
   {
     name: 'V6 keyset2 arbiter timeoutTo=buyer 1008',
     params: { ...K2, timeoutTo: 'buyer', timeoutBlocks: 1008 },
@@ -450,7 +419,7 @@ const VECTORS: Vector[] = [
     tweak: 'e4a78bfc8ee4df04f0ff4d8034651ca234d414b958c5ef9838313c74d9d8f12b',
     outputKey: '4327440b6f03f4785bc0f826da5f45ab1f5d3572eb97194490666095a12cce09',
     parity: 1,
-    // Only the signet and regtest addresses were recorded for this vector.
+    // Only signet and regtest addresses were recorded.
     mainnet: '',
     testnet: 'tb1pgvn5gzm0q068sk7qlqnd5h694v046dtjawt3j3ysvesftgfvecysffm78f',
     regtest: 'bcrt1pgvn5gzm0q068sk7qlqnd5h694v046dtjawt3j3ysvesftgfvecysys3cjn',
@@ -505,7 +474,7 @@ describe('reference vectors', () => {
       if (v.mainnet) expect(t.addresses.mainnet).toBe(v.mainnet)
       if (v.testnet) {
         expect(t.addresses.testnet).toBe(v.testnet)
-        // signet shares testnet's `tb` HRP: identical string, different chain.
+        // Signet shares testnet's `tb` HRP, so the string is identical.
         expect(t.addresses.signet).toBe(v.testnet)
       }
       expect(t.addresses.regtest).toBe(v.regtest)
@@ -518,7 +487,7 @@ describe('reference vectors', () => {
       for (const [name, cb] of Object.entries(v.controlBlocks ?? {})) {
         expect(`${name}=${hex(t.leaves[name as LeafName]!.controlBlock)}`).toBe(`${name}=${cb}`)
       }
-      // The parity byte lives in control-block byte 0 and nowhere else.
+      // Parity lives only in control-block byte 0.
       for (const leaf of t.leafList) {
         expect(leaf.controlBlock[0]).toBe(TAP_LEAF_VERSION | v.parity)
         expect(leaf.controlBlock.length).toBe(v.controlBlockLength)
@@ -533,25 +502,11 @@ describe('reference vectors', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// differential: core/escrow's BIP-341 against @scure/btc-signer
-// ---------------------------------------------------------------------------
-
 /**
- * Build the same tree with the library.
- *
- * The nesting is written out rather than passed as a flat list.
- * @scure/btc-signer's taprootListToTree is a weighted (Huffman) builder: it
- * sorts by weight and merges the two lightest nodes. With four equal-weight
- * leaves it happens to reach a balanced shape with the same merkle root, but it
- * returns the leaves in DFS order C,D,A,B, and with any other leaf count or
- * weight it returns a skewed tree with a different root. p2tr also silently
- * routes any array whose length is not 2 through that helper, so a flat
- * [A,B,C,D] is not an explicit ((A,B),(C,D)). Nesting by hand compares the
- * same balanced shape buildTree builds.
- *
- * allowUnknownOutputs=true is required: the CSV timeout leaf decodes as
- * 'unknown' and p2tr otherwise throws "P2TR: invalid leaf script=unknown".
+ * The same tree via @scure/btc-signer, nested by hand. Its taprootListToTree is a Huffman
+ * builder that returns leaves as C,D,A,B and skews any tree without four equal weights.
+ * p2tr sends any array whose length isn't 2 through it, so a flat [A,B,C,D] won't do.
+ * allowUnknownOutputs=true because p2tr reads the CSV leaf as 'unknown' and throws.
  */
 function libraryTree(p: BuildTreeParams, network: typeof REGTEST) {
   const A = { script: cooperativeLeaf(p.buyer, p.seller) }
@@ -583,8 +538,7 @@ describe('differential against @scure/btc-signer', () => {
         mine.addresses.testnet,
       )
 
-      // Find the library's leaves by script bytes, never by index: its leaf
-      // array order comes from its tree walk, not from the order passed in.
+      // Match leaves by script bytes. The library orders them by its own tree walk.
       expect(theirs.leaves!.length).toBe(mine.leafList.length)
       for (const leaf of mine.leafList) {
         const match = theirs.leaves!.filter((l) => hex(l.script) === hex(leaf.script))
@@ -621,12 +575,10 @@ describe('differential against @scure/btc-signer', () => {
     ]
     const listBuilt = btc.p2tr(undefined, btc.taprootListToTree(leaves) as never, REGTEST as never, true)
     const mine = buildTree(p)
-    // Same address: with four equal weights the Huffman build lands on a
-    // balanced shape, and TapBranch's sort hides any within-pair difference.
+    // Four equal weights give a balanced shape, and TapBranch sorts each pair.
     expect(listBuilt.address).toBe(mine.addresses.regtest)
     expect(hex(listBuilt.tweakedPubkey)).toBe(hex(mine.outputKey))
-    // ...but the leaf array comes back in a different order: leaves[0] is not
-    // leaf A, so never index leaves by position.
+    // But leaves[0] is not leaf A.
     const listOrder = listBuilt.leaves!.map((l) => hex(l.script))
     const myOrder = mine.leafList.map((l) => hex(l.script))
     expect(listOrder).not.toEqual(myOrder)
@@ -653,10 +605,6 @@ describe('differential against @scure/btc-signer', () => {
     ).toThrow(/unknown/i)
   })
 })
-
-// ---------------------------------------------------------------------------
-// control blocks and independent verification
-// ---------------------------------------------------------------------------
 
 describe('control blocks', () => {
   test('4-leaf trees are uniformly 97 bytes, 2-leaf trees uniformly 65', () => {
@@ -717,16 +665,14 @@ describe('control blocks', () => {
       l.controlBlock.subarray(0, 33),
       ...[...l.merklePath].reverse(),
     )
-    // TapBranch sorts the pair it hashes; the path is never sorted. Conflating
-    // the two builds a fundable address whose every spend is rejected.
+    // TapBranch sorts each pair it hashes, but the path is never sorted. Mixing them up
+    // gives a fundable address that can never be spent.
     expect(verifyControlBlock(l.script, reversed, t.outputKey)).toBe(false)
   })
 
   test('verifyControlBlock rejects a path longer than the BIP-341 limit of 128 nodes', () => {
-    // Bitcoin Core: TAPROOT_CONTROL_MAX_SIZE = 33 + 32*128 = 4129. A longer
-    // control block is an invalid witness, and a checker that folds it anyway
-    // returns true for a commitment that Core's VerifyTaprootCommitment
-    // rejects on size before hashing a single branch.
+    // Core's TAPROOT_CONTROL_MAX_SIZE = 33 + 32*128 = 4129. VerifyTaprootCommitment rejects
+    // a longer block on size alone, so folding it anyway would accept an invalid witness.
     const internal = numsInternalKey()
     const script = Uint8Array.of(0x51)
     const deep = (nodes: number) => {
@@ -761,8 +707,7 @@ describe('control blocks', () => {
     const t = buildTree({ ...K1, timeoutTo: 'buyer', timeoutBlocks: 4320 })
     const l = t.leaves.A!
     const bad = Uint8Array.from(l.controlBlock)
-    // c[0] & 0xfe == 0x50 is the annex marker, not a leaf version. tapLeafHash
-    // throws on it; this is a verifier, so it answers false.
+    // 0x50 is the annex marker. tapLeafHash throws on it, a verifier answers false.
     bad[0] = 0x50 | (l.controlBlock[0] & 1)
     expect(verifyControlBlock(l.script, bad, t.outputKey)).toBe(false)
   })
@@ -776,10 +721,6 @@ describe('control blocks', () => {
       .toBe(false)
   })
 })
-
-// ---------------------------------------------------------------------------
-// witness stacks
-// ---------------------------------------------------------------------------
 
 describe('witness stack order', () => {
   test('the party named second in the script signs first in the witness', () => {
@@ -803,7 +744,7 @@ describe('witness stack order', () => {
       'control_block',
     ])
     expect(t.leaves.D!.witnessStack).toEqual(['sig_buyer', 'script_D', 'control_block'])
-    // scriptKeyOrder is the script's order; signatureOrder is its reverse.
+    // signatureOrder is scriptKeyOrder reversed.
     expect(t.leaves.A!.scriptKeyOrder).toEqual(['buyer', 'seller'])
     expect(t.leaves.A!.signatureOrder).toEqual(['seller', 'buyer'])
   })
@@ -815,7 +756,7 @@ describe('witness stack order', () => {
     expect(toSeller.leaves.D!.witnessStack[0]).toBe('sig_seller')
     expect(hex(toBuyer.leaves.D!.script).includes(hex(K1.buyer))).toBe(true)
     expect(hex(toSeller.leaves.D!.script).includes(hex(K1.seller))).toBe(true)
-    // Leaves A/B/C are byte-identical across the two stages; only D moves.
+    // A/B/C are byte-identical across stages. Only D changes.
     for (const n of ['A', 'B', 'C'] as LeafName[]) {
       expect(hex(toBuyer.leaves[n]!.script)).toBe(hex(toSeller.leaves[n]!.script))
     }
@@ -827,8 +768,8 @@ describe('witness stack order', () => {
     expect(t.leaves.A!.sequence).toBe(RBF_SEQUENCE)
     expect(t.leaves.B!.sequence).toBe(RBF_SEQUENCE)
     expect(t.leaves.C!.sequence).toBe(RBF_SEQUENCE)
-    // The field carries the lock; bit 31 (disable) and bit 22 (512s units) must
-    // be clear, which rules out 0xfffffffd on this input.
+    // nSequence is the lock itself. Bits 31 (disable) and 22 (512s units) must be clear,
+    // so 0xfffffffd is out on this input.
     expect(t.leaves.D!.sequence).toBe(4320)
     expect(t.leaves.D!.sequence & 0x80000000).toBe(0)
     expect(t.leaves.D!.sequence & 0x00400000).toBe(0)
@@ -836,17 +777,12 @@ describe('witness stack order', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// addresses
-// ---------------------------------------------------------------------------
-
 describe('address encoding', () => {
   test('is bech32m, not bech32', () => {
     const t = buildTree({ ...K2, timeoutTo: 'buyer', timeoutBlocks: 1008 })
     const words = [1, ...bech32m.toWords(t.outputKey)]
     expect(t.addresses.regtest).toBe(bech32m.encode('bcrt', words))
-    // The bech32 form differs only in the 6-character checksum: it looks right
-    // and is never accepted.
+    // The bech32 form differs only in the 6-character checksum. Looks right, never accepted.
     const wrong = bech32.encode('bcrt', words)
     expect(wrong).toBe('bcrt1p39dcth57nqds9gknv0wsr3yqlvs9ck66x85xltlcvysjdcmlludsy0zj2p')
     expect(t.addresses.regtest).not.toBe(wrong)
@@ -870,10 +806,6 @@ describe('address encoding', () => {
     expect(() => encodeTaprootAddress(new Uint8Array(31), 'bc')).toThrow()
   })
 })
-
-// ---------------------------------------------------------------------------
-// determinism and purity
-// ---------------------------------------------------------------------------
 
 describe('determinism and purity', () => {
   function fingerprint(t: EscrowTree): string {
@@ -906,11 +838,8 @@ describe('determinism and purity', () => {
   })
 
   test('the exported constant tables are frozen, not merely `as const`', () => {
-    // `as const` is a type-level annotation; the runtime object stays writable.
-    // OP and NETWORK_HRP are read at derivation time, so an unfrozen table lets
-    // any consumer in the process rewrite every later leaf script and address.
-    // Turning CHECKSIGVERIFY into CHECKSIG would silently make leaf A a 1-of-2
-    // that one party can drain alone.
+    // `as const` is types only. OP and NETWORK_HRP are read at derivation time, so a writable
+    // table lets any code in the process turn CHECKSIGVERIFY into CHECKSIG, making leaf A a 1-of-2.
     expect(Object.isFrozen(OP)).toBe(true)
     expect(Object.isFrozen(NETWORK_HRP)).toBe(true)
     expect(() => {
@@ -947,10 +876,8 @@ describe('determinism and purity', () => {
       expect(`${label}:${Object.isFrozen(container)}`).toBe(`${label}:true`)
     }
 
-    // params echoes the validated inputs so an auditor need not trust the
-    // caller, and the object graph is shared (leaves.A is leafList[0];
-    // leaves.B.hash is leaves.A.merklePath[0]), so a single stray write would
-    // propagate and make the echo disagree with the bytes it describes.
+    // The object graph is shared (leaves.A is leafList[0]), so one stray write would
+    // propagate and make params disagree with the bytes it describes.
     expect(t.leaves.A).toBe(t.leafList[0])
     expect(() => {
       ;(t.params as unknown as Record<string, unknown>).buyer = new Uint8Array(32)
@@ -965,15 +892,12 @@ describe('determinism and purity', () => {
     }).toThrow()
     expect(() => t.leaves.A!.merklePath.reverse()).toThrow()
 
-    // The limit: a Uint8Array cannot be frozen (the engine throws "Attempting
-    // to store non-configurable property on a typed array"), so the bytes are
-    // read-only by contract only, as EscrowTree documents.
+    // Typed arrays can't be frozen, so the bytes are read-only by contract (see EscrowTree).
     expect(Object.isFrozen(t.params.buyer)).toBe(false)
   })
 
   test('core/escrow has no I/O, no environment assumptions, no hidden entropy', () => {
-    // Guards the core/README.md rules for these files: recover.html runs this
-    // code from file:// with no server.
+    // Guards the core/README.md rules. recover.html runs this code from file:// with no server.
     const forbidden: [RegExp, string][] = [
       [/\bfrom\s+['"]node:/, 'node: import'],
       [/\brequire\s*\(/, 'require()'],
@@ -990,8 +914,8 @@ describe('determinism and purity', () => {
     ]
     for (const file of ['tagged.ts', 'script.ts', 'tree.ts', 'index.ts']) {
       const src = readFileSync(new URL(`../../core/escrow/${file}`, import.meta.url), 'utf8')
-        .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
-        .replace(/^\s*\/\/.*$/gm, '') // line comments
+        .replace(/\/\*[\s\S]*?\*\//g, '') // Block comments.
+        .replace(/^\s*\/\/.*$/gm, '') // Line comments.
       for (const [re, label] of forbidden) {
         expect(`${file}:${label}:${re.test(src)}`).toBe(`${file}:${label}:false`)
       }
@@ -999,10 +923,7 @@ describe('determinism and purity', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// validation: the library enforces none of this
-// ---------------------------------------------------------------------------
-
+// @scure/btc-signer enforces none of these checks.
 describe('input validation', () => {
   const base = { ...K1, timeoutTo: 'buyer' as const, timeoutBlocks: 1008 }
 
@@ -1019,8 +940,7 @@ describe('input validation', () => {
   })
 
   test('rejects a 32-byte value that is not a point on the curve', () => {
-    // A leaf built around this would derive a fundable address that nobody can
-    // ever satisfy. The library does not check leaf keys at all.
+    // Such a leaf gives a fundable address nobody can spend. The library doesn't check leaf keys.
     expect(() => buildTree({ ...base, buyer: new Uint8Array(32) })).toThrow(/valid x-only point/)
     expect(() => buildTree({ ...base, seller: hexToBytes('ff'.repeat(32)) })).toThrow(
       /valid x-only point/,
@@ -1033,27 +953,21 @@ describe('input validation', () => {
   })
 
   test('rejects duplicate parties', () => {
-    // buyer === seller collapses leaf A into a single-signer path: one party
-    // drains the escrow alone.
+    // buyer === seller makes leaf A single-signer, so one party can drain the escrow.
     expect(() => buildTree({ ...base, seller: K1.buyer })).toThrow(/buyer and seller/)
     expect(() => buildTree({ ...base, arbiter: K1.buyer })).toThrow(/differ from buyer/)
     expect(() => buildTree({ ...base, arbiter: K1.seller })).toThrow(/differ from seller/)
   })
 
   test('rejects unknown parameters, including the wire name arbiter_x', () => {
-    // The no-arbiter tree is chosen by leaving `arbiter` out, so without this
-    // check an arbiter key under any other name would be dropped and buildTree
-    // would return the two-leaf tree, at a different address, with no error.
-    // The escrow event's wire field is `arbiter_x`, so an event spread
-    // straight in is the likely way to make this mistake.
+    // Leaving `arbiter` out picks the two-leaf tree, so a misnamed arbiter key would silently
+    // change the address. Spreading an escrow event (wire field `arbiter_x`) is the likely cause.
     const event: Record<string, unknown> = { ...base, arbiter_x: K1.arbiter }
     delete event.arbiter
     expect(() => buildTree(event as never)).toThrow(/unknown parameter "arbiter_x"/)
     expect(() => buildTree({ ...base, arbitor: K1.arbiter } as never)).toThrow(/unknown parameter/)
     expect(() => buildTree({ ...base, network: 'signet' } as never)).toThrow(/unknown parameter/)
-    // TypeScript catches none of this: excess-property checking does not apply
-    // to a spread or a variable, `arbiter` is optional, and the pages in web/
-    // call buildTree from untyped JavaScript.
+    // TypeScript won't catch it. Spreads skip excess-property checks.
     expect(buildTree({ ...base }).shape).toBe('arbiter-4leaf')
     expect(
       buildTree({ buyer: K1.buyer, seller: K1.seller, timeoutTo: 'buyer', timeoutBlocks: 1008 })
@@ -1068,8 +982,7 @@ describe('input validation', () => {
   })
 
   test('rejects a timeoutBlocks outside the BIP-68 block range', () => {
-    // Above 65535 BIP-112 masks the operand: 65546 executes as 10 blocks, so a
-    // month-long timeout would silently become a 10-block one.
+    // BIP-112 masks the operand above 65535, so 65546 would run as 10 blocks.
     expect(() => buildTree({ ...base, timeoutBlocks: 0 })).toThrow(/1\.\.65535/)
     expect(() => buildTree({ ...base, timeoutBlocks: -1 })).toThrow(/1\.\.65535/)
     expect(() => buildTree({ ...base, timeoutBlocks: 65536 })).toThrow(/1\.\.65535/)
@@ -1077,22 +990,18 @@ describe('input validation', () => {
     expect(() => buildTree({ ...base, timeoutBlocks: 1008.5 })).toThrow(/integer/)
     expect(() => buildTree({ ...base, timeoutBlocks: '1008' as never })).toThrow(/integer/)
     expect(() => buildTree({ ...base, timeoutBlocks: NaN })).toThrow(/integer/)
-    // The boundaries themselves are accepted.
     expect(buildTree({ ...base, timeoutBlocks: 1 }).leaves.D!.script.length).toBe(37)
     expect(buildTree({ ...base, timeoutBlocks: 65535 }).leaves.D!.script.length).toBe(40)
   })
 
   test('a rejected timeoutBlocks is rendered so a string cannot pass for a number', () => {
-    // On the JSON paths (the escrow event, the recovery flow) a number can
-    // arrive as a string, and String("4320") would make the message read
-    // "expected an integer, got 4320", which contradicts itself and sends the
-    // reader hunting for a range problem that is not there.
+    // JSON paths can deliver "4320" as a string. Unquoted, the error would read
+    // "expected an integer, got 4320", which contradicts itself.
     expect(() => buildTree({ ...base, timeoutBlocks: '4320' as never })).toThrow(/got "4320"/)
     expect(() => buildTree({ ...base, timeoutBlocks: true as never })).toThrow(/got true/)
-    // ...while a real number still renders bare, with no quotes.
+    // Real numbers stay unquoted.
     expect(() => buildTree({ ...base, timeoutBlocks: 4320.5 })).toThrow(/got 4320\.5/)
-    // JSON.stringify alone would render NaN and Infinity as `null`, and it
-    // throws on the BigInt.
+    // Plain JSON.stringify gives `null` for NaN and Infinity and throws on BigInt.
     expect(() => buildTree({ ...base, timeoutBlocks: NaN })).toThrow(/got NaN/)
     expect(() => buildTree({ ...base, timeoutBlocks: Infinity })).toThrow(/got Infinity/)
     expect(() => buildTree({ ...base, timeoutBlocks: 4320n as never })).toThrow(/got 4320n/)
@@ -1103,10 +1012,6 @@ describe('input validation', () => {
     expect(() => buildTree(undefined as never)).toThrow()
   })
 })
-
-// ---------------------------------------------------------------------------
-// shape
-// ---------------------------------------------------------------------------
 
 describe('tree shape', () => {
   test('arbiter present builds four leaves, absent builds two', () => {
@@ -1146,7 +1051,7 @@ describe('tree shape', () => {
     const other = tapBranchHash(tapBranchHash(h('A'), h('C')), tapBranchHash(h('B'), h('D')))
     expect(hex(t.merkleRoot)).toBe(hex(mandated))
     expect(hex(t.merkleRoot)).not.toBe(hex(other))
-    // Swapping siblings within a pair is invisible, because TapBranch sorts.
+    // TapBranch sorts, so swapping siblings within a pair changes nothing.
     const swapped = tapBranchHash(tapBranchHash(h('B'), h('A')), tapBranchHash(h('D'), h('C')))
     expect(hex(swapped)).toBe(hex(mandated))
   })
@@ -1157,8 +1062,7 @@ describe('tree shape', () => {
     expect(hex(again.tweak)).toBe(hex(t.tweak))
     expect(hex(again.outputKey)).toBe(hex(t.outputKey))
     expect(again.parity).toBe(t.parity)
-    // Matches the library's own tweak helper. (It lives on btc.utils, not the
-    // package root, which exports taprootNumsKey and TaprootControlBlock.)
+    // The library's tweak helper lives on btc.utils, not the package root.
     const [libKey, libParity] = btc.utils.taprootTweakPubkey(numsInternalKey(), t.merkleRoot)
     expect(hex(libKey)).toBe(hex(t.outputKey))
     expect(libParity).toBe(t.parity)

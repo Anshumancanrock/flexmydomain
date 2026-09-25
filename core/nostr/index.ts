@@ -1,18 +1,5 @@
-/**
- * core/nostr: NIP-01 events, NIP-19 identifiers, NIP-44 and NIP-17
- * encryption, and the builders and parsers for every event this marketplace
- * publishes.
- *
- * Pure: no relays, no fetch, no clock. Connecting, subscribing and publishing
- * live in net/, page code and services/, which take this module's output as
- * their input.
- *
- * Relays hold the data; any database is a cache. Given an event from any
- * relay, this module says whether it is what it claims to be, with no call to
- * a server run by this project.
- *
- *   import { checkEvent, buildListing } from './core/nostr/index.js'
- */
+// Builders and parsers for every event we publish. Pure, no I/O and no clock.
+// Checks any relay's event with no call to a server of ours.
 
 export {
   addressOf,
@@ -224,17 +211,7 @@ export {
 } from './portfolio.js'
 export type { EntryVerification, Portfolio, PortfolioEntry } from './portfolio.js'
 
-/**
- * The default relay set.
- *
- * It lives in code rather than a config file so anyone can rebuild the
- * marketplace from this repository alone. These five relays hold the data,
- * and none of them is run by this project.
- *
- * It is only a fallback. Under NIP-65 a user's own write relays take
- * precedence for their events (relays.ts): where a seller publishes is the
- * seller's decision.
- */
+/** Fallback only, none run by us. A user's NIP-65 write relays win for their events (relays.ts). */
 export const DEFAULT_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
@@ -244,11 +221,8 @@ export const DEFAULT_RELAYS = [
 ] as const
 
 /*
- * Each relay here was checked before it was added: a websocket query returns
- * events, it serves a NIP-11 document, and that document declares no
- * restricted writes, required auth or payment.
- *
- * `wss://relay.nostr.band` is left out on purpose. It is a search aggregator:
- * it serves no NIP-11 document, and a plain kind 1 query returned nothing in
- * nine seconds, so it cannot be relied on to hold a seller's inventory.
+ * Each relay was vetted: a query returns events, and its NIP-11 document declares
+ * no restricted writes, auth or payment.
+ * relay.nostr.band is out. It's a search aggregator with no NIP-11, and a kind 1
+ * query returned nothing in nine seconds.
  */

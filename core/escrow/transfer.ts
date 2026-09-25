@@ -1,50 +1,38 @@
 /**
- * Following a domain transfer through public RDAP observations, with no
- * registrar integration. The parties move the name themselves (the seller
- * unlocks it and sends the auth code, the buyer pulls it to their own
- * registrar), and this module only reads what the registry shows. Holding
- * registrar API keys or a reseller account instead would make the site the
- * domain's custodian. See spec/PROTOCOL.md.
+ * Follows a domain transfer through public RDAP, with no registrar integration.
+ * The parties move the name themselves and we only read what the registry
+ * shows. Holding registrar API keys would make the site the domain's custodian.
+ * See spec/PROTOCOL.md.
  *
- * No fetch and no clock: every function takes the observations and the time
- * as arguments, so a verdict can be reproduced from its evidence months later,
- * in a dispute.
+ * No fetch and no clock. Observations and time are arguments, so a verdict can
+ * be reproduced from its evidence months later in a dispute.
  *
- * What is watched for, in order:
+ * Watched for, in order:
  *
  *   lock on, then off  only the registrant can change it. Gates funding.
  *   pendingTransfer    the transfer is underway: the point of no return.
  *   fingerprint moved  the registry agrees the name is somewhere new.
  *
- * No state changes on one observation. RDAP is cached, registries lag by
- * hours, and a failed fetch is not evidence, so a change needs two agreeing
- * polls at least thirty minutes apart.
+ * Nothing changes on one observation. RDAP is cached, registries lag by hours
+ * and a failed fetch is not evidence, so a change needs two agreeing polls at
+ * least 30 minutes apart.
  */
 
 import { fingerprintMatches, type Fingerprint, type RdapFacts } from '../oracle/rdap.js'
 import { PENDING_TRANSFER_STATUS, TRANSFER_LOCK_STATUS } from '../oracle/rdap.js'
 
-/**
- * How far apart two observations must be to count as independent. Any closer
- * and both are likely the same cached answer read twice.
- */
+/** Closer polls are likely the same cached answer read twice. */
 export const MIN_POLL_GAP_SECONDS = 1800
 
-/** How many agreeing observations a state change needs. */
 export const REQUIRED_AGREEING_POLLS = 2
 
 /**
- * What the buyer commits to before any money moves.
+ * Where the buyer will receive the name, stated before any money moves. RDAP
+ * redacts the registrant almost everywhere (GDPR) and shows only the registrar,
+ * so "transferred" means "the registry shows what the buyer committed to".
  *
- * Post-GDPR, RDAP redacts the registrant almost everywhere: it shows that a
- * name moved and to which registrar, never to whom. So the buyer states in
- * advance where they will receive it, and "the transfer completed" means "the
- * registry now shows what the buyer committed to". Without this the release
- * condition could not be checked.
- *
- * Two fields, because either alone has a hole: a transfer between registrars
- * changes the IANA id, but a push inside one registrar does not change it at
- * all, and then only the nameservers move.
+ * Two fields since either alone has a hole. A move between registrars changes
+ * the IANA id, but a push inside one registrar only moves the nameservers.
  */
 export interface TransferCommitment extends Fingerprint {
   committedAt: number
@@ -53,7 +41,7 @@ export interface TransferCommitment extends Fingerprint {
 /** One dated RDAP poll. The hash is what goes in the escrow event. */
 export interface Observation {
   at: number
-  /** sha256 of the raw response bytes, as received. */
+  /** sha256 of the raw response bytes as received. */
   snapshotHash: string
   facts: RdapFacts
 }
@@ -62,28 +50,28 @@ export type TransferState =
   /** `clientTransferProhibited` present. Only the registrant can clear it. */
   | 'locked'
   /**
-   * No lock: the name can move. On its own this says nothing about who holds
-   * it; many registrars never set the lock at all. See {@link registrantActed}.
+   * No lock. Says nothing about who holds the name, many registrars never set
+   * it. See {@link registrantActed}.
    */
   | 'unlocked'
-  /** `pendingTransfer` seen. The point of no return. */
+  /** `pendingTransfer` seen. Point of no return. */
   | 'pending'
-  /** The registry shows what the buyer committed to. */
+  /** Registry shows what the buyer committed to. */
   | 'transferred'
-  /** It was transferred, and then moved back. A registrar reversal. */
+  /** Transferred, then moved back by a registrar reversal. */
   | 'reverted'
-  /** Not enough agreeing observations to say anything yet. */
+  /** Not enough agreeing observations yet. */
   | 'unknown'
 
 export interface TransferVerdict {
   state: TransferState
-  /** True when REQUIRED_AGREEING_POLLS agreed, far enough apart. */
+  /** REQUIRED_AGREEING_POLLS agreed, far enough apart. */
   confirmed: boolean
-  /** When the earliest of the agreeing observations was taken. */
+  /** Time of the earliest agreeing observation. */
   since?: number
-  /** The snapshot hashes that justify this verdict. The evidence file. */
+  /** Snapshot hashes backing this verdict. */
   evidence: string[]
-  /** Why the state is what it is, in words, for the UI and for a ruling. */
+  /** Plain words, for the UI and for a ruling. */
   reason: string
 }
 
@@ -91,8 +79,7 @@ export interface TransferVerdict {
 function classify(observation: Observation, commitment: TransferCommitment): TransferState {
   const { facts } = observation
 
-  // Checked first: a completed transfer is still "transferred" even if the
-  // new registrar immediately re-locks the name, which most of them do.
+  // First, since most registrars re-lock right after a transfer and it still counts.
   if (fingerprintMatches({ registrarIanaId: facts.registrarIanaId, nameservers: facts.nameservers }, commitment)) {
     return 'transferred'
   }
@@ -102,11 +89,9 @@ function classify(observation: Observation, commitment: TransferCommitment): Tra
 }
 
 /**
- * The two-poll rule.
- *
- * Whether `state` is supported by REQUIRED_AGREEING_POLLS observations at
- * least MIN_POLL_GAP_SECONDS apart. Observations that disagree do not average
- * out: they confirm nothing, and the previous confirmed state stands.
+ * The two-poll rule. Is `state` backed by REQUIRED_AGREEING_POLLS observations
+ * at least MIN_POLL_GAP_SECONDS apart? Disagreeing polls don't average out.
+ * They confirm nothing, and the previous confirmed state stands.
  */
 function confirm(
   observations: readonly Observation[],
@@ -119,8 +104,7 @@ function confirm(
 
   if (supporting.length < REQUIRED_AGREEING_POLLS) return { confirmed: false, evidence: [] }
 
-  // Walk forward for the earliest pair far enough apart. Any later pair also
-  // qualifies, so the earliest gives the most accurate `since`.
+  // Earliest qualifying pair, for the most accurate `since`.
   for (let i = 0; i < supporting.length; i++) {
     for (let j = i + 1; j < supporting.length; j++) {
       if (supporting[j].at - supporting[i].at >= MIN_POLL_GAP_SECONDS) {
@@ -136,11 +120,9 @@ function confirm(
 }
 
 /**
- * Where the transfer has got to, from the whole observation history.
- *
- * The whole history is required: `reverted` is only visible by comparing what
- * the registry shows now against what it showed before, and a reversal is the
- * case where one side can end up with both the money and the domain.
+ * Transfer state from the whole observation history. `reverted` only shows
+ * against what the registry showed before, and a reversal is how one side ends
+ * up with both the money and the domain.
  */
 export function deriveTransferState(params: {
   observations: readonly Observation[]
@@ -155,8 +137,8 @@ export function deriveTransferState(params: {
 
   const transferred = confirm(observations, params.commitment, 'transferred')
 
-  // A reversal: confirmed transferred at some point, and the most recent
-  // observations no longer match. This is the case the arbiter exists for.
+  // Reversal: confirmed transferred once, and the latest polls no longer match.
+  // This is what the arbiter is for.
   if (transferred.confirmed) {
     const after = observations.filter((o) => o.at > (transferred.since as number))
     const latest = after.slice(-REQUIRED_AGREEING_POLLS)
@@ -195,8 +177,7 @@ export function deriveTransferState(params: {
     if (result.confirmed) return { state, confirmed: true, since: result.since, evidence: result.evidence, reason }
   }
 
-  // Something was seen, but not twice far enough apart. Report what the last
-  // poll suggests without acting on it.
+  // Seen, but not confirmed. Report the last poll without acting on it.
   const latest = classify(observations[observations.length - 1], params.commitment)
   return {
     state: 'unknown',
@@ -209,8 +190,8 @@ export function deriveTransferState(params: {
 }
 
 /**
- * Whether the registry allows a transfer right now: unlocked, or already
- * moving. Necessary for funding but not sufficient; see {@link fundable}.
+ * Registry allows a transfer now (unlocked or pending). Needed for funding but
+ * not enough, see {@link fundable}.
  */
 export function transferAllowed(verdict: TransferVerdict): boolean {
   return verdict.confirmed && (verdict.state === 'unlocked' || verdict.state === 'pending')
@@ -219,19 +200,15 @@ export function transferAllowed(verdict: TransferVerdict): boolean {
 /**
  * Whether the registry has shown the registrant act, not just a state.
  *
- * A DNS TXT record proves control of the zone, which a hosting provider, an
- * agency or a former employee can have with no registrar access at all.
- * Registrar control is shown by an act only the account holder can perform,
- * observed in public: changing the transfer lock.
+ * A DNS TXT record only proves zone control, which a host, an agency or an
+ * ex-employee can have without registrar access. Changing the transfer lock is
+ * an act only the account holder can do, and it's public.
  *
- * "Unlocked" on its own is not that act. Many registrars never set the lock,
- * so a name can read unlocked whoever lists it. So the registry must be seen
- * locked (confirmed by the two-poll rule) and then unlocked (confirmed again,
- * by readings taken after the lock was confirmed), and the latest reading must
- * not show the lock back on. A seller whose domain is already unlocked has to
- * turn the lock on and off again.
- *
- * The four snapshot hashes that show it are returned, so a ruling can cite them.
+ * "Unlocked" alone isn't that act, since many registrars never set the lock.
+ * So we need a confirmed lock, then a confirmed unlock from readings after it,
+ * and the latest reading not locked again. A seller whose name is already
+ * unlocked has to lock and unlock it. Returns the four snapshot hashes for a
+ * ruling to cite.
  */
 export function registrantActed(params: {
   observations: readonly Observation[]
@@ -241,7 +218,7 @@ export function registrantActed(params: {
   const states = sorted.map((o) => classify(o, params.commitment))
   const open = (s: TransferState) => s === 'unlocked' || s === 'pending'
 
-  // The earliest confirmed lock: two locked readings far enough apart.
+  // Earliest confirmed lock.
   let lockedAt: number | undefined
   let lockEvidence: string[] = []
   search: for (let i = 0; i < sorted.length; i++) {
@@ -291,15 +268,12 @@ export function registrantActed(params: {
 }
 
 /**
- * Whether the escrow may be funded: only when the name is confirmed unlocked
- * and the registry has shown the registrant act ({@link registrantActed}).
- * Unlocked alone would let a seller who controls the zone but not the
- * registrar account (a DNS host, a former employee) take a buyer's money for a
- * domain they cannot hand over.
+ * Fundable only when confirmed unlocked and {@link registrantActed}. Unlocked
+ * alone would let someone with the zone but not the registrar account (a DNS
+ * host, an ex-employee) take a buyer's money for a domain they can't hand over.
  *
- * A transfer already pending is not fundable either. The buyer starts the
- * transfer after paying, with the auth code the seller sends, so one in flight
- * before the money is in means somebody else is moving the name.
+ * Not while pending either. The buyer starts the transfer after paying, so one
+ * already in flight means somebody else is moving the name.
  */
 export function fundable(params: {
   verdict: TransferVerdict
@@ -310,22 +284,18 @@ export function fundable(params: {
 }
 
 /**
- * Whether the seller may be paid: only on a confirmed, un-reverted transfer to
- * the committed fingerprint. `pending` is not enough. A transfer in flight can
- * still fail, be rejected or be reversed, and paying on `pending` could pay
- * for a domain that never arrives.
+ * Release only on a confirmed, un-reverted transfer to the committed
+ * fingerprint. `pending` isn't enough, since a transfer in flight can still
+ * fail, be rejected or be reversed.
  */
 export function releasable(verdict: TransferVerdict): boolean {
   return verdict.confirmed && verdict.state === 'transferred'
 }
 
 /**
- * Build the commitment from an RDAP snapshot of the buyer's own domain, or
- * from values they type.
- *
- * At least one field must be present. With neither, the release condition
- * could never be satisfied and the escrow would be a trap, so an empty
- * commitment throws.
+ * Commitment from an RDAP snapshot of the buyer's own domain, or typed values.
+ * Needs at least one field. With neither, release could never happen and the
+ * escrow would be a trap.
  */
 export function buildCommitment(params: {
   registrarIanaId?: string
@@ -347,9 +317,8 @@ export function buildCommitment(params: {
 }
 
 /**
- * Whether an observation is usable at all. A failed fetch must never be
- * recorded as a negative observation: it would look like a vanished lock or a
- * reverted transfer.
+ * A failed fetch must never be recorded as a negative observation. It would
+ * look like a vanished lock or a reverted transfer.
  */
 export function usable(observation: { facts?: RdapFacts; snapshotHash?: string }): boolean {
   return Boolean(observation.facts && observation.snapshotHash)

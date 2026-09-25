@@ -1,2 +1,2 @@
-// Types for ./fmd.js, the bundle that scripts/build-web.ts builds from client/.
+// fmd.js is bundled from client/ by scripts/build-web.ts.
 export * from '../../client/index.ts'

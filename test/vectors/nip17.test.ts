@@ -1,15 +1,5 @@
-/**
- * NIP-44 and NIP-17, tested against nostr-tools in both directions.
- *
- * The registrar auth code travels over this channel, and whoever holds that
- * code can take the domain. Most tests below either check byte-for-byte
- * agreement with the reference or show that an attack fails.
- *
- * nostr-tools is a dev dependency and is imported only here. core/ implements
- * both NIPs from the specs over @noble primitives, so these tests compare two
- * independent implementations, as the core/escrow tests do against
- * @scure/btc-signer.
- */
+// NIP-44 and NIP-17 vs nostr-tools (dev dep, imported only here), an independent implementation.
+// The registrar auth code rides this channel. Whoever holds it can take the domain.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -36,8 +26,8 @@ const key = (fill: number) => {
   const sk = new Uint8Array(32).fill(fill)
   return { sk, pk: bytesToHex(schnorr.getPublicKey(sk)) }
 }
-const ALICE = key(0x11)   // seller
-const BOB = key(0x22)     // buyer
+const ALICE = key(0x11)   // Seller.
+const BOB = key(0x22)     // Buyer.
 const MALLORY = key(0x44)
 const EPHEMERAL = new Uint8Array(32).fill(0x33)
 const NOW = 1789430400
@@ -56,8 +46,6 @@ function sealed(sender = ALICE, recipient = BOB.pk, content = AUTH_CODE): NostrE
   const rumor = buildRumor({ pubkey: sender.pk, recipient, content, createdAt: NOW, subject: 'lumenary.com' })
   return giftWrap({ rumor, senderSecretKey: sender.sk, recipient, entropy })
 }
-
-// ---------------------------------------------------------------------------
 
 describe('NIP-44 agrees with the reference, byte for byte', () => {
   test('the conversation key matches, and is symmetric', () => {
@@ -98,7 +86,7 @@ describe('NIP-44 agrees with the reference, byte for byte', () => {
     const conversation = conversationKey(ALICE.sk, BOB.pk)
     const payload = encrypt(AUTH_CODE, conversation, new Uint8Array(32).fill(3))
     const bytes = [...atob(payload)].map((c) => c.charCodeAt(0))
-    bytes[40] ^= 0x01 // inside the ciphertext
+    bytes[40] ^= 0x01 // Inside the ciphertext.
     const tampered = btoa(String.fromCharCode(...bytes))
     expect(() => decrypt(tampered, conversation)).toThrow(/authentication code/)
   })
@@ -120,8 +108,8 @@ describe('NIP-17 gift wrap', () => {
   test('the wrap hides the sender from the relay', () => {
     const wrap = sealed()
     expect(wrap.kind).toBe(GIFT_WRAP_KIND)
-    expect(wrap.pubkey).not.toBe(ALICE.pk)         // signed by a throwaway key
-    expect(wrap.tags).toEqual([['p', BOB.pk]])      // and names only the recipient
+    expect(wrap.pubkey).not.toBe(ALICE.pk)         // Throwaway signing key.
+    expect(wrap.tags).toEqual([['p', BOB.pk]])      // Names only the recipient.
     expect(JSON.stringify(wrap)).not.toContain(AUTH_CODE)
   })
 
@@ -154,8 +142,7 @@ describe('NIP-17 gift wrap', () => {
   })
 
   test('a rumor claiming to be from somebody else is refused', () => {
-    // Mallory seals a message that says it is from Alice. The seal is signed
-    // by Mallory, so the two authors disagree, and that check is what stops a
+    // Mallory seals a rumor claiming Alice as author. The author mismatch is what stops a
     // forged "here is the auth code".
     const forgedRumor = buildRumor({ pubkey: ALICE.pk, recipient: BOB.pk, content: 'send the domain to me', createdAt: NOW })
     const forgedSeal = signEvent(

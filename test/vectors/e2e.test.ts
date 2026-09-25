@@ -1,10 +1,5 @@
-/**
- * The whole product, end to end, against a local relay and a stubbed DNS.
- *
- * It walks the path a user takes (prove a domain, publish it, list it, zap it,
- * see it ranked) using the functions the pages call, in the order they call
- * them. Nothing here touches a public relay or a real resolver.
- */
+// The user's path end to end, through the functions the pages call, in the order they call them.
+// Local relay fixture and stubbed DNS only.
 
 import { test, expect, describe, afterEach } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -46,16 +41,12 @@ const key = (fill: number) => {
 
 const SELLER = key(0x11)
 const BUYER = key(0x22)
-const PROVIDER = key(0x33) // the marketplace's zapper service
-const MARKET = key(0x44)   // the marketplace's own recipient key
+const PROVIDER = key(0x33) // Marketplace's zapper service.
+const MARKET = key(0x44)   // Marketplace's own recipient key.
 
 const DOMAIN = 'lumenary.com'
 const IAT = 1789430400
 const NOW = IAT + 600
-
-// ---------------------------------------------------------------------------
-// the fake zone
-// ---------------------------------------------------------------------------
 
 const realFetch = globalThis.fetch
 let zone: Record<string, string[]> = {}
@@ -85,7 +76,7 @@ function relay(): TestRelay {
   return r
 }
 
-/** Steps 1 and 2 of the flex page: sign the proof, put it in the zone. */
+/** Flex page steps 1 and 2. Sign the proof and put it in the zone. */
 function proveDomain(owner: typeof SELLER, domain = DOMAIN, iat = IAT) {
   const event = signEvent(proofEvent({ domain, pubkey: owner.pk, iat }), owner.sk, AUX)
   const record = { version: 'fmd1' as const, iat, pubkey: owner.pk, sig: event.sig }
@@ -93,15 +84,13 @@ function proveDomain(owner: typeof SELLER, domain = DOMAIN, iat = IAT) {
   return { event, record }
 }
 
-// ---------------------------------------------------------------------------
-
 describe('the whole path', () => {
   test('prove -> publish -> list -> browse -> zap -> rank', async () => {
     stubDns()
     const r = relay()
     const relays = [r.url]
 
-    // ---- 1. The seller proves the domain and publishes the proof + portfolio.
+    // 1. Seller proves the domain, publishes proof and portfolio.
     const { event: proof, record } = proveDomain(SELLER)
 
     const entries = upsertEntry([], {
@@ -120,7 +109,7 @@ describe('the whole path', () => {
     expect((await publishToRelays(relays, proof)).every((x) => x.ok)).toBe(true)
     expect((await publishToRelays(relays, portfolio)).every((x) => x.ok)).toBe(true)
 
-    // ---- 2. Somebody opens the seller's flex page. One fetch, one event.
+    // 2. Someone opens the seller's flex page. One fetch, one event.
     const portfolioEvents = await queryRelays(relays, [portfolioFilter(SELLER.pk)])
     const fetched = newestPerAddress(portfolioEvents)[0]
     expect(fetched).toBeTruthy()
@@ -129,14 +118,14 @@ describe('the whole path', () => {
     expect(parsedPortfolio.ok).toBe(true)
     if (!parsedPortfolio.ok) return
 
-    // Verified offline, against the portfolio's own key, with no network.
+    // Offline, against the portfolio's own key.
     expect(verifyPortfolio(parsedPortfolio.portfolio).every((v) => v.proven)).toBe(true)
 
-    // And the live half: the zone still agrees today.
+    // Live, the zone still agrees.
     const liveProof = await checkDomainProof({ domain: DOMAIN, pubkey: SELLER.pk, now: NOW, dnsOnly: true })
     expect(liveProof.status.proven).toBe(true)
 
-    // ---- 3. The seller lists it.
+    // 3. Seller lists it.
     const listing = signEvent(
       buildListing({
         pubkey: SELLER.pk,
@@ -151,7 +140,7 @@ describe('the whole path', () => {
     )
     expect((await publishToRelays(relays, listing)).every((x) => x.ok)).toBe(true)
 
-    // ---- 4. A buyer opens the market page: the steps of load() in market.js.
+    // 4. Buyer opens the market page. Same steps as load() in market.js.
     const found = await queryRelays(relays, [listingFilter({ limit: 500 })])
     const current = newestPerAddress(found)
     const authors = [...new Set(current.map((e) => e.pubkey))]
@@ -171,13 +160,12 @@ describe('the whole path', () => {
     })
     const check = checkListing({ event: live[0], dnsProof: dns.dns, now: NOW })
 
-    // The listing rule: the signature, the embedded proof and the zone all agree.
     expect(check.ok).toBe(true)
     expect(check.selfConsistent).toBe(true)
     expect(check.zoneConfirmed).toBe(true)
     expect(check.listing?.priceSats).toBe(2_500_000)
 
-    // ---- 5. The buyer features it with a zap.
+    // 5. Buyer features it with a zap.
     const address = listingAddress(parsed.listing, relays)
     const amountSats = 5_000
     const zapRequest = signEvent(
@@ -193,8 +181,7 @@ describe('the whole path', () => {
       AUX,
     )
 
-    // The provider writes the receipt, never the marketplace: it is the one
-    // event here that somebody else signs on the recipient's behalf.
+    // The provider signs the receipt for the recipient, never the marketplace.
     const receipt = signEvent(
       {
         pubkey: PROVIDER.pk,
@@ -213,7 +200,7 @@ describe('the whole path', () => {
     )
     await publishToRelays(relays, receipt)
 
-    // ---- 6. The receipts are verified, counted and ranked.
+    // 6. Verify, count and rank the receipts.
     const receipts = await queryRelays(relays, [zapReceiptFilter({ addresses: [address], since: NOW - 7 * 86400 })])
     const verified = receipts
       .map((e) => verifyZapReceipt({ receipt: e, recipient: MARKET.pk, expectedProvider: PROVIDER.pk }))
@@ -228,7 +215,7 @@ describe('the whole path', () => {
   })
 
   test('a listing for a domain the seller cannot prove is not verified', async () => {
-    stubDns() // the zone is empty: no proof anywhere
+    stubDns() // Empty zone, no proof anywhere.
     const r = relay()
 
     const stolen = signEvent(
@@ -254,8 +241,7 @@ describe('the whole path', () => {
     const dns = await checkDomainProof({ domain: 'apple.com', pubkey: SELLER.pk, now: NOW, dnsOnly: true })
     const check = checkListing({ event, dnsProof: dns.dns, now: NOW })
 
-    // It is on the relay and internally consistent. The zone is what refuses
-    // it: the event is not deleted, only left unverified.
+    // Stored and self-consistent. Only the zone refuses it, and it stays unverified, not deleted.
     expect(r.events).toHaveLength(1)
     expect(check.selfConsistent).toBe(true)
     expect(check.ok).toBe(false)
@@ -292,7 +278,7 @@ describe('the whole path', () => {
     await publishToRelays([r.url], event)
 
     const [fetched] = await queryRelays([r.url], [{ kinds: [30078], authors: [SELLER.pk] }])
-    // Same 64 bytes as the TXT record. One signing action, two artefacts.
+    // Same 64 bytes as the TXT record. One signature, two artefacts.
     expect(fetched.sig).toBe(event.sig)
     expect(addressOf(fetched)).toBe(`30078:${SELLER.pk}:fmd:proof:${DOMAIN}`)
   })
@@ -301,8 +287,7 @@ describe('the whole path', () => {
     stubDns()
     const r = relay()
 
-    // A portfolio holding two domains: one proven by DNS with a signature, one
-    // by NIP-05, which carries no signature and cannot be verified offline.
+    // One DNS entry with a signature, one NIP-05 entry with none to check offline.
     const { record } = proveDomain(SELLER)
     const before = [
       { domain: DOMAIN, source: 'dns' as const, iat: record.iat, sig: record.sig, firstSeen: IAT },
@@ -318,16 +303,14 @@ describe('the whole path', () => {
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
 
-    // The sell form offers only DNS-proven domains, so it filters. Republishing
-    // from that filtered list would lose data: kind 30078 is replaceable, so
-    // the filtered copy would become the portfolio and the NIP-05 entry would
-    // be gone with no warning and no way back.
+    // The sell form shows only DNS-proven entries. Kind 30078 is replaceable, so
+    // republishing that filtered list would silently drop the NIP-05 entry for good.
     const verdicts = verifyPortfolio(parsed.portfolio)
     const listable = parsed.portfolio.entries.filter((e, i) => verdicts[i].proven)
     expect(listable).toHaveLength(1)
     expect(parsed.portfolio.entries).toHaveLength(2)
 
-    // Republish from the full list, as the page does.
+    // The page republishes from the full list.
     const after = upsertEntry(parsed.portfolio.entries, {
       domain: 'second.com',
       source: 'dns',
@@ -360,15 +343,15 @@ describe('the whole path', () => {
     )
     await publishToRelays([r.url], listing)
 
-    // The seller loses the domain; the record disappears from the zone.
+    // Seller loses the domain and the record leaves the zone.
     zone = {}
 
     const [event] = await queryRelays([r.url], [listingFilter()])
     const dns = await checkDomainProof({ domain: DOMAIN, pubkey: SELLER.pk, now: NOW, dnsOnly: true })
     const check = checkListing({ event, dnsProof: dns.dns, now: NOW })
 
-    expect(dns.answered).toBe(true)      // the resolvers answered: "no record"
+    expect(dns.answered).toBe(true)      // Resolvers answered "no record".
     expect(check.ok).toBe(false)
-    expect(check.listing?.domain).toBe(DOMAIN) // still renderable, marked stale
+    expect(check.listing?.domain).toBe(DOMAIN) // Still renderable, marked stale.
   })
 })

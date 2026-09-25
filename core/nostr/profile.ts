@@ -1,7 +1,4 @@
-/**
- * Profiles and the small events about who somebody is: NIP-01 kind 0, NIP-39
- * external identities, the NIP-89 handler advertisement and NIP-51 lists.
- */
+// Who somebody is. Kind 0 profiles with NIP-39 identities, the NIP-89 handler, NIP-51 lists.
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 import { LISTING_KIND } from './listing.js'
@@ -10,15 +7,11 @@ export const PROFILE_KIND = 0
 export const HANDLER_KIND = 31990
 export const FOLLOW_SET_KIND = 30000
 
-/** The NIP-51 follow set naming the arbiters a key will trade under. */
+/** NIP-51 follow set of the arbiters a key will trade under. */
 export const ARBITER_SET_D = 'fmd:arbiters'
 
-/** The NIP-51 set naming domains a key is watching. */
+/** NIP-51 set of domains a key is watching. */
 export const WATCHLIST_D = 'fmd:watchlist'
-
-// ---------------------------------------------------------------------------
-// kind 0 and NIP-39
-// ---------------------------------------------------------------------------
 
 export interface Profile {
   pubkey: string
@@ -26,29 +19,25 @@ export interface Profile {
   displayName?: string
   about?: string
   picture?: string
-  /** NIP-05 identifier. Evidence of a domain only once verified. */
+  /** Evidence of a domain only once verified. */
   nip05?: string
-  /** A lightning address, for zaps. */
+  /** Lightning address, for zaps. */
   lud16?: string
   website?: string
   identities: ExternalIdentity[]
 }
 
-/** NIP-39: a self-attested link to an account elsewhere. */
+/** NIP-39 self-attested link to an account elsewhere. */
 export interface ExternalIdentity {
   platform: string
   identity: string
-  /** The proof: a gist id, a tweet id or a URL, depending on the platform. */
+  /** Gist id, tweet id or URL, by platform. */
   proof?: string
 }
 
 /**
- * Read a kind 0.
- *
- * Everything here is self-attested, and this function checks none of it. A
- * `nip05` field is a claim until the document at that domain is fetched and
- * found to name this key; a NIP-39 identity is a claim until the proof on the
- * named platform is fetched. Neither may be rendered as verified before that.
+ * Checks nothing, it is all self-attested. `nip05` and NIP-39 identities are claims
+ * until their proofs are fetched. Never render them as verified before that.
  */
 export function parseProfile(event: NostrEvent): Profile | undefined {
   if (event.kind !== PROFILE_KIND) return undefined
@@ -58,8 +47,7 @@ export function parseProfile(event: NostrEvent): Profile | undefined {
     const parsed = JSON.parse(event.content)
     if (typeof parsed === 'object' && parsed !== null) body = parsed as Record<string, unknown>
   } catch {
-    // A kind 0 with unparseable content still identifies a key, and the tags
-    // may still carry NIP-39 identities. Return what is readable.
+    // Still identifies a key, and the tags may carry NIP-39 identities.
   }
 
   const str = (key: string): string | undefined => (typeof body[key] === 'string' ? (body[key] as string) : undefined)
@@ -83,11 +71,8 @@ export function parseProfile(event: NostrEvent): Profile | undefined {
 }
 
 /**
- * Where to look to check a NIP-39 claim.
- *
- * Returned as a URL for a person to open rather than fetched here: most of
- * these platforms send no CORS headers, so a browser cannot verify them. Show
- * the reader where to look and label the claim unverified.
+ * A URL for a person to open. Most platforms send no CORS headers, so the browser
+ * can't check. Label the claim unverified.
  */
 export function identityProofUrl(identity: ExternalIdentity): string | undefined {
   if (!identity.proof) return undefined
@@ -100,22 +85,10 @@ export function identityProofUrl(identity: ExternalIdentity): string | undefined
   }
 }
 
-// ---------------------------------------------------------------------------
-// NIP-89
-// ---------------------------------------------------------------------------
-
-/**
- * Advertise that this client can open domain listings (NIP-89 kind 31990).
- *
- * Other clients learn how to hand a kind 30402 to this one, and a user can
- * just as easily pick a different client for the same events.
- */
+/** NIP-89 kind 31990. Tells other clients how to hand us a kind 30402. */
 export function buildHandlerAdvertisement(params: {
   pubkey: string
-  /**
-   * Where this client is hosted, with a `<bech32>` placeholder that the
-   * opening client replaces with the NIP-19 entity.
-   */
+  /** Has a `<bech32>` placeholder the opening client fills with the NIP-19 entity. */
   webUrl: string
   name: string
   about: string
@@ -137,17 +110,9 @@ export function buildHandlerAdvertisement(params: {
   }
 }
 
-// ---------------------------------------------------------------------------
-// NIP-51 lists
-// ---------------------------------------------------------------------------
-
 /**
- * The arbiters this key will trade under.
- *
- * An empty list differs from no list: it says "I will trade with no arbiter
- * at all". A client must not substitute a default in either case. The parties
- * choose the arbiter, and a default arbiter nominated by the site would choose
- * for them.
+ * An empty list means "no arbiter", unlike no list. Never substitute a default in
+ * either case. The parties choose the arbiter, not the site.
  */
 export function buildArbiterSet(params: {
   pubkey: string
@@ -164,7 +129,7 @@ export function buildArbiterSet(params: {
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: FOLLOW_SET_KIND, tags, content: '' }
 }
 
-/** Read an arbiter set. Returns undefined when this key has published none. */
+/** Undefined when this key has published none. */
 export function parseArbiterSet(event: NostrEvent): string[] | undefined {
   if (event.kind !== FOLLOW_SET_KIND) return undefined
   if (tagValue(event, 'd') !== ARBITER_SET_D) return undefined
@@ -172,11 +137,8 @@ export function parseArbiterSet(event: NostrEvent): string[] | undefined {
 }
 
 /**
- * The arbiters both parties accept.
- *
- * An empty intersection means no trade, and a UI must say so rather than fall
- * back to a default. Where a party has published no list at all, they have
- * expressed no constraint, so the other party's list stands.
+ * Empty intersection means no trade. Say so, never fall back to a default.
+ * A party with no list has no constraint, so the other list stands.
  */
 export function arbiterIntersection(
   buyer: readonly string[] | undefined,
@@ -188,11 +150,11 @@ export function arbiterIntersection(
 
   const sellerSet = new Set(seller)
   const arbiters = buyer.filter((a) => sellerSet.has(a))
-  // Both published, and both published empty: they agree on no arbiter.
+  // Both published empty, so they agree on no arbiter.
   return { arbiters, noArbiterPossible: buyer.length === 0 && seller.length === 0 }
 }
 
-/** A watchlist of domains. Plain `t` tags, so any client can read it. */
+/** Plain `t` tags, so any client can read it. */
 export function buildWatchlist(params: {
   pubkey: string
   domains: readonly string[]
@@ -209,7 +171,6 @@ export function parseWatchlist(event: NostrEvent): string[] | undefined {
   return event.tags.filter((t) => t[0] === 't' && t[1]).map((t) => t[1])
 }
 
-/** The filter that fetches a key's profile and its lists in one query. */
 export function profileFilter(pubkeys: readonly string[]): Record<string, unknown>[] {
   return [
     { kinds: [PROFILE_KIND], authors: [...pubkeys] },

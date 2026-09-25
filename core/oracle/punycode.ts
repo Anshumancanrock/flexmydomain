@@ -1,15 +1,10 @@
 /**
- * RFC 3492 punycode, the encoding half of IDNA A-labels.
- *
- * Implemented here rather than left to `new URL()`, which does IDNA in a
- * browser and in Bun but is a host facility: the same input can normalise
- * differently across engines and versions. The normalised domain is inside a
- * signed message (spec/PROOF.md section 2), so a one-byte disagreement between
- * signer and verifier is a silent verification failure. Node's `punycode`
- * module is deprecated and is a node:* import, which core/ does not allow.
+ * RFC 3492 punycode for IDNA A-labels. Our own copy because `new URL()` IDNA can
+ * differ across engines and versions, and the domain is signed (spec/PROOF.md
+ * section 2). Node's `punycode` is deprecated, and core/ allows no node:* imports.
  */
 
-/** RFC 3492 section 5. Fixed by the RFC; none of these is tunable. */
+/** RFC 3492 section 5 constants. Not tunable. */
 const BASE = 36
 const TMIN = 1
 const TMAX = 26
@@ -19,22 +14,21 @@ const INITIAL_BIAS = 72
 const INITIAL_N = 128
 const DELIMITER = '-'
 
-/** The ASCII prefix IDNA puts in front of every punycode label. Lowercase. */
+/** IDNA ACE prefix, lowercase. */
 export const ACE_PREFIX = 'xn--'
 
-/** Largest code point, so an overflowing decode is rejected rather than wrapped. */
+/** Decodes past this are rejected, not wrapped. */
 const MAX_CODE_POINT = 0x10ffff
 
 /**
- * digit -> character, for the basic-code-point alphabet: 0..25 map to a..z and
- * 26..35 to 0..9. Lowercase only on output; case is insignificant on input and
- * carries the (unused) flag bit of RFC 3492 section 5.
+ * 0..25 -> a..z, 26..35 -> 0..9. Output is lowercase. Input case only carries the
+ * unused flag bit (RFC 3492 section 5).
  */
 function digitToBasic(digit: number): string {
   return String.fromCharCode(digit < 26 ? digit + 97 : digit - 26 + 48)
 }
 
-/** character -> digit. Returns BASE for anything outside the alphabet. */
+/** BASE for anything outside the alphabet. */
 function basicToDigit(code: number): number {
   if (code >= 0x30 && code <= 0x39) return code - 0x30 + 26 // 0-9
   if (code >= 0x61 && code <= 0x7a) return code - 0x61 //      a-z
@@ -54,12 +48,7 @@ function adapt(delta: number, numPoints: number, firstTime: boolean): number {
   return k + Math.floor(((BASE - TMIN + 1) * d) / (d + SKEW))
 }
 
-/**
- * Encode one label to punycode, without the `xn--` prefix.
- *
- * Exported for tests; callers should use {@link toASCII}, which decides whether
- * a label needs encoding at all and attaches the prefix.
- */
+/** One label, no `xn--` prefix. Exported for tests, callers want {@link toASCII}. */
 export function encodeLabel(label: string): string {
   const input = Array.from(label, (c) => c.codePointAt(0) as number)
   const output: string[] = []
@@ -75,12 +64,11 @@ export function encodeLabel(label: string): string {
   let bias = INITIAL_BIAS
 
   while (handled < input.length) {
-    // The smallest code point >= n that still needs encoding.
+    // Smallest code point >= n still to encode.
     let m = MAX_CODE_POINT + 1
     for (const cp of input) if (cp >= n && cp < m) m = cp
 
-    // Overflow here needs a label longer than DNS allows. The check stays
-    // because RFC 3492 requires it.
+    // Can't overflow within DNS label limits, but RFC 3492 requires the check.
     if (m - n > Math.floor((0x7fffffff - delta) / (handled + 1))) {
       throw new Error('punycode: overflow while encoding')
     }
@@ -111,18 +99,14 @@ export function encodeLabel(label: string): string {
 }
 
 /**
- * Decode one punycode label, without the `xn--` prefix.
- *
- * Used to check an `xn--` label a user typed: a label that does not decode, or
- * does not re-encode to itself, is not a valid A-label and is rejected rather
- * than signed. Also lets the UI show `münchen.de` beside `xn--mnchen-3ya.de`.
+ * One label, no `xn--` prefix. Validates typed A-labels before they get signed,
+ * and lets the UI show `münchen.de` beside `xn--mnchen-3ya.de`.
  */
 export function decodeLabel(label: string): string {
   const output: number[] = []
   const delimiterIndex = label.lastIndexOf(DELIMITER)
 
-  // Everything before the last delimiter is literal ASCII. A leading delimiter
-  // means there is no basic-code-point section, which is legal.
+  // Literal ASCII up to the last delimiter. A leading delimiter (no basic part) is legal.
   let index = 0
   if (delimiterIndex > 0) {
     for (let i = 0; i < delimiterIndex; i++) {
@@ -159,8 +143,7 @@ export function decodeLabel(label: string): string {
     i %= out
 
     if (n > MAX_CODE_POINT || (n >= 0xd800 && n <= 0xdfff)) {
-      // Surrogate halves are not code points. Some encoders emit them; a
-      // domain containing one is not a domain.
+      // Surrogate halves aren't code points, though some encoders emit them.
       throw new Error('punycode: decoded an invalid code point')
     }
     output.splice(i++, 0, n)
@@ -169,12 +152,7 @@ export function decodeLabel(label: string): string {
   return String.fromCodePoint(...output)
 }
 
-/**
- * Convert one label to its A-label form.
- *
- * ASCII labels pass through untouched, including ones that already start with
- * `xn--`, which are checked for round-trip validity instead of re-encoded.
- */
+/** ASCII passes through. Existing `xn--` labels are round-trip checked, not re-encoded. */
 export function labelToASCII(label: string): string {
   // eslint-disable-next-line no-control-regex
   if (!/[^\x00-\x7f]/.test(label)) {
@@ -185,10 +163,9 @@ export function labelToASCII(label: string): string {
 }
 
 /**
- * An `xn--` label must decode, and must re-encode to exactly the input. The
- * re-encoding check rejects a non-canonical encoding: two punycode strings can
- * decode to the same name, and only one of them may be signed, or a proof for
- * one domain would be a proof for several.
+ * An `xn--` label must decode and re-encode to exactly itself. Two punycode strings
+ * can decode to one name. Only the canonical one may be signed, or one proof would
+ * cover several domains.
  */
 function assertValidALabel(label: string): void {
   const body = label.slice(ACE_PREFIX.length)
@@ -202,25 +179,18 @@ function assertValidALabel(label: string): void {
   if (ACE_PREFIX + encodeLabel(decoded) !== label) {
     throw new Error(`punycode: "${label}" is not the canonical encoding of "${decoded}"`)
   }
-  // An A-label that decodes to pure ASCII is a second spelling of a name that
-  // already had one: `xn--a-` and `a` are the same label, and IDNA forbids the
-  // first for that reason. Two spellings of one domain means two signed
-  // messages for one claim.
+  // A pure-ASCII decode is a second spelling (`xn--a-` is `a`), which IDNA forbids.
   // eslint-disable-next-line no-control-regex
   if (!/[^\x00-\x7f]/.test(decoded)) {
     throw new Error(`punycode: "${label}" decodes to the ASCII label "${decoded}", which must not be encoded`)
   }
 }
 
-/** Convert a whole dot-separated name to A-label form, label by label. */
 export function toASCII(name: string): string {
   return name.split('.').map(labelToASCII).join('.')
 }
 
-/**
- * The inverse, for display only. Never feed the result back into a signed
- * message: the U-label form is what spec/PROOF.md section 4 normalises away.
- */
+/** Display only. Never sign the U-label form, spec/PROOF.md section 4 normalises it away. */
 export function toUnicode(name: string): string {
   return name
     .split('.')
@@ -232,6 +202,6 @@ function tryDecode(label: string): string {
   try {
     return decodeLabel(label.slice(ACE_PREFIX.length))
   } catch {
-    return label // undisplayable is better than throwing inside a renderer
+    return label // show it raw, never throw inside a renderer
   }
 }

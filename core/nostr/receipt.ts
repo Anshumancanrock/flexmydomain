@@ -1,54 +1,36 @@
 /**
- * Trade receipts: NIP-32 labels, kind 1985.
- *
- * On settlement each party publishes a label about the other party. Kind 1985
- * is a regular event, so nobody can quietly delete the receipt their
- * counterparty wrote about them.
- *
- * Two keys one person controls can escrow to each other and produce a perfect
- * pair of receipts. The bitcoin comes straight back, so volume costs only
- * mining fees and a reputation built on volume alone is fakeable. What is
- * expensive is the registry transfer: a fake sale needs a real inter-registrar
- * transfer, about $10 and a 60-day lock on the name afterwards. A trade with
- * no observed transfer is therefore displayed but weighted at zero, and
- * countsTowardReputation holds that rule.
- *
- * No score is published. Weighting is left to the viewer (from the viewer's
- * own follow graph, for example); this module supplies the counts.
+ * Trade receipts: NIP-32 labels, kind 1985. On settlement each party labels the other.
+ * Two keys of one person can fake volume for mining fees. A registry transfer can't be
+ * faked cheaply, so countsTowardReputation requires one. No score is published.
  */
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
 
-/** NIP-32 label. Regular, not replaceable, so a published receipt stays. */
+/** Regular, not replaceable, so nobody can quietly delete a receipt written about them. */
 export const RECEIPT_KIND = 1985
 
-/** The label namespace. NIP-32 asks for an `L` naming the vocabulary. */
+/** NIP-32 `L` namespace. */
 export const RECEIPT_NAMESPACE = 'fmd.trade'
 
 export type TradeRole = 'buyer' | 'seller'
 export type TradeOutcome = 'settled' | 'refunded' | 'disputed'
 
 export interface ReceiptParams {
-  /** The author: the party writing about the other one. */
   pubkey: string
   role: TradeRole
-  /** The counterparty this receipt is about. */
   counterparty: string
   outcome: TradeOutcome
   domain: string
-  /** The listing coordinate, `30402:<seller>:fmd:listing:<domain>`. */
+  /** Coordinate `30402:<seller>:fmd:listing:<domain>`. */
   listing?: string
   escrowId: string
-  /** `<txid>:<vout>` of the output that funded the escrow. */
+  /** `<txid>:<vout>` of the escrow funding output. */
   funding: string
-  /** The txid that spent it. */
+  /** Txid that spent the funding output. */
   settlement: string
   amountSats: number
-  /**
-   * sha256 of the RDAP snapshot showing the transfer: the part that is
-   * expensive to fake.
-   */
+  /** sha256 of the RDAP snapshot showing the transfer. */
   transferSnapshot?: string
   createdAt: number
   comment?: string
@@ -74,13 +56,11 @@ export interface Receipt {
 const TXID_RE = /^[0-9a-f]{64}$/
 const OUTPOINT_RE = /^[0-9a-f]{64}:\d+$/
 
-/** Build the label event one party publishes about the other. */
 export function buildReceipt(params: ReceiptParams): UnsignedEvent {
   if (!isHex32(params.pubkey)) throw new Error('buildReceipt: pubkey must be 64 lowercase hex characters')
   if (!isHex32(params.counterparty)) throw new Error('buildReceipt: counterparty must be 64 lowercase hex characters')
   if (params.pubkey === params.counterparty) {
-    // A receipt about yourself is only a claim. Each side attests about the
-    // other, never about itself.
+    // A receipt about yourself is only a claim.
     throw new Error('buildReceipt: a receipt is written about the counterparty, never about yourself')
   }
   if (!OUTPOINT_RE.test(params.funding)) throw new Error('buildReceipt: funding must be <txid>:<vout>')
@@ -113,7 +93,7 @@ export function buildReceipt(params: ReceiptParams): UnsignedEvent {
   }
 }
 
-/** Read a receipt. Structure only: chain and registry checks happen elsewhere. */
+/** Structure only. Chain and registry checks happen elsewhere. */
 export function parseReceipt(event: NostrEvent): { ok: true; receipt: Receipt } | { ok: false; reason: string } {
   if (event.kind !== RECEIPT_KIND) return { ok: false, reason: `kind ${event.kind} is not ${RECEIPT_KIND}` }
   if (tagValue(event, 'L') !== RECEIPT_NAMESPACE) {
@@ -168,7 +148,6 @@ export function parseReceipt(event: NostrEvent): { ok: true; receipt: Receipt } 
   }
 }
 
-/** A trade as both sides described it. */
 export interface Trade {
   escrowId: string
   domain: string
@@ -177,23 +156,17 @@ export interface Trade {
   funding: string
   buyer?: string
   seller?: string
-  /** Both receipts present and agreeing. One side alone is not a trade. */
+  /** Both receipts present and agreeing. */
   mutual: boolean
-  /** Any disagreement between the two receipts, in words. */
   conflicts: string[]
-  /** An RDAP transfer snapshot is attached, the part that is costly to fake. */
   hasTransfer: boolean
   at: number
   receipts: Receipt[]
 }
 
 /**
- * Pair up receipts into trades.
- *
- * A single receipt is not a trade: anyone can publish a label about anyone.
- * Only the pair, each written by the party the other names, is evidence.
- * Where the pair disagrees, the disagreement is recorded rather than
- * resolved, as with escrow views, so the UI can show it.
+ * Anyone can label anyone, so only a pair where each side names the other is evidence.
+ * Disagreements are recorded, not resolved.
  */
 export function pairReceipts(receipts: readonly Receipt[]): Trade[] {
   const byEscrow = new Map<string, Receipt[]>()
@@ -205,8 +178,7 @@ export function pairReceipts(receipts: readonly Receipt[]): Trade[] {
 
   const trades: Trade[] = []
   for (const [escrowId, group] of byEscrow) {
-    // One receipt per author per escrow. A second is an edit and the newest
-    // wins; kind 1985 is regular, so both stay on the relays either way.
+    // Newest receipt per author wins. Older ones stay on relays since kind 1985 is regular.
     const latest = new Map<string, Receipt>()
     for (const receipt of group) {
       const current = latest.get(receipt.author)
@@ -219,8 +191,7 @@ export function pairReceipts(receipts: readonly Receipt[]): Trade[] {
     const conflicts: string[] = []
 
     if (buyerSide && sellerSide) {
-      // Each must name the other. Two receipts that name third parties are
-      // two unrelated claims that happen to share an escrow id.
+      // Each must name the other, or they're unrelated claims sharing an escrow id.
       if (buyerSide.counterparty !== sellerSide.author) conflicts.push('the buyer names a different seller')
       if (sellerSide.counterparty !== buyerSide.author) conflicts.push('the seller names a different buyer')
       if (buyerSide.settlement !== sellerSide.settlement) conflicts.push('the two receipts name different settlement transactions')
@@ -251,42 +222,29 @@ export function pairReceipts(receipts: readonly Receipt[]): Trade[] {
 }
 
 /**
- * Whether a trade counts toward reputation: it must be mutual, settled, and
- * backed by an observed registry transfer.
- *
- * The transfer is the condition that matters. Volume is nearly free to fake
- * (two keys, one round trip, about 2,000 sats of mining fees); a registrar
- * transfer costs roughly $10 and locks the name for 60 days, so it cannot be
- * repeated a hundred times in a week.
- *
- * A trade that fails is still shown, weighted at zero, because hiding it
- * would conceal wash trading a reader should be able to see.
+ * Mutual, settled and backed by an observed registry transfer. Wash volume costs about
+ * 2,000 sats in fees. A transfer costs about $10 and locks the name 60 days.
+ * Failing trades still show at zero weight, so wash trading stays visible.
  */
 export function countsTowardReputation(trade: Trade): boolean {
   return trade.mutual && trade.receipts[0]?.outcome === 'settled' && trade.hasTransfer
 }
 
-/** What a profile card shows: counts, never a star rating or an average. */
+/** Counts only, never a rating or an average. */
 export interface TradeRecord {
   verified: number
   counterparties: number
   satsSettled: number
   firstTradeAt?: number
-  /**
-   * Shown but weighted at zero: one-sided, not settled, or with no observed
-   * registry transfer.
-   */
+  /** Shown at zero weight, failing countsTowardReputation. */
   unweighted: number
-  /** Trades whose two receipts disagree. Show them; the conflict is public. */
+  /** Receipts disagree. Show them anyway. */
   conflicted: number
 }
 
 /**
- * Summarise one key's trades.
- *
- * Reports distinct counterparties alongside the trade count, because ten
- * trades with one partner is one relationship. The partner list comes back so
- * a profile can show the counterparty graph instead of a score.
+ * Counts distinct counterparties too, since ten trades with one partner is one relationship.
+ * Partners come back so a profile can show the graph instead of a score.
  */
 export function summariseTrades(trades: readonly Trade[], pubkey: string): TradeRecord & { partners: string[] } {
   const partners = new Set<string>()
@@ -325,7 +283,6 @@ export function summariseTrades(trades: readonly Trade[], pubkey: string): Trade
   }
 }
 
-/** The filter that fetches every receipt about, or by, these keys. */
 export function receiptFilter(pubkeys: readonly string[]): Record<string, unknown>[] {
   return [
     { kinds: [RECEIPT_KIND], authors: [...pubkeys] },

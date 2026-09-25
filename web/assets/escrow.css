@@ -7,7 +7,6 @@
 .net-badge b{color:var(--ink);font-weight:650}
 .net-badge.mainnet{border-color:color-mix(in srgb,var(--accent) 50%,var(--line));color:var(--accent-ink)}
 
-/* the recovery string, which is the most dangerous thing on the page */
 .warn-box{border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
   background:var(--accent-soft);border-radius:var(--r-md);padding:14px 16px;margin-bottom:14px}
 .warn-box p{font-size:13.5px;line-height:1.6;margin:0 0 10px}
@@ -17,7 +16,6 @@
 .ack{display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--ink);margin-top:10px}
 .ack input{width:auto;height:auto;margin-top:3px;accent-color:var(--accent)}
 
-/* the derivation panel: every byte, so anyone can recompute the address */
 .derive{border:1px solid var(--line);border-radius:var(--r-md);background:var(--sunk);
   padding:4px clamp(12px,1.4vw,16px);margin:14px 0}
 .derive-row{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--line-soft);
@@ -29,7 +27,6 @@
 .derive-row .v.big{font-size:14px;font-weight:600}
 .derive-note{font-size:12.5px;color:var(--muted);line-height:1.55;padding:10px 0 12px}
 
-/* leaves */
 .leaf{display:flex;gap:11px;align-items:baseline;font-size:12.5px;padding:8px 0;
   border-bottom:1px solid var(--line-soft)}
 .leaf:last-child{border-bottom:0}
@@ -38,7 +35,6 @@
 .leaf .who b{color:var(--ink)}
 .leaf .seq{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
 
-/* the big confirm screen */
 .confirm{border:2px solid var(--accent);border-radius:var(--r-lg);padding:clamp(16px,2vw,22px);
   background:var(--panel);margin:14px 0}
 .confirm .amount{font-family:var(--mono);font-size:clamp(24px,3.4vw,34px);font-weight:700;
@@ -47,7 +43,6 @@
   margin-top:10px;padding:10px 12px;background:var(--sunk);border-radius:var(--r-sm)}
 .confirm .fee{font-size:12.5px;color:var(--muted);margin-top:10px}
 
-/* disagreement between published views */
 .clash{border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
   border-radius:var(--r-md);background:var(--accent-soft);padding:13px 15px;margin-bottom:12px}
 .clash h4{font-size:13.5px;margin:0 0 8px}

@@ -1,13 +1,5 @@
-/**
- * A throwaway Bitcoin Core regtest node, for the end-to-end tests.
- *
- * Starts bitcoind in a temporary datadir, talks to it over JSON-RPC, and tears
- * it down afterwards. No wallet state survives a run, and nothing here touches
- * a network or a real chain.
- *
- * The differential tests compare two implementations with each other; Bitcoin
- * Core checks the spends against the consensus rules themselves.
- */
+// Throwaway Bitcoin Core regtest node in a temp datadir, driven over JSON-RPC.
+// Needs bitcoind unpacked under tools/ (see spec/VERIFY.md).
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -16,11 +8,7 @@ import { join } from 'node:path'
 
 const BITCOIND = join(process.cwd(), 'tools/bitcoin-31.1/bin/bitcoind')
 
-/**
- * Bitcoin Core is downloaded per machine (tools/ is not in git), so a fresh
- * clone has none. The tests that need a node are then skipped, and say why,
- * rather than failing after half a minute of waiting for one.
- */
+/** tools/ is not in git. Without bitcoind, skip node tests instead of waiting 30s to fail. */
 export const haveBitcoind = existsSync(BITCOIND)
 if (!haveBitcoind) {
   console.warn(`test/regtest: no Bitcoin Core at ${BITCOIND}; the tests that need a node are skipped (see spec/VERIFY.md)`)
@@ -44,9 +32,7 @@ export async function startRegtest(port = 18999): Promise<RegtestNode> {
     [
       'regtest=1',
       'server=1',
-      // The funding transaction is mined before the tests look it up, so it is
-      // out of the mempool by then and getrawtransaction needs an index.
-      'txindex=1',
+      'txindex=1', // Funding tx is mined before lookup, so getrawtransaction needs the index.
       'listen=0',
       'discover=0',
       'dnsseed=0',
@@ -75,7 +61,7 @@ export async function startRegtest(port = 18999): Promise<RegtestNode> {
     return body.result as T
   }
 
-  // Wait for it to come up. A cold start is a second or two.
+  // Cold start takes a second or two.
   const deadline = Date.now() + 30_000
   for (;;) {
     try {
@@ -100,7 +86,7 @@ export async function startRegtest(port = 18999): Promise<RegtestNode> {
       } catch {
         child.kill('SIGTERM')
       }
-      // Give it a moment to flush, then remove the datadir entirely.
+      // Let it flush before deleting the datadir.
       await new Promise((r) => setTimeout(r, 800))
       child.kill('SIGKILL')
       rmSync(datadir, { recursive: true, force: true })
@@ -108,13 +94,13 @@ export async function startRegtest(port = 18999): Promise<RegtestNode> {
   }
 }
 
-/** Convenience: a funded wallet with spendable coins. */
+/** Wallet with spendable coins. */
 export async function fundedWallet(node: RegtestNode, name = 'fmd', port = 18999): Promise<{
   address: string
   send(to: string, btc: number): Promise<string>
   mine(blocks: number): Promise<void>
 }> {
-  // Core 31 removed legacy wallets: descriptors must be true.
+  // Core 31 dropped legacy wallets, so descriptors=true.
   await node.rpc('createwallet', [name, false, false, '', false, true, true])
 
   const walletRpc = async <T>(method: string, params: unknown[] = []): Promise<T> => {
@@ -132,7 +118,7 @@ export async function fundedWallet(node: RegtestNode, name = 'fmd', port = 18999
   }
 
   const address = await walletRpc<string>('getnewaddress')
-  // 101 blocks: coinbase needs 100 confirmations before it is spendable.
+  // Coinbase needs 100 confirmations to spend.
   await walletRpc('generatetoaddress', [101, address])
 
   return {

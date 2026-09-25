@@ -1,11 +1,5 @@
-/**
- * NIP-09 vectors for core/nostr/deletion.ts.
- *
- * The security of this mechanism rests on one check: a deletion request
- * applies only to its own author's events. Without it anyone could hide
- * anyone's listing by publishing a kind 5 naming it, which would give every
- * competitor a delist button.
- */
+// NIP-09 vectors for core/nostr/deletion.ts. A request applies only to its author's own
+// events. Without that check any competitor could delist anyone with a kind 5.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -54,7 +48,7 @@ const note = (owner: typeof ALICE, content: string, createdAt = NOW): NostrEvent
 
 describe('building a deletion request', () => {
   test('an addressable event is referenced by coordinate, not by id', () => {
-    // A listing edited five times has five ids; a seller means all of them.
+    // An edited listing has several ids. The seller means all of them.
     const listing = listingOf(ALICE, 'lumenary.com')
     const request = buildDeletion({ pubkey: ALICE.pk, events: [listing], createdAt: NOW })
     expect(request.kind).toBe(DELETION_KIND)
@@ -102,8 +96,6 @@ describe('applying deletions client-side', () => {
   })
 
   test("Mallory cannot delete Alice's listing", () => {
-    // The attack: forge a kind 5 naming a competitor's listing coordinate.
-    // It is a valid event signed by Mallory, and it must do nothing.
     const listing = listingOf(ALICE, 'lumenary.com')
     const forged = signEvent(
       {

@@ -1,12 +1,6 @@
-/* flex.html: a public portfolio of every domain one Nostr key has proven.
- *
- * There is no backend. Everything this page shows comes from Nostr relays,
- * DNS resolvers or the domain's own NIP-05 document, and every signature is
- * made by the user's own signer; nothing here talks to a host we run.
- *
- * Domains are proven on the market page. Rendering a portfolio takes one
- * relay query for one event, and every entry is verified offline against the
- * portfolio's own key.
+/* flex.html: public portfolio of every domain one Nostr key has proven.
+ * No backend. Data comes from relays, DNS and NIP-05, and every entry is
+ * verified offline against the portfolio's key.
  */
 import {
   DEFAULT_RELAYS,
@@ -46,10 +40,6 @@ import {
 
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
 
-/* `viewing` is whose page this is, which is not always the connected key: a
-   flex page is public, and opening someone else's must work with no key at
-   all. */
-/** A published entry, plus whether its signature verified here. */
 type ShownEntry = PortfolioEntry & { signedOk: boolean; signedReason?: string };
 
 const state: {
@@ -63,23 +53,18 @@ const state: {
   relayInfo: Map<string, { name?: unknown } | null>;
   watch: string[];
 } = {
-  viewing: null,
+  viewing: null,      // Whose page this is. Works with no key connected.
   entries: [],
   liveProof: new Map(),
   loading: false,
-  attestations: [],   // second opinions, from verifiers the reader trusts
-  profile: null,      // kind 0 of whoever is being viewed
-  relays: [],         // their NIP-65 list, as entries
-  relayInfo: new Map(),// url -> NIP-11 document, or null when unreachable
-  watch: [],          // their NIP-51 watchlist
+  attestations: [],   // Only from configured verifiers.
+  profile: null,
+  relays: [],         // NIP-65.
+  relayInfo: new Map(),// NIP-11 doc per url, null when unreachable.
+  watch: [],          // NIP-51 watchlist.
 };
 
-/* ------------------------------------------------------------- the view ---*/
-
-/* The key whose page this is comes from a query parameter, so it works on a
-   plain static host with no rewrite rules. `nostr:`, npub, nprofile and bare
-   hex are all accepted, because people paste whatever their other client
-   showed them. */
+/* A query param works on any static host. Accepts `nostr:`, npub, nprofile or hex. */
 function pubkeyFromUrl(): string | undefined {
   const url = new URL(location.href);
   const raw = url.searchParams.get("p") ?? decodeURIComponent(location.hash.replace(/^#/, ""));
@@ -114,18 +99,14 @@ async function view(pubkey: string, { replaceUrl = false }: { replaceUrl?: boole
   await loadPortfolio(pubkey);
 }
 
-/* One filter and one replaceable event populate the page; there is nothing
-   else to fetch. */
 async function loadPortfolio(pubkey: string): Promise<void> {
   state.loading = true;
   render();
 
   let events: NostrEvent[] = [];
   try {
-    /* Their portfolio lives on the relays they write to (NIP-65), and a copy
-       goes to the discovery relays, this deployment's own among them. With no
-       relay list, readRelays() returns only the first few fallbacks, so the
-       discovery relays are always asked as well. */
+    /* Their NIP-65 relays plus the discovery relays. With no relay list,
+       readRelays() gives only a few fallbacks. */
     await directory.resolve([pubkey]);
     const relays = [...new Set([...directory.readRelays(pubkey), ...DISCOVERY_RELAYS])];
     events = await queryRelays(relays, [portfolioFilter(pubkey)], { timeoutMs: 5000 });
@@ -134,7 +115,7 @@ async function loadPortfolio(pubkey: string): Promise<void> {
   } finally {
     state.loading = false;
   }
-  if (state.viewing !== pubkey) return; // the user navigated away mid-flight
+  if (state.viewing !== pubkey) return; // User navigated away mid-flight.
 
   const newest = newestPerAddress(events)[0];
   if (!newest) {
@@ -151,9 +132,7 @@ async function loadPortfolio(pubkey: string): Promise<void> {
     return;
   }
 
-  /* Verify every entry offline before anything is drawn: the event came from a
-     relay, and the signature inside each entry is the only reason to believe
-     it. */
+  /* Relay data. Verify every entry's signature before drawing anything. */
   const verdicts = verifyPortfolio(parsed.portfolio);
   state.entries = parsed.portfolio.entries.map((entry, i) => ({
     ...entry,
@@ -166,14 +145,8 @@ async function loadPortfolio(pubkey: string): Promise<void> {
   loadIdentity(pubkey);
 }
 
-/* Profile, watchlist and relay list: three replaceable events, fetched in
- * parallel.
- *
- * Everything in a kind 0 is self-attested and none of it is checked here. A
- * NIP-05 field is a claim until the document at that domain is fetched; a
- * NIP-39 identity is a claim until the proof on that platform is read, and
- * most of those platforms send no CORS headers, so a browser cannot read them
- * at all. They are rendered as links to look at, never as verified badges. */
+/* Kind 0 is self-attested and unchecked here. Most NIP-39 platforms send no
+ * CORS headers, so identities render as links to check, never verified badges. */
 async function loadIdentity(pubkey: string): Promise<void> {
   try {
     const [meta, relayEvents] = await Promise.all([
@@ -193,12 +166,11 @@ async function loadIdentity(pubkey: string): Promise<void> {
     renderIdentity();
     probeRelays();
   } catch {
-    /* Identity is decoration; failing to load it says nothing about the domains. */
+    /* Identity is decoration. A failure says nothing about the domains. */
   }
 }
 
-/* NIP-11: ask each relay what it is, so the relay panel shows which of them
-   are up and what each calls itself. */
+/* NIP-11 probe for the relay panel: which relays are up, and their names. */
 async function probeRelays(): Promise<void> {
   const urls = state.relays.length
     ? state.relays.map((r) => r.url)
@@ -208,7 +180,7 @@ async function probeRelays(): Promise<void> {
       try {
         state.relayInfo.set(url, (await fetchRelayInfo(url)) as { name?: unknown });
       } catch {
-        state.relayInfo.set(url, null); // unreachable; shown as down
+        state.relayInfo.set(url, null); // Unreachable, shown as down.
       }
       renderIdentity();
     }),
@@ -224,7 +196,7 @@ function renderProfile(): void {
   }
   const bits: string[] = [];
   if (p.displayName || p.name) bits.push(`<b>${esc(p.displayName || p.name)}</b>`);
-  // A nip05 here is only what the key claims; it is not checked.
+  // Only a claim. Not checked here.
   if (p.nip05) bits.push(`<span title="self-attested, not verified here">${esc(p.nip05)}</span>`);
   for (const identity of p.identities) {
     const url = identityProofUrl(identity);
@@ -236,10 +208,8 @@ function renderProfile(): void {
   el.innerHTML = bits.length ? bits.join('<span aria-hidden="true">·</span>') : "";
 }
 
-/* Attestations are a second opinion, fetched beside the page's own DNS lookup
-   and never instead of it. Only the configured verifiers are counted, and only
-   distinct ones: a single daemon publishing four times is one opinion, and
-   without that rule one machine could meet any threshold. */
+/* A second opinion beside our own DNS check, never a stand-in. Each
+   configured verifier counts once, or one daemon could meet any threshold. */
 async function loadAttestations(pubkey: string): Promise<void> {
   if (CONFIG.verifiers.length === 0 || state.entries.length === 0) return;
   const domains = state.entries.map((e) => e.domain);
@@ -260,10 +230,8 @@ async function loadAttestations(pubkey: string): Promise<void> {
   }
 }
 
-/* The live check. A signature proves the holder once made the claim; only DNS
-   shows the zone still agrees today. A domain whose record has vanished is
-   marked stale and stays visible, because hiding it would hide the fact a
-   buyer most needs. */
+/* A signature shows a past claim. DNS shows today. Stale domains stay
+   visible, since a buyer needs to see that. */
 async function recheckAll(): Promise<void> {
   const pubkey = state.viewing;
   if (!pubkey) return;
@@ -348,15 +316,13 @@ function render(): void {
   }).join("");
 }
 
-/* -------------------------------------------------------- keys and relays ---*/
-
-/* The draft the editor works on, so nothing is published until asked. */
+/* Editor state. Nothing publishes until asked. */
 const draft: { relays: string[] | null; watch: string[] | null } = { relays: null, watch: null };
 
 function renderIdentity(): void {
   const relays = draft.relays ?? state.relays.map((r) => r.url);
   const known = new Set(relays);
-  // With no list of their own, show the fallback relays used in its place.
+  // No list of their own, so show the fallbacks.
   const shown = relays.length ? relays : [...DEFAULT_RELAYS];
 
   $("#relay-list").innerHTML = `<div class="chip-row">` + shown.map((url) => {
@@ -402,8 +368,7 @@ async function publishRelayList(): Promise<void> {
         createdAt: now(),
       }),
     );
-    /* Published to the current relays as well as the new ones: a reader who
-       only knows the old set still has to be able to find the new list. */
+    /* Old relays too, or readers who only know them can't find the new list. */
     const results = await publishOutbox(directory, event, { extraRelays: DISCOVERY_RELAYS });
     const ok = results.filter((r) => r.ok);
 
@@ -455,10 +420,8 @@ async function publishWatchlist(): Promise<void> {
   }
 }
 
-/* Removing a domain republishes the portfolio without it. It is not a NIP-09
-   deletion: the proof event stays where it is, and older portfolio versions
-   may survive on relays that ignore replacement, so the confirm dialog does
-   not promise an erasure. */
+/* Republish without it. Not a NIP-09 delete, and old versions may linger, so
+   never promise erasure. */
 async function removeDomain(domain: string): Promise<void> {
   if (!session.signer) return;
   if (!confirm(`Remove ${domain} from your published portfolio?\n\nThe DNS record and the proof event stay where they are; this only republishes the list without it.`)) return;
@@ -483,8 +446,6 @@ async function removeDomain(domain: string): Promise<void> {
   }
 }
 
-/* ----------------------------------------------------------- wiring up ---*/
-
 initTheme();
 initConnect();
 
@@ -492,7 +453,7 @@ onSessionChange((pubkey) => {
   if (pubkey) {
     view(pubkey, { replaceUrl: true });
   } else {
-    // A portfolio is public; disconnecting is not navigating away.
+    // Portfolios are public. Disconnecting keeps the page.
     $("#who").textContent = state.viewing ? "Domains held by" : "A domain portfolio";
     render();
   }
@@ -583,8 +544,6 @@ document.addEventListener("click", (event) => {
   }
 });
 
-/* A flex page opened with an npub renders with no key connected, and that is
-   the default path. */
 const initial = pubkeyFromUrl();
 if (initial) view(initial);
 else render();

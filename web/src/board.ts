@@ -1,13 +1,6 @@
-/* index.html: the flex board.
- *
- * Anyone may put any domain here, with no proof, listing or permission: type
- * a name, pay, appear. Rank is the bid, in sats. A domain on the board means
- * only that somebody paid for it to be there, so the page must not suggest
- * that they own it, that it is for sale or that anyone checked. Ownership is
- * proven on the market page, where listing is free.
- *
- * The ranking is a sum of public NIP-57 zap receipts. The site keeps no record
- * of who paid what, and anyone can fetch the same receipts and re-count it.
+/* index.html: the flex board. Anyone can pay to put any domain here, so the
+ * page must never imply ownership or a sale. Ownership is proven on the market.
+ * Rank is the sum of public NIP-57 zap receipts. We keep no record of payers.
  */
 import {
   MSATS_PER_SAT,
@@ -42,7 +35,6 @@ import {
 const PER_PAGE = 15;
 const WEEK = 7 * 86400;
 
-/** A domain on the board: its zap totals, and its listing once one verifies. */
 interface BoardRow {
   domain: string;
   sats: number;
@@ -72,23 +64,19 @@ const state: {
   tld: null,
   sort: "rank",
   page: 1,
-  range: "week",   // the ranking window: "week" or "all", chosen by #sort
-  target: 1,       // the rank the stepper is aiming at
-  recent: [],      // verified zaps, newest first, for the activity panel
+  range: "week",
+  target: 1,       // Rank the stepper aims at.
+  recent: [],      // Verified zaps, newest first.
 };
 
-/* ------------------------------------------------------------- loading ---*/
-
-/* The board is built from zap receipts, not from listings. Every flex payment
-   goes to one recipient, so one filter finds all of them; the domain travels
-   inside the signed zap request the receipt echoes back. */
+/* All flex zaps go to one recipient. The domain rides in the signed zap
+   request each receipt embeds. */
 async function load(): Promise<void> {
   state.loading = true;
   render();
 
   if (!featuringEnabled()) {
-    // Without both settings no receipt can be verified, so nothing is shown:
-    // a ranking nobody can re-count is worse than an empty board.
+    // Can't verify receipts without both settings. An unverifiable ranking is worse than none.
     state.rows = [];
     state.loading = false;
     render();
@@ -129,10 +117,8 @@ async function load(): Promise<void> {
   linkListings();
 }
 
-/* A flexed domain may also be listed for sale on the market. When it is and
-   the listing verifies, the row links to it. This is the only place the two
-   pages meet, and it works one way: a listing can decorate a flex row, but a
-   flex payment never implies anything about ownership. */
+/* Link a row to its market listing once the listing verifies. One way only.
+   A flex never implies ownership. */
 async function linkListings(): Promise<void> {
   if (state.rows.length === 0) return;
   const events = await queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], { timeoutMs: 6000 })
@@ -165,11 +151,7 @@ async function linkListings(): Promise<void> {
   );
 }
 
-/* --------------------------------------------------------------- render ---*/
-
-/* rankFlexDomains has already sorted the rows, and paying is the only
-   entitlement, so their order is the ranking. Rank is stamped here so it
-   survives filtering: #17 stays #17 when you search for it. */
+/* Rows arrive sorted by rankFlexDomains. Stamp rank now so #17 stays #17 under a filter. */
 const board = (): RankedRow[] => state.rows.map((row, i) => ({ ...row, rank: i + 1 }));
 
 function visible(): RankedRow[] {
@@ -190,10 +172,7 @@ function visible(): RankedRow[] {
   return [...rows].sort(by[state.sort] ?? by.rank);
 }
 
-/* A crown, a star and a cut stone rather than medal glyphs: the metal disc is
-   already the medal, and a ribbon-and-disc glyph is illegible at 24px. The
-   stone is faceted because an irregular outline turns into a blob at that
-   size. */
+/* The metal disc is the medal. A medal glyph on it is illegible at 24px. */
 const CROWN = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <path d="M2.9 7.9 7.5 12.4 12 4.9l4.5 7.5 4.6-4.5-1.7 9.8H4.6L2.9 7.9Z"/>
     <rect x="4.7" y="19.2" width="14.6" height="2.6" rx="1.3"/>
@@ -219,17 +198,14 @@ const ARROW = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" strok
     stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M5 12h13M12.5 5.5 19 12l-6.5 6.5"/></svg>`;
 
-/* Hue keyed to a hash of the name, so a domain keeps its tile colour between
-   renders. Eight steps from teal to indigo rather than the whole wheel, which
-   would clash with the single-accent palette. Lightness varies too, so eight
-   steps still tell two dozen tiles apart. */
+/* Stable tile colour from a name hash. Hue stays teal to indigo to fit the accent palette. */
 const tileOf = (d: string): { h: number; l: number } => {
   let h = 0;
   for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) >>> 0;
   return { h: 186 + (h % 8) * 7, l: 52 + ((h >>> 3) % 3) * 5 };
 };
 
-/* ageText says "today" for the recent past, which takes no "ago". */
+/* ageText returns "today" for recent times, which takes no "ago". */
 const agoText = (ts: number): string => {
   const age = ageText(ts);
   return age === "today" ? age : `${age} ago`;
@@ -245,21 +221,16 @@ const splitName = (d: string): [string, string] => {
   return [d.slice(0, i), d.slice(i)];
 };
 
-/* Second, first, third: the podium order, which the wordmark also draws. */
+/* Podium order, left to right. */
 const PODIUM = [{ rank: 2, cls: "r2" }, { rank: 1, cls: "r1" }, { rank: 3, cls: "r3" }];
 
-/* The podium ignores the search box and the TLD chips: it shows the top of the
-   whole board, and re-ranking it under a filter would crown whatever name was
-   searched for. The rows below respect the filter and bring the top three back
-   into the list while one is on. */
+/* Podium ignores search and TLD filters, or a search would crown whatever was searched for. */
 function renderPodium(): void {
   const top = board().slice(0, 3);
 
   $("#podium").innerHTML = PODIUM.map(({ rank, cls }) => {
     const row = top[rank - 1];
 
-    /* An empty floor is shown as open rather than left out, so the podium
-       always has three cards. */
     if (!row) {
       return `<article class="card-rank ${cls}">
         ${badge(rank)}
@@ -285,14 +256,12 @@ function renderPodium(): void {
 }
 
 function renderRows(rows: RankedRow[]): void {
-  /* The podium already shows the top three, so the list starts at #4. While a
-     search or TLD filter is on they come back, because the podium ignores the
-     filter and a search for the leader would otherwise find nothing. */
+  /* List starts at #4 under the podium. A filter brings the top three back,
+     since the podium ignores filters. */
   const filtered = state.search || state.tld;
   const body = filtered ? rows : rows.slice(PODIUM.length);
 
-  /* Clamp before slicing. Filtering down to one page while sitting on page 4
-     otherwise shows an empty list with a pager that disagrees with it. */
+  /* Clamp first, or narrowing a filter while on page 4 shows an empty page. */
   const pages = Math.max(1, Math.ceil(body.length / PER_PAGE));
   if (state.page > pages) state.page = pages;
 
@@ -334,10 +303,7 @@ function renderRows(rows: RankedRow[]): void {
   renderPager(pages);
 }
 
-/* Previous, first, a window around the current page, last, Next, with a
-   `.gap` ellipsis where numbers are skipped. app.css styles the current page
-   through `[aria-current=page]` and the ends through `:disabled`, so both must
-   be real attributes; a class such as `.on` is not styled. */
+/* app.css styles `[aria-current=page]` and `:disabled`. A class such as `.on` does nothing. */
 function renderPager(pages: number): void {
   const el = $("#pager");
   if (pages <= 1) {
@@ -389,14 +355,12 @@ function renderSide(rows: BoardRow[]): void {
   $("#s-count").textContent = sats(rows.length);
   $("#s-tld").textContent = String(tlds.size);
 
-  /* The weekly panel uses the ranking's own zap window, so the two never
-     disagree. */
+  /* Same zap window as the ranking, so the two agree. */
   const weekly = [...rows].filter((r) => r.sats > 0).sort((a, b) => b.sats - a.sats).slice(0, 8);
   $("#weekly").innerHTML = weekly.length
     ? weekly.map((r, i) => {
         const [stem, t] = splitName(r.domain);
-        // app.css styles `.wk-rank.metal`, so the medal classes go on the
-        // rank span, not on the row.
+        // app.css styles `.wk-rank.metal`, so medal classes go on the span.
         const metal = i < 3 ? ` r${i + 1} metal` : "";
         return `<li class="wk-row">
            <span class="wk-rank${metal}">#${i + 1}</span>
@@ -410,9 +374,7 @@ function renderSide(rows: BoardRow[]): void {
           : "Flex payments are not switched on for this site yet."
       }</li>`;
 
-  /* `.act-i` is the 30x30 icon disc inside a row, not the row: on the <li> it
-     would make every entry a 30px square. `.act-up` is the green treatment for
-     the top three, `.act-bid` the blue one below. */
+  /* `.act-i` is the 30px icon disc. On the <li> it squashes every row to 30px. */
   $("#feed").innerHTML = state.recent.length
     ? state.recent.map((zap, i) => {
         const domain = zap.flexDomain ?? "a domain";
@@ -447,28 +409,17 @@ function render(): void {
   paintClaim();
 }
 
-/* ------------------------------------------------------------- the flex ---
- *
- * Type a domain, pick an amount, pay, with no proof, account or listing. The
- * steppers aim at a rank, and the price is one sat more than whoever holds
- * that rank now.
- *
- * The site never touches the payment. The invoice comes from a lightning
- * provider, the user pays from their own wallet, and the board counts the
- * receipt the provider publishes.
- */
-
+/* The site never touches the payment. The provider issues the invoice and
+   publishes the receipt the board counts. */
 const MIN_FLEX_SATS = 1000;
 
-/* One sat more than whoever holds that rank now; an empty floor costs the
-   minimum. */
+/* One sat over the current holder of that rank, or the minimum for an empty floor. */
 function costOfRank(r: number): number {
   const list = board();
   const rank = Math.max(1, r);
   return rank > list.length ? MIN_FLEX_SATS : Math.max(MIN_FLEX_SATS, list[rank - 1].sats + 1);
 }
 
-/* The rank that many sats would reach. */
 function rankFor(amount: number): number {
   const list = board();
   let i = 0;
@@ -502,8 +453,7 @@ async function flexIt(event: Event): Promise<void> {
     return failHint("Flex payments are not switched on for this site yet, so there is nothing to pay. Browse the market meanwhile.");
   }
   if (!session.pubkey) {
-    // The payer signs the zap request, which is what makes the receipt
-    // attributable. The page can make a key in two clicks.
+    // The payer's signed zap request is what makes the receipt attributable.
     hint.className = "hint";
     hint.textContent = "Connect or create a key first. Your key signs the payment.";
     openConnect();
@@ -563,14 +513,10 @@ function showInvoice(domain: string, amount: number, invoice: string): void {
   $("#copy-invoice").addEventListener("click", () => copyToClipboard($("#invoice").textContent!));
 }
 
-/* The "Live" badge shows only when payments are on, and then the receipts are
-   re-read every minute. */
 function paintLive(): void {
   const badge = document.querySelector<HTMLElement>(".activity .live");
   if (badge) badge.hidden = !featuringEnabled();
 }
-
-/* ------------------------------------------------------------- wiring ---*/
 
 initTheme();
 initConnect();
@@ -579,7 +525,7 @@ onSessionChange(() => render());
 $("#form").addEventListener("submit", flexIt);
 
 $("#c-minus").addEventListener("click", () => {
-  // A cheaper rank is further down the board, so the target number goes up.
+  // Cheaper means further down, so the rank number goes up.
   state.target = Math.min(board().length + 1, state.target + 1);
   paintClaim();
 });
@@ -588,9 +534,7 @@ $("#c-plus").addEventListener("click", () => {
   paintClaim();
 });
 
-/* Sorting and the ranking window share one control. "All time" changes which
-   receipts are fetched as well as their order: this week shows who is paying
-   for attention now, all time shows who has paid for it most. */
+/* #sort also picks the ranking window. Switching to "rank-all" refetches receipts. */
 $("#sort").addEventListener("change", (e) => {
   const value = (e.target as HTMLSelectElement).value;
   const wantRange = value === "rank-all" ? "all" : "week";
@@ -630,7 +574,6 @@ $("#pager").addEventListener("click", (e) => {
   $("#board").scrollIntoView({ behavior: "smooth", block: "start" });
 });
 
-/* Footer socials come from config.js. One with no URL is hidden. */
 for (const b of document.querySelectorAll<HTMLElement>(".js-social")) {
   const key = (b.getAttribute("aria-label") ?? "").toLowerCase();
   const url = ((CONFIG.socials as Record<string, string> | undefined)?.[key] ?? "").trim();
@@ -640,5 +583,4 @@ for (const b of document.querySelectorAll<HTMLElement>(".js-social")) {
 
 paintLive();
 load();
-// One interval, registered once, and only when payments are on.
 if (featuringEnabled()) setInterval(() => { if (!document.hidden) load(); }, 60_000);

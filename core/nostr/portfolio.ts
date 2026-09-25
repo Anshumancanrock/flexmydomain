@@ -1,15 +1,7 @@
-/**
- * The portfolio: NIP-78 kind 30078, `d = "fmd:portfolio"`.
- *
- * One replaceable event per user holds every domain they have proven, each
- * with its proof, so a flex page renders from one fetch with no server
- * involved.
- *
- * Every entry carries its own `iat` and signature, so a reader verifies each
- * domain against the event's pubkey offline, without DNS. DNS adds the live
- * half: whether the zone still agrees today. This file keeps the two answers
- * separate, because merging them would show a stale claim as verified.
- */
+// Portfolio, NIP-78 kind 30078 with d = "fmd:portfolio". One replaceable event holds
+// every proven domain with its proof, so a flex page renders from one fetch.
+// Entries verify offline against the event pubkey. DNS says if the zone still agrees.
+// Keep those two answers apart, or a stale claim shows as verified.
 
 import { proofDigest, PROOF_VERSION, type ProofRecord } from '../oracle/proof.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
@@ -26,24 +18,23 @@ export const PORTFOLIO_KIND = 30078
 export const PORTFOLIO_D = 'fmd:portfolio'
 export const PORTFOLIO_TOPIC = 'flexmydomain'
 
-/** The content format version. Bump it when the JSON shape changes. */
+/** Bump when the JSON shape changes. */
 export const PORTFOLIO_VERSION = 1
 
-/** Which oracle was used when the entry was added. spec/PROOF.md section 7. */
+/** Oracle used when the entry was added. spec/PROOF.md section 7. */
 export type ProofSource = 'dns' | 'nip05'
 
 export interface PortfolioEntry {
   domain: string
-  /** Unix seconds inside the signed proof. Absent for a NIP-05-only entry. */
+  /** Unix seconds from the signed proof. Absent for NIP-05 entries. */
   iat?: number
-  /** The 64-byte BIP-340 signature, hex. Absent for a NIP-05-only entry. */
+  /** 64-byte BIP-340 signature, hex. Absent for NIP-05 entries. */
   sig?: string
   source: ProofSource
-  /** When this holder first proved the domain, by their own clock. */
+  /** First proved, by the holder's own clock. */
   firstSeen: number
-  /** Optional one-liner shown on the card. */
   tagline?: string
-  /** Is it listed for sale? A rendering hint; the listing event is the truth. */
+  /** Rendering hint only. The listing event is the truth. */
   forSale?: boolean
 }
 
@@ -54,13 +45,7 @@ export interface Portfolio {
   event?: NostrEvent
 }
 
-/**
- * Build the event a holder signs.
- *
- * Entries are sorted by domain so that re-publishing an unchanged portfolio
- * produces identical bytes. Otherwise every save would write a new event id to
- * five relays, filling the user's history with events that say nothing new.
- */
+/** Sorted by domain, so re-publishing an unchanged portfolio gives the same bytes and event id. */
 export function buildPortfolio(params: {
   pubkey: string
   entries: PortfolioEntry[]
@@ -77,8 +62,7 @@ export function buildPortfolio(params: {
       if (entry.iat === undefined || !isHex64(entry.sig ?? '')) {
         throw new Error(`buildPortfolio: the DNS entry for ${domain} has no proof attached`)
       }
-      // Refuse to publish a claim that cannot verify. A portfolio full of
-      // entries that fail on the reader's machine is worse than an empty one.
+      // Refuse what can't verify. A failing entry on the reader's machine is worse than none.
       const digest = proofDigest({ domain, pubkey: params.pubkey, iat: entry.iat })
       if (!verifyDigestSignature(entry.sig as string, digest, params.pubkey)) {
         throw new Error(`buildPortfolio: the proof for ${domain} does not verify under this key`)
@@ -112,11 +96,8 @@ export function buildPortfolio(params: {
 }
 
 /**
- * Read a portfolio out of an event.
- *
- * Tolerant of unknown fields and of a future `v`, because a reader running old
- * code should still render the domains it understands rather than an error
- * page. Intolerant of a malformed entry, which is dropped with a reason.
+ * Tolerates unknown fields and a newer `v`, so old code still renders what it knows.
+ * Malformed entries are dropped with a reason.
  */
 export function parsePortfolio(
   event: NostrEvent,
@@ -186,22 +167,19 @@ function readEntry(raw: unknown): { entry: PortfolioEntry } | { reason: string }
   }
 }
 
-/** One entry's verdict. `proven` is offline-only; the zone is checked live. */
+/** `proven` is offline only. The zone is checked live. */
 export interface EntryVerification {
   domain: string
-  /** The signature in the entry verifies for this domain under this pubkey. */
+  /** The entry's signature verifies under this pubkey. */
   proven: boolean
   reason?: string
   record?: ProofRecord
 }
 
 /**
- * Verify every entry against the portfolio's own pubkey, offline.
- *
- * This is all a reader can conclude with no network: "the holder of this key
- * signed a claim to these domains, at these times". It does not say the zones
- * still agree, and a renderer must not present it as if it did. Re-resolve,
- * and show a claim whose record has vanished as stale rather than hiding it.
+ * Offline, against the portfolio's own pubkey. Proves this key claimed these domains
+ * at these times, nothing about the zones today. Re-resolve, and show a vanished
+ * record as stale instead of hiding it.
  */
 export function verifyPortfolio(portfolio: Portfolio): EntryVerification[] {
   return portfolio.entries.map((entry) => {
@@ -228,12 +206,7 @@ export function verifyPortfolio(portfolio: Portfolio): EntryVerification[] {
   })
 }
 
-/**
- * Add or replace one domain, preserving `firstSeen`.
- *
- * Re-proving a domain must not reset the date it was first held. That date is
- * the only number on a flex page that cannot be manufactured on the spot.
- */
+/** Keeps the earliest `firstSeen`, the one number on a flex page nobody can fake on the spot. */
 export function upsertEntry(entries: readonly PortfolioEntry[], entry: PortfolioEntry): PortfolioEntry[] {
   const domain = normaliseDomain(entry.domain)
   const existing = entries.find((e) => e.domain === domain)
@@ -247,13 +220,12 @@ export function upsertEntry(entries: readonly PortfolioEntry[], entry: Portfolio
   )
 }
 
-/** Remove a domain. Dropping a name from a portfolio is not a deletion request. */
+/** Not a deletion request. */
 export function removeEntry(entries: readonly PortfolioEntry[], domain: string): PortfolioEntry[] {
   const d = normaliseDomain(domain)
   return entries.filter((e) => e.domain !== d)
 }
 
-/** The filter that fetches one holder's portfolio. */
 export function portfolioFilter(pubkey: string): Record<string, unknown> {
   return { kinds: [PORTFOLIO_KIND], authors: [pubkey], '#d': [PORTFOLIO_D], limit: 1 }
 }

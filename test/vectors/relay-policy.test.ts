@@ -1,11 +1,5 @@
-/**
- * The relay's write policy: services/relay/policy.ts and write-policy.ts.
- *
- * Every accepted event is built by the core/ builder the site uses, so an
- * accept means the site's own events get stored. Most refusals are near misses
- * of an accepted event (the same event with one thing wrong), so the policy
- * cannot pass by refusing everything.
- */
+// Relay write policy (services/relay/policy.ts, write-policy.ts). Accepted events come from the
+// site's own core/ builders. Most refusals are near misses of one, so refusing everything fails.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -111,8 +105,8 @@ describe('deletions (5)', () => {
     for (const event of [proofEvt, portfolio, escrow]) accepts(sign(buildDeletion({ pubkey: PK, events: [event], createdAt: NOW })))
   })
 
-  /* Other apps share kinds 30402 and 30078 and publish their deletions to the
-     same public relays; the mirror's #k filter sees every one of them. */
+  /* Other apps publish deletions of 30402 and 30078 to the same public relays, and the
+     mirror's #k filter sees them all. */
   test("another marketplace's delisting, or another app's 30078 deletion, is refused", () => {
     const theirs = (kind: number, d: string) => sign({
       pubkey: PK, created_at: NOW, kind: 5, content: '', tags: [['a', `${kind}:${PK}:${d}`], ['k', String(kind)]],
@@ -248,7 +242,7 @@ describe('the plugin process', () => {
     expect(handle(input(listing), {}, allow, NOW).action).toBe('accept')
     expect(handle(input(listing), {}, allow, NOW)).toEqual({ id: listing.id, action: 'reject', msg: 'rate-limited: slow down' })
     expect(handle(input(listing, 'IP4', '198.51.100.1'), {}, allow, NOW).action).toBe('accept')
-    expect(handle(input(listing), {}, allow, NOW + 1).action).toBe('accept') // one token refilled
+    expect(handle(input(listing), {}, allow, NOW + 1).action).toBe('accept') // One token refilled.
     for (let i = 0; i < 10; i++) expect(handle(input(listing, 'Stream', 'wss://nos.lol'), {}, allow, NOW).action).toBe('accept')
   })
 

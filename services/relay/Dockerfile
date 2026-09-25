@@ -1,22 +1,20 @@
 # syntax=docker/dockerfile:1.7
 #
-# The flexmydomain relay: strfry 1.1.3, pinned by tag and verified by commit,
-# plus this repository's write policy compiled to a standalone binary.
+# flexmydomain relay: strfry 1.1.3 (tag pinned, commit verified) plus our write
+# policy compiled to a standalone binary.
 #
-# Build from the repository root (docker-compose.yml does this for you):
+# Build from the repo root (docker-compose.yml does this):
 #   docker build -f services/relay/Dockerfile -t fmd-relay:1.1.3 .
 #
-# Building strfry is a C++20 compile. Give the build 2 GB of memory, or build
-# the image elsewhere and push it; MAKE_JOBS trades speed for memory.
+# strfry is a C++20 compile. Give it 2 GB of memory, or build elsewhere and push.
+# MAKE_JOBS trades speed for memory.
 
 ARG STRFRY_TAG=1.1.3
 ARG STRFRY_COMMIT=16c00df04e264f4d68db5e10a48127f015c7824b
-# The oven/bun image and the baseline runtime below, always the same version.
+# One version for both the oven/bun image and the baseline runtime below.
 ARG BUN_VERSION=1.3.14
 
-# ---------------------------------------------------------------- strfry ---
-# The same packages and build steps as strfry's own ubuntu.Dockerfile, with the
-# sources fetched without their history.
+# Same packages and steps as strfry's ubuntu.Dockerfile, but a shallow fetch.
 FROM ubuntu:jammy AS strfry
 ARG STRFRY_TAG
 ARG STRFRY_COMMIT
@@ -25,31 +23,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev libsecp256k1-dev libzstd-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-# A tag can be moved; the commit cannot. Refuse to build anything else. The
-# commit pins every submodule, and each is fetched at its pinned commit
-# without its history: about 11 MB instead of 42. `make setup-golpe` then
-# finds them all in place and fetches nothing.
+# Tags can move, commits can't, so refuse any other commit. The commit pins
+# every submodule. Each is fetched shallow at its pin (about 11 MB instead of
+# 42), and `make setup-golpe` then finds them in place and fetches nothing.
 RUN git -c advice.detachedHead=false clone --quiet --branch "$STRFRY_TAG" --depth 1 https://github.com/hoytech/strfry.git . \
     && test "$(git rev-parse HEAD)" = "$STRFRY_COMMIT" \
     && git submodule update --init --depth 1 \
     && git -C golpe submodule update --init --depth 1 \
     && make setup-golpe
-# Its own layer, after the download, so a failed or re-tuned compile does not
-# fetch the sources again.
+# Own layer after the download, so a failed or re-tuned compile doesn't refetch.
 ARG MAKE_JOBS=2
 RUN make -j"$MAKE_JOBS"
-# Debug sections are most of the binary (154 MB of it). The symbol table
-# stays, so a crash's stack trace still names its functions.
+# Debug sections are most of the binary (154 MB). Symbols stay, so stack traces
+# still name functions.
 RUN strip --strip-debug strfry
 
-# -------------------------------------------------------- bun baseline ---
-# On x86-64 the write policy is compiled against Bun's "baseline" runtime.
-# The default runtime needs AVX2, and many VPS CPUs (older Xeons, or KVM's
-# generic CPU models) do not have it: there the plugin would die with "Illegal
-# instruction" and strfry would refuse every write. The runtime comes from the
-# npm registry, checked against the sha512 that registry publishes for it.
-# oven/bun's amd64 image currently ships the same binary, but nothing
-# guarantees that it will keep doing so.
+# On x86-64 the policy is compiled against Bun's "baseline" runtime. The default
+# one needs AVX2, which many VPS CPUs lack (older Xeons, KVM generic models).
+# There the plugin dies with "Illegal instruction" and strfry refuses every write.
+# Fetched from npm and checked against the registry's published sha512. oven/bun's
+# amd64 image ships the same binary today, but nothing guarantees it.
 FROM ubuntu:jammy AS bun-baseline
 ARG TARGETARCH
 ARG BUN_VERSION
@@ -62,7 +55,6 @@ RUN mkdir -p /out && if [ "$TARGETARCH" = "amd64" ]; then \
       && install -m 0755 /tmp/package/bin/bun /out/bun; \
     fi
 
-# --------------------------------------------------------------- policy ---
 FROM oven/bun:${BUN_VERSION} AS policy
 WORKDIR /src
 COPY package.json bun.lock tsconfig.json ./
@@ -72,8 +64,8 @@ COPY client client
 COPY services/relay services/relay
 COPY test/vectors/relay-policy.test.ts test/vectors/relay-policy.test.ts
 COPY --from=bun-baseline /out /opt/bun-baseline
-# The policy's own tests gate the image: a policy that refuses the site's
-# events, or accepts everything, never ships.
+# Policy tests gate the image. One that refuses the site's events or accepts
+# everything never ships.
 RUN bun test test/vectors/relay-policy.test.ts \
     && if [ -x /opt/bun-baseline/bun ]; then \
          bun build --compile --minify --target=bun-linux-x64-baseline \
@@ -85,7 +77,6 @@ RUN bun test test/vectors/relay-policy.test.ts \
     && echo '{"type":"new","event":{"id":"00","pubkey":"00","kind":1,"tags":[],"content":""},"sourceType":"Import"}' \
        | /out/fmd-write-policy | grep -q '"action":"reject"'
 
-# -------------------------------------------------------------- runtime ---
 FROM ubuntu:jammy
 RUN apt-get update && apt-get install -y --no-install-recommends \
       liblmdb0 libflatbuffers1 libsecp256k1-0 libb2-1 libzstd1 libssl3 zlib1g ca-certificates \

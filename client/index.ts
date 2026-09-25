@@ -1,26 +1,11 @@
-/**
- * The browser bundle: everything a page in web/ needs, in one module.
- *
- * `bun run build` bundles it to `web/assets/fmd.js`. Page scripts get all
- * library code from that file, with no CDN and no framework.
- *
- *   core/oracle   the proof format, normalisation, RDAP eligibility
- *   core/nostr    events, NIP-19, the listing, the portfolio
- *   core/escrow   the taproot escrow, its spends, the transfer rules
- *   net/          DoH, RDAP, relays, chain data, LNURL: all network access
- *   client/       signers and private-message helpers
- *
- * There is no backend: every user-facing feature runs from static files with
- * every server of ours switched off.
- */
+// Browser bundle, built to web/assets/fmd.js. Pages get all library code from it.
+// No backend. Every user-facing feature works with our servers switched off.
 
 export * from '../core/oracle/index.js'
 export * from '../core/nostr/index.js'
 
-/* core/escrow is exported by name rather than with a star. When two star
-   exports share a name, ES modules drop that name without an error, and
-   escrow's generic helpers (taggedHash, compareBytes) are the likeliest to
-   collide. */
+/* By name, not a star. ES modules silently drop a name two star exports share,
+   and escrow's generic helpers (taggedHash, compareBytes) are likeliest to clash. */
 export {
   addressToScript,
   buildCommitment,

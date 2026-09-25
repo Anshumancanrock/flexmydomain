@@ -1,14 +1,5 @@
-/**
- * core/oracle test vectors (spec/PROOF.md section 8).
- *
- * An independent implementation should reproduce these exactly. Where it
- * cannot, one side is wrong, and spec/PROOF.md decides which.
- *
- * The normalisation table matters most when porting to another language: the
- * normalised domain is inside the signed message, so a one-character
- * disagreement is a signature that verifies for nobody, with no diagnostic on
- * either side.
- */
+// core/oracle vectors (spec/PROOF.md section 8). Ports must match exactly, and the spec settles any
+// disagreement. The normalised domain is signed, so a one-character mismatch fails with no diagnostic.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
@@ -56,11 +47,7 @@ import {
 
 import { checkEvent, eventId, signEvent, type NostrEvent } from '../../core/nostr/event.ts'
 
-// ---------------------------------------------------------------------------
-// fixtures: two fixed keys, one fixed timestamp, zero aux randomness
-// ---------------------------------------------------------------------------
-
-/** Deterministic aux randomness, so every signature below is reproducible. */
+/** Zero aux randomness, so signatures are reproducible. */
 const AUX = new Uint8Array(32)
 
 function key(fill: number) {
@@ -71,7 +58,7 @@ function key(fill: number) {
 const SELLER = key(0x11)
 const STRANGER = key(0x22)
 
-/** 2026-09-15T00:00:00Z. Fixed, so `iat` never drifts between runs. */
+/** 2026-09-15T00:00:00Z. */
 const IAT = 1789430400
 const NOW = IAT + 3600
 
@@ -88,13 +75,8 @@ function makeProof(
   return { record, txt: encodeProofRecord(record), event }
 }
 
-// ---------------------------------------------------------------------------
-// punycode
-// ---------------------------------------------------------------------------
-
 describe('punycode', () => {
-  // Cross-checked against the host's IDNA (`new URL`), an independent
-  // implementation of the same RFC 3492 algorithm.
+  // Cross-checked against the host's IDNA (`new URL`), a second RFC 3492 implementation.
   const VECTORS: [string, string][] = [
     ['bücher.de', 'xn--bcher-kva.de'],
     ['münchen.de', 'xn--mnchen-3ya.de'],
@@ -130,9 +112,8 @@ describe('punycode', () => {
   })
 
   test('an A-label that decodes to pure ASCII is rejected', () => {
-    // `xn--a-` decodes to "a", which already had a spelling: "a". Accepting
-    // both would mean two spellings of one domain, and therefore two signed
-    // messages for one claim.
+    // `xn--a-` decodes to "a". Two spellings of one domain would mean two signed messages
+    // for one claim.
     expect(() => toASCII('xn--a-.com')).toThrow()
     expect(toASCII('a.com')).toBe('a.com')
   })
@@ -142,15 +123,12 @@ describe('punycode', () => {
   })
 
   test('a decoded surrogate half is refused', () => {
-    expect(() => decodeLabel('ib9b')).toThrow() // U+D800, not a code point
-    expect(decodeLabel('ls8h')).toBe('\u{1f4a9}') // an astral plane one is fine
+    expect(() => decodeLabel('ib9b')).toThrow() // U+D800, not a code point.
+    expect(decodeLabel('ls8h')).toBe('\u{1f4a9}') // Astral plane is fine.
   })
 })
 
-// ---------------------------------------------------------------------------
-// normalisation (spec/PROOF.md section 4)
-// ---------------------------------------------------------------------------
-
+// Normalisation, spec/PROOF.md section 4.
 describe('normaliseDomain', () => {
   const TABLE: [string, string][] = [
     ['lumenary.com', 'lumenary.com'],
@@ -192,7 +170,7 @@ describe('normaliseDomain', () => {
     ['example.c', 'top-level domain'],
     ['example.123', 'top-level domain'],
     ['[2001:db8::1]', 'IPv6'],
-    ['пример.рф', 'top-level domain'], // xn--p1ai: a known limit of spec section 4
+    ['пример.рф', 'top-level domain'], // xn--p1ai, a known limit of spec section 4.
   ]
 
   for (const [input, fragment] of REJECTED) {
@@ -215,7 +193,7 @@ describe('normaliseDomain', () => {
 
   test('254 characters is refused, 253 is not', () => {
     const label = 'a'.repeat(49)
-    const ok = `${Array.from({ length: 5 }, () => label).join('.')}.com` // 253
+    const ok = `${Array.from({ length: 5 }, () => label).join('.')}.com`
     expect(ok.length).toBe(253)
     expect(normaliseDomain(ok)).toBe(ok)
 
@@ -234,10 +212,7 @@ describe('normaliseDomain', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// the proof (spec/PROOF.md sections 1 to 3)
-// ---------------------------------------------------------------------------
-
+// spec/PROOF.md sections 1 to 3.
 describe('proof record', () => {
   test('the signed message is the spec string', () => {
     expect(proofMessage('WWW.Lumenary.COM', IAT)).toBe(`flexmydomain:v1:lumenary.com:${IAT}`)
@@ -250,8 +225,7 @@ describe('proof record', () => {
     expect(e.tags).toEqual([['d', `${PROOF_D_PREFIX}${DOMAIN}`]])
     expect(e.content).toBe(proofMessage(DOMAIN, IAT))
     expect(proofDTag(DOMAIN)).toBe('fmd:proof:lumenary.com')
-    // Every field of the event follows from (domain, pubkey, iat), which is
-    // what allows the digest to be an event id.
+    // Every field follows from (domain, pubkey, iat), so the digest can be an event id.
     expect(proofDigestHex({ domain: DOMAIN, pubkey: SELLER.pk, iat: IAT })).toBe(eventId(e))
   })
 
@@ -276,8 +250,7 @@ describe('proof record', () => {
     expect(r.ok).toBe(true)
     if (r.ok) {
       expect(r.domain).toBe(DOMAIN)
-      // One signature, two artefacts: the TXT value and the relay copy carry
-      // the same 64 bytes.
+      // The TXT value and the relay copy carry the same 64-byte signature.
       expect(encodeProofRecord(r.record)).toBe(makeProof().txt)
     }
   })
@@ -407,7 +380,7 @@ describe('proof record', () => {
         records: [
           'v=spf1 -all',
           'google-site-verification=abc123',
-          makeProof({ signer: STRANGER }).txt, // a previous owner's proof
+          makeProof({ signer: STRANGER }).txt, // Previous owner's proof.
           txt,
         ],
       })
@@ -437,10 +410,6 @@ describe('proof record', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// NIP-05, the alternative proof
-// ---------------------------------------------------------------------------
-
 describe('NIP-05', () => {
   const doc = {
     names: { _: SELLER.pk, alice: SELLER.pk, bob: STRANGER.pk },
@@ -451,7 +420,7 @@ describe('NIP-05', () => {
     const v = verifyNip05({ domain: DOMAIN, pubkey: SELLER.pk, document: doc })
     expect(v.ok).toBe(true)
     expect(v.names).toEqual(['_', 'alice'])
-    expect(v.identifier).toBe(DOMAIN) // `_` renders as the bare domain
+    expect(v.identifier).toBe(DOMAIN) // `_` renders as the bare domain.
   })
 
   test('a document that never mentions the key proves nothing', () => {
@@ -476,10 +445,6 @@ describe('NIP-05', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// combining the two
-// ---------------------------------------------------------------------------
-
 describe('combineProofs', () => {
   const dnsOk = verifyProofRecord({ domain: DOMAIN, pubkey: SELLER.pk, record: makeProof().txt, now: NOW })
   const nip05Ok = verifyNip05({ domain: DOMAIN, pubkey: SELLER.pk, document: { names: { _: SELLER.pk } } })
@@ -501,10 +466,6 @@ describe('combineProofs', () => {
     expect(s.reason).toBeTruthy()
   })
 })
-
-// ---------------------------------------------------------------------------
-// RDAP
-// ---------------------------------------------------------------------------
 
 const BOOTSTRAP = {
   version: '1.0',
@@ -599,7 +560,7 @@ describe('eligibility', () => {
   test('a healthy but locked domain is listable, and cannot move yet', () => {
     const e = check()
     expect(e.listable).toBe(true)
-    expect(e.unlocked).toBe(false) // clientTransferProhibited is present
+    expect(e.unlocked).toBe(false) // clientTransferProhibited is present.
   })
 
   test('removing the lock lets it move and changes nothing else', () => {
@@ -705,7 +666,7 @@ describe('the release fingerprint', () => {
     const after = fingerprintOf(
       parseRdapDomain(rdapResponse({ nameservers: [{ ldhName: 'ns1.buyer.example' }, { ldhName: 'ns2.buyer.example' }] })),
     )
-    // The registrar id never moved; only the other fingerprint did.
+    // Registrar id unchanged, only the nameservers moved.
     expect(after.registrarIanaId).toBe(before.registrarIanaId)
     expect(fingerprintMatches(after, { registrarIanaId: undefined, nameservers: ['ns1.buyer.example'] })).toBe(true)
     expect(fingerprintMatches(before, { registrarIanaId: undefined, nameservers: ['ns1.buyer.example'] })).toBe(false)
@@ -718,12 +679,8 @@ describe('the release fingerprint', () => {
 
 describe('the verifier in spec/PROOF.md', () => {
   /**
-   * The verifier printed in spec/PROOF.md, restated here without its comments.
-   *
-   * The spec presents it as a complete signature check, and someone will implement
-   * against it, so it is executed here rather than trusted. It uses only
-   * @noble, with no import from this repository, which makes it a second
-   * implementation.
+   * The verifier printed in spec/PROOF.md, minus comments. People will implement against it,
+   * so we run it. Uses only @noble and nothing from this repo, so it's a second implementation.
    */
   function specVerify(value: string, domain: string): boolean {
     const [version, iat, pubkey, sig] = value.split('.')

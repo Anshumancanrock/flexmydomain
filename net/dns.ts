@@ -1,16 +1,7 @@
 /**
- * DNS over HTTPS: TXT lookups through two independent public resolvers.
- *
- * Isomorphic: `fetch` only. Runs in a page and under Bun unchanged.
- *
- * This module resolves, and core/oracle decides whether a proof is valid.
- * Keeping the two apart lets every verification test run with fixed inputs
- * and no network.
- *
- * A single resolver is a single party that can be wrong, cached, poisoned or
- * compelled. Two independent providers must agree, so a reader does not have
- * to take one lookup on trust and can repeat it themselves. A disagreement is
- * reported, not settled by picking one provider.
+ * TXT lookups over DoH through two independent resolvers. core/oracle judges.
+ * One resolver can be wrong, stale, poisoned or compelled, so both must agree.
+ * A disagreement is reported, never settled by picking one.
  */
 
 /** RFC 8484 JSON endpoints, both CORS-enabled (checked 2026-09-18). */
@@ -21,42 +12,38 @@ export const DOH_PROVIDERS = [
 
 export const TXT_TYPE = 16
 
-/** What one provider said, kept verbatim as evidence. */
+/** One provider's answer, kept verbatim as evidence. */
 export interface DohObservation {
   provider: string
-  /** Records as returned, quotes stripped and multi-strings joined. */
+  /** Quotes stripped, multi-strings joined. */
   records: string[]
-  /** The DNS RCODE. 0 is NOERROR and 3 is NXDOMAIN; both are answers. */
+  /** DNS RCODE. 0 (NOERROR) and 3 (NXDOMAIN) are both answers. */
   status: number | undefined
-  /** True when the provider validated the DNSSEC chain. A free strength signal. */
+  /** Provider validated the DNSSEC chain. */
   dnssec: boolean
-  /** Set when the provider did not answer at all. Not the same as "no records". */
+  /** Provider did not answer at all. Not the same as no records. */
   error?: string
-  /** Unix seconds when the lookup was made. */
+  /** Unix seconds. */
   observedAt: number
-  /** The response body as received, for the evidence file. */
+  /** Body as received, for the evidence file. */
   raw?: string
 }
 
 export interface TxtLookup {
   name: string
   observations: DohObservation[]
-  /** Records every answering provider returned: the set to verify against. */
+  /** Returned by every answering provider. Verify against these only. */
   agreed: string[]
-  /** Records only some providers returned. Shown, never trusted. */
+  /** Returned by only some providers. Shown, never trusted. */
   disputed: string[]
-  /** True when at least one provider answered rather than failing. */
   answered: boolean
-  /** True when every answering provider reported a validated DNSSEC chain. */
+  /** Every answering provider validated DNSSEC. */
   dnssec: boolean
 }
 
 /**
- * A TXT lookup against one DoH provider.
- *
- * `cd=false` and `do=true` ask the resolver to validate DNSSEC and to report
- * whether it did. A provider that ignores the flags reports `AD: false`, which
- * the UI shows as "not DNSSEC-signed".
+ * One provider. `cd=false&do=true` asks it to validate DNSSEC and say so. A
+ * provider that ignores the flags returns AD false, shown as "not DNSSEC-signed".
  */
 export async function lookupTxtVia(
   provider: { name: string; url: string },
@@ -70,8 +57,7 @@ export async function lookupTxtVia(
     const response = await fetch(url, {
       headers: { accept: 'application/dns-json' },
       signal: options.signal,
-      // Never send credentials to a resolver. There is nothing to authenticate
-      // and a cookie here would leak which domains a user is looking at.
+      // No credentials. A cookie would leak which domains the user looks up.
       credentials: 'omit',
       redirect: 'follow',
     })
@@ -106,13 +92,9 @@ export async function lookupTxtVia(
 }
 
 /**
- * Join a TXT value as DoH hands it back: `"chunk one" "chunk two"`.
- *
- * TXT RDATA is a sequence of character-strings of at most 255 bytes each, and
- * the value is their concatenation with no separator. A resolver shows them
- * quoted and space-separated, so joining on a space would insert a byte that
- * was never in the zone. The proof record is 209 characters and never splits,
- * but other records in the same zone may.
+ * Join a DoH TXT value like `"chunk one" "chunk two"`. RDATA chunks are at most
+ * 255 bytes and concatenate with no separator, so never join on a space.
+ * The 209-char proof record never splits, but other records in the zone may.
  */
 export function unquoteTxt(data: string): string {
   const parts = data.match(/"(?:[^"\\]|\\.)*"/g)
@@ -121,11 +103,9 @@ export function unquoteTxt(data: string): string {
 }
 
 /**
- * Resolve TXT at `name` through every provider and compare the answers.
- *
- * The providers are asked in parallel. One that fails is recorded as failed,
- * not as having returned nothing: escrow state must never move on a single
- * failed lookup, and `answered` is what lets a caller apply that rule.
+ * Ask every provider in parallel and compare. A failed provider is recorded as
+ * failed, not empty. Escrow must never move on one failed lookup, and
+ * `answered` lets callers enforce that.
  */
 export async function lookupTxt(
   name: string,
@@ -160,11 +140,8 @@ export async function lookupTxt(
 }
 
 /**
- * Fetch a NIP-05 document, the alternative proof of spec/PROOF.md section 7.
- *
- * Returns the parsed JSON and the raw text. A domain that does not serve the
- * document with permissive CORS is not offering this proof, so the resulting
- * network error means "not offered" and is not reported as a fault.
+ * NIP-05 document, the alternative proof (spec/PROOF.md section 7). A CORS
+ * failure means the domain doesn't offer this proof. Not a fault.
  */
 export async function fetchNip05(
   url: string,

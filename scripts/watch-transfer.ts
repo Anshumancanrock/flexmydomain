@@ -1,13 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Watch a domain transfer from outside the registrar.
- *
- * Polls RDAP, applies the two-poll rule and prints what the registry's data
- * supports, using the same rules as the escrow. It needs no account, API key
- * or registrar integration.
- *
- * A seller can confirm their unlock landed, a buyer can watch their transfer
- * complete, and an arbiter can build an evidence file.
+ * Watch a domain transfer from outside the registrar. Polls RDAP and applies the
+ * escrow's rules (two-poll confirmation). No account or API key needed.
  *
  *   bun scripts/watch-transfer.ts --domain example.com --registrar 292
  *   bun scripts/watch-transfer.ts --domain example.com --ns ns1.buyer.example --interval 1800
@@ -60,7 +54,7 @@ for (;;) {
   const result = await observe({ domain, now: at, bootstrap })
 
   if (!result.observation) {
-    // Not recorded: a failed fetch is not evidence of anything.
+    // A failed fetch is not evidence. Don't record it.
     console.log(`${new Date(at * 1000).toISOString()}  no reading: ${result.reason}`)
   } else {
     history = record(history, result.observation)

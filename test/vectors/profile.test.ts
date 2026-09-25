@@ -1,10 +1,5 @@
-/**
- * NIP-39 identities, NIP-89 handlers and NIP-51 lists.
- *
- * The arbiter intersection is the part with consequences: an empty result must
- * mean "no trade", and a client that substitutes a default there picks the
- * arbiter for both parties.
- */
+// NIP-39 identities, NIP-89 handlers and NIP-51 lists. An empty arbiter intersection means
+// "no trade". A client that substitutes a default picks the arbiter for both parties.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -107,8 +102,7 @@ describe('NIP-51 arbiter sets', () => {
   })
 
   test('an empty published list differs from no list', () => {
-    // "I will trade with no arbiter at all", which is distinguishable from
-    // "no list".
+    // Empty means "I will trade with no arbiter at all".
     expect(parseArbiterSet(setOf([]))).toEqual([])
     expect(parseArbiterSet(signEvent({ ...setOf([]), kind: 1 }, ALICE.sk, AUX))).toBeUndefined()
   })
@@ -124,7 +118,7 @@ describe('NIP-51 arbiter sets', () => {
   test('no overlap means no trade, never a default', () => {
     const result = arbiterIntersection([A1], [A2])
     expect(result.arbiters).toEqual([])
-    expect(result.noArbiterPossible).toBe(false) // both wanted one, and disagreed
+    expect(result.noArbiterPossible).toBe(false) // Both wanted one and disagreed.
   })
 
   test('both publishing empty lists means they agree on no arbiter', () => {
@@ -146,7 +140,7 @@ describe('NIP-51 watchlist', () => {
       AUX,
     )
     expect(parseWatchlist(e)).toEqual(['lumenary.com', 'zeta.io'])
-    expect(parseArbiterSet(e)).toBeUndefined() // different d, different list
+    expect(parseArbiterSet(e)).toBeUndefined() // Different d, different list.
   })
 })
 

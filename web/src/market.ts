@@ -1,11 +1,6 @@
-/* market.html: browse listings, and publish one.
- *
- * A listing is shown only when its event signature verifies, its embedded
- * proof verifies for that domain under that key, and the domain's DNS still
- * agrees (the rule in spec/PROTOCOL.md). Nostr has no gatekeeper, so a listing
- * claiming apple.com will exist. The event stays on the relays; the page only
- * declines to show it, and the Unverified toggle lists what was hidden and
- * why.
+/* market.html: browse and publish listings. Show a listing only when its
+ * signature, embedded proof and live DNS all verify (spec/PROTOCOL.md).
+ * Relays have no gatekeeper, so fakes exist. The Unverified toggle shows why each failed.
  */
 import {
   DEFAULT_RELAYS,
@@ -54,7 +49,7 @@ import { CONFIG, featuringEnabled } from "./config.js";
 
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
 
-/** A listing as this page holds it. `check` and `live` fill in once DNS answers. */
+/** `check` and `live` stay null until DNS answers. */
 interface ListingEntry {
   event: NostrEvent;
   listing: Listing;
@@ -62,7 +57,7 @@ interface ListingEntry {
   live: DomainReport | null;
 }
 
-/** The prove-a-domain steps, while they are in progress. */
+/** Prove-a-domain flow in progress. */
 interface Draft {
   domain: string;
   proof: DomainReport;
@@ -85,24 +80,21 @@ const state: {
   mine: (PortfolioEntry & { proven: boolean })[];
   portfolioKnown: boolean;
 } = {
-  draft: null,      // the prove-a-domain ceremony in progress
-  listings: [],     // everything that parsed
+  draft: null,
+  listings: [],     // Everything that parsed.
   loading: true,
   search: "",
   tld: null,
   sort: "price-desc",
   showUnverified: false,
-  total: undefined, // NIP-45 COUNT, or undefined when no relay would answer
-  portfolio: [],    // the connected key's portfolio as published; republish from this
-  mine: [],         // the listable subset of it, for the sell form
-  portfolioKnown: false, // whether a relay finished answering for that portfolio
+  total: undefined, // NIP-45 COUNT, undefined if no relay answers.
+  portfolio: [],
+  mine: [],
+  portfolioKnown: false, // Some relay finished answering.
 };
 
-/* ------------------------------------------------------------- loading ---*/
-
-/* A discovery query has no author to route by, so it is a sweep of the
-   fallback relays, and the UI says so: this view is the relays asked, not the
-   whole network. The outbox model only applies once the author is known. */
+/* No author to route by, so sweep the discovery relays. This shows what they
+   hold, not the whole network. */
 async function load(): Promise<void> {
   state.loading = true;
   render();
@@ -113,11 +105,10 @@ async function load(): Promise<void> {
   ]);
   state.total = count;
 
-  // One listing per (kind, author, d). Relays also return older versions,
-  // especially right after an edit, and those would show a stale price.
+  // One per (kind, author, d). Relays still return old versions after an edit.
   const current = newestPerAddress(events);
 
-  // NIP-09: relays may ignore a deletion request, a client does not have to.
+  // Relays may ignore NIP-09 deletions. We apply them ourselves.
   const authors = [...new Set(current.map((e) => e.pubkey))];
   const deletions = authors.length
     ? await queryRelays(DISCOVERY_RELAYS, [deletionFilter(authors)], { timeoutMs: 4000 }).catch(() => [])
@@ -134,8 +125,7 @@ async function load(): Promise<void> {
   state.loading = false;
   render();
 
-  // Then the slow part: one DNS check per listing, rendered as each lands so
-  // the page fills in instead of waiting for the slowest zone.
+  // One DNS check per listing. Render as each lands.
   await Promise.all(
     state.listings.map(async (entry) => {
       const report = await checkDomainProof({
@@ -149,8 +139,6 @@ async function load(): Promise<void> {
     }),
   );
 }
-
-/* --------------------------------------------------------------- render ---*/
 
 const verified = (entry: ListingEntry): boolean => entry.check?.ok === true;
 
@@ -255,12 +243,7 @@ function render(): void {
   }).join("");
 }
 
-/* ----------------------------------------------------------- the seller ---*/
-
-/* Only a domain the connected key has already proven can be listed. A listing
-   embeds the proof signature, so one cannot be built without a proof, and a
-   free-text domain field would only produce listings that fail on every
-   reader's machine. */
+/* Only proven domains can be listed, since a listing embeds the proof signature. */
 async function loadMine(): Promise<void> {
   state.portfolioKnown = false;
   if (!session.pubkey) {
@@ -269,12 +252,9 @@ async function loadMine(): Promise<void> {
     return;
   }
 
-  /* Read from the user's NIP-65 write relays as well as the sweep relays: a
-     portfolio published before portfolios also went to the sweep relays
-     exists only on the write relays. Only relays that finished answering
-     count. If none did, the portfolio is marked unknown rather than empty,
-     because the next proof would otherwise republish from nothing and replace
-     the real one; publishing waits for a real answer. */
+  /* Older portfolios exist only on the user's write relays, so ask both sets.
+     If no relay finishes, the portfolio is unknown, not empty. Republishing
+     from empty would wipe the real one. */
   const pubkey = session.pubkey;
   await directory.resolve([pubkey]).catch(() => {});
   const relays = [...new Set([...directory.readRelays(pubkey), ...DISCOVERY_RELAYS])];
@@ -283,7 +263,7 @@ async function loadMine(): Promise<void> {
     timeoutMs: 5000,
     onRelayDone: (_relay, _count, _error, complete) => { if (complete) completed++; },
   }).catch(() => []);
-  if (session.pubkey !== pubkey) return; // the key changed mid-read; its own load follows
+  if (session.pubkey !== pubkey) return; // Key changed mid-read. Its own load follows.
   state.portfolioKnown = completed > 0;
 
   const newest = newestPerAddress(events)[0];
@@ -299,18 +279,10 @@ async function loadMine(): Promise<void> {
     return;
   }
 
-  /* Two lists, and they must not be mixed up.
-   *
-   * `portfolio` is every entry as published, and every republish is built
-   * from it. Kind 30078 is replaceable, so a filtered copy replaces the whole
-   * portfolio and whatever was filtered out is gone. A NIP-05-proven domain
-   * carries no signature and would be dropped by the filter below, so
-   * republishing from the filtered list would delete it the next time the
-   * user proves anything.
-   *
-   * `mine` is the subset that can back a listing: DNS-proven, with a signature
-   * to embed. Only the sell dropdown reads it.
-   */
+  /* Don't mix these up. Every republish starts from `portfolio`, all entries as
+   * published. Kind 30078 is replaceable, so republishing the filtered `mine`
+   * would drop NIP-05 entries, which carry no signature. `mine` only feeds the
+   * sell dropdown. */
   const verdicts = verifyPortfolio(parsed.portfolio);
   state.portfolio = parsed.portfolio.entries;
   state.mine = parsed.portfolio.entries
@@ -336,7 +308,6 @@ async function openSell(): Promise<void> {
       `No proven domains on this key yet. Prove one below (it takes one DNS record)
        and it appears here straight away.`,
     );
-    // Open the prove steps here instead of sending the user to another page.
     $<HTMLDetailsElement>("#prove").open = true;
     $("#prove").scrollIntoView({ behavior: "smooth", block: "start" });
     return;
@@ -377,9 +348,7 @@ async function publishListing(event: Event): Promise<void> {
   hint.textContent = "";
 
   try {
-    /* Re-check the zone before publishing. The portfolio says this key proved
-       the domain at some point; a listing asserts it is true now, and the gap
-       between those two is where a stale listing comes from. */
+    /* The portfolio says it was proven once. A listing claims it holds now. */
     const live = await checkDomainProof({ domain, pubkey: session.pubkey as string, dnsOnly: true });
     if (!live.status.proven) {
       hint.textContent = `The zone no longer carries your proof: ${live.status.reason}. Re-prove it with "Prove a new domain" below.`;
@@ -425,11 +394,8 @@ async function publishListing(event: Event): Promise<void> {
   }
 }
 
-/* Delisting is two acts, and the dialog says so because only one of them is
-   reliable. Republishing with status: sold replaces the old event everywhere
-   it reached; the kind 5 is a request relays may ignore. Calling the deletion
-   alone "removed" would tell a seller their asking price is private when it
-   is not. */
+/* The sold republish is the reliable part. Relays may ignore the kind 5, so
+   never tell a seller their price is gone. */
 async function delist(domain: string): Promise<void> {
   const entry = state.listings.find(
     (e) => e.listing.domain === domain && e.event.pubkey === session.pubkey,
@@ -500,17 +466,9 @@ function share(domain: string): void {
   $("#copy-naddr").addEventListener("click", () => copyToClipboard($("#naddr").textContent!));
 }
 
-/* ---------------------------------------------------------------- zapping ---
- *
- * Featuring a listing is a NIP-57 zap. The site runs no payment
- * infrastructure: the invoice comes from the recipient's own lightning
- * provider, the user pays from whatever wallet they already have, and the
- * board counts the receipt the provider publishes. The site holds no payment
- * state.
- *
- * The zap request is signed but not published to relays. It travels in the
- * LNURL callback, and the provider echoes it back inside the receipt.
- */
+/* Featuring is a NIP-57 zap, and we hold no payment state. The zap request is
+   signed but never published. It rides the LNURL callback and comes back in
+   the receipt. */
 async function featureListing(domain: string): Promise<void> {
   const entry = state.listings.find((e) => e.listing.domain === domain);
   if (!entry) return;
@@ -584,10 +542,8 @@ async function requestInvoice(domain: string, address: string): Promise<void> {
       recipient: CONFIG.featuredRecipientPubkey.trim().toLowerCase(),
       amountMsats,
       relays: ZAP_RECEIPT_RELAYS,
-      /* Both tags. The flex board counts zaps by domain and drops any zap
-         without `fmd_flex`, so a payment carrying only the listing coordinate
-         would take the user's sats and never appear on the board. `address`
-         keeps the receipt pointing at the listing it was paid from. */
+      /* Both tags. The board drops zaps without `fmd_flex`, so the listing
+         address alone would take the sats and never rank. */
       flexDomain: domain,
       address,
       lnurl: lnurl.url,
@@ -608,9 +564,6 @@ async function requestInvoice(domain: string, address: string): Promise<void> {
       return;
     }
 
-    /* The invoice is shown, not paid: the payment happens in the user's own
-       wallet, and the board counts the receipt once the provider publishes
-       it. */
     out.innerHTML =
       row("good", `<b>Invoice for ${sats(amountSats)} sats.</b> Pay it in any wallet.`) +
       `<div class="nsec" id="invoice">${esc(invoice.invoice)}</div>
@@ -629,8 +582,6 @@ async function requestInvoice(domain: string, address: string): Promise<void> {
   }
 }
 
-/* ------------------------------------------------- the add-a-domain flow ---*/
-
 function step(n: number): void {
   document.querySelectorAll<HTMLElement>(".step").forEach((el) => {
     const i = Number(el.dataset.step);
@@ -640,10 +591,8 @@ function step(n: number): void {
   });
 }
 
-/* Step 1: normalise the name and ask the registry about it. The registry
-   answer is shown as information here and never blocks the next step: a
-   locked or young domain can still be proven. Those findings matter once
-   money is about to move. */
+/* Step 1. Registry findings never block here. A locked or young domain can
+   still be proven, and the findings matter only once money moves. */
 async function checkName(event: Event): Promise<void> {
   event.preventDefault();
   const hint = $("#domain-hint");
@@ -700,9 +649,6 @@ function renderRegistry(reg: RegistryReport, proof: DomainReport): string {
     for (const finding of e.findings) {
       rows.push(row(finding.level === "refuse" ? "bad" : "", esc(finding.message)));
     }
-    /* What a sale will ask of the seller, so it is no surprise later: the escrow
-       funds only after the registry has seen the transfer lock change, because a
-       change to the lock is the one thing only the registrant can do. */
     rows.push(row("", e.unlocked
       ? `When somebody buys it, the escrow will ask you to turn the transfer lock
          <b>on</b> at your registrar and, once it has seen that, <b>off</b> again. Only the
@@ -720,8 +666,7 @@ function renderRegistry(reg: RegistryReport, proof: DomainReport): string {
   return rows.join("");
 }
 
-/* Step 2: sign the proof, a canonical event that the record alone
-   reconstructs (spec/PROOF.md 2.1). */
+/* Step 2. Sign the proof, a canonical event the record alone rebuilds (spec/PROOF.md 2.1). */
 async function signProof(): Promise<void> {
   if (!state.draft || !session.signer) return;
   const button = $<HTMLButtonElement>("#sign-btn");
@@ -751,8 +696,7 @@ async function signProof(): Promise<void> {
   }
 }
 
-/* Step 3: ask two resolvers and show what each said, so the user can watch
-   propagation happen and see which resolver is behind. */
+/* Step 3. Show each resolver's answer, so the user can watch propagation. */
 async function verifyZone(): Promise<void> {
   if (!state.draft) return;
   const button = $<HTMLButtonElement>("#verify-btn");
@@ -796,12 +740,8 @@ async function verifyZone(): Promise<void> {
   }
 }
 
-/* Step 4: publish two events, both signed by the user: the proof, which any
-   Nostr client can check without DNS, and the portfolio, so the flex page
-   renders from one fetch. Both go to the user's own NIP-65 write relays and to
-   the discovery relays this market sweeps. Every relay's answer is shown,
-   refusals included, so two acceptances out of five are not reported as a
-   plain "published". */
+/* Step 4. Publish the proof and the portfolio. Show every relay's answer, so
+   2 of 5 never reads as plain "published". */
 async function publish(): Promise<void> {
   if (!state.draft?.verified || !session.signer) return;
   const button = $<HTMLButtonElement>("#publish-btn");
@@ -810,9 +750,7 @@ async function publish(): Promise<void> {
   button.textContent = "Publishing…";
   out.hidden = false;
 
-  /* What gets published here replaces the portfolio, so it must be built from
-     a read that finished. If none did, stop rather than risk overwriting it
-     with this one domain. */
+  /* This replaces the portfolio, so it needs a finished read first. */
   if (!state.portfolioKnown) {
     out.innerHTML = row("", "Reading your current portfolio first…");
     await loadMine();
@@ -879,8 +817,6 @@ async function publish(): Promise<void> {
   }
 }
 
-/* Publishing the proof also refreshes the sell form, so a domain proved just
-   now is immediately listable without a reload. */
 async function afterProof(): Promise<void> {
   await loadMine();
   if (state.mine.length > 0) {
@@ -892,8 +828,6 @@ async function afterProof(): Promise<void> {
       `${state.mine.length} proven domain${state.mine.length === 1 ? "" : "s"} on this key.`);
   }
 }
-
-/* ------------------------------------------------------------- wiring ---*/
 
 initTheme();
 initConnect();

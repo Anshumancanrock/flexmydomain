@@ -1,15 +1,5 @@
-/**
- * The escrow event (core/nostr/escrow.ts).
- *
- * Two rules matter most here, and a failure of either is an attack:
- *
- *   1. the address in a view must be the one its own parameters derive;
- *      otherwise a plausible-looking escrow can point at an output only its
- *      publisher can spend, and the victim funds it;
- *   2. a disagreement between the parties' views is shown, never reconciled:
- *      an escrow where the buyer and seller state different amounts is a
- *      dispute to see before funding.
- */
+// Escrow event (core/nostr/escrow.ts). A view's address must match its own params, or a victim
+// funds an output only the publisher can spend. Disagreeing views are shown, never reconciled.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -40,7 +30,7 @@ const BUYER = secret(0x11)
 const SELLER = secret(0x22)
 const ARBITER = secret(0x33)
 const MALLORY = secret(0x44)
-const MALLORY2 = secret(0x45) // a second key she also controls
+const MALLORY2 = secret(0x45) // Mallory's second key.
 
 const SALT = 'ab'.repeat(32)
 const NOW = 1789430400
@@ -71,8 +61,6 @@ const parsed = (event: NostrEvent): EscrowView => {
   return r.view
 }
 
-// ---------------------------------------------------------------------------
-
 describe('the event', () => {
   test('it is kind 30078 at a derived coordinate, tagging every party', () => {
     const e = buildEscrowEvent({ ...PARAMS, pubkey: bytesToHex(x(BUYER)), createdAt: NOW })
@@ -84,8 +72,7 @@ describe('the event', () => {
   })
 
   test('all parties derive the same id without coordinating', () => {
-    // The id is a hash of the parameters, so nobody has to choose it and send
-    // it to the others in a message that could be tampered with.
+    // The id hashes the params, so nobody sends it in a message that could be tampered with.
     expect(deriveEscrowId(PARAMS)).toBe(deriveEscrowId({ ...PARAMS }))
     expect(parsed(viewBy(BUYER)).id).toBe(parsed(viewBy(SELLER)).id)
   })
@@ -139,11 +126,9 @@ describe('the event', () => {
 
 describe('what must not work', () => {
   test('an address that its own keys do not produce is refused', () => {
-    // The attack: publish a plausible escrow naming an output only you can
-    // spend, and wait for somebody to fund it.
     const honest = viewBy(BUYER)
     const body = JSON.parse(honest.content)
-    // Two keys Mallory controls, so the output is hers alone to spend.
+    // Both keys are Mallory's, so only she can spend it.
     const mine = buildTree({
       buyer: x(MALLORY),
       seller: x(MALLORY2),
@@ -164,7 +149,7 @@ describe('what must not work', () => {
   test('changing any parameter without changing the address is refused', () => {
     const honest = viewBy(BUYER)
     const body = JSON.parse(honest.content)
-    body.timeout_blocks = 1008 // a different tree, same stated address
+    body.timeout_blocks = 1008 // Different tree, same stated address.
     const forged = signEvent({ ...honest, content: JSON.stringify(body) }, BUYER, AUX)
     expect(parseEscrowEvent(forged).ok).toBe(false)
   })
@@ -217,9 +202,8 @@ describe('disagreement is shown, not reconciled', () => {
   })
 
   test('a stranger publishing to the coordinate is not a disagreement', () => {
-    // Anyone may publish to an addressable coordinate. A non-participant's
-    // view is noise, and treating it as a conflict would let anybody cast
-    // doubt on any escrow for free.
+    // Anyone can publish to the coordinate. Counting strangers would let anybody
+    // cast doubt on any escrow for free.
     const stranger = parseEscrowEvent(
       signEvent(buildEscrowEvent({ ...PARAMS, pubkey: bytesToHex(x(MALLORY)), createdAt: NOW }), MALLORY, AUX),
     )
@@ -258,7 +242,7 @@ describe('disagreement is shown, not reconciled', () => {
         AUX,
       ),
     )
-    // The buyer's stale view disagreed; their current one does not.
+    // Only the buyer's stale view disagrees.
     expect(compareViews([old, updated, seller]).agreed).toBe(true)
   })
 })
@@ -280,7 +264,6 @@ describe('state is derived from facts, not from claims', () => {
 
   test('settled only when the output is spent, never because an event says so', () => {
     const claimed = parsed(viewBy(BUYER, { settlementTxid: 'c'.repeat(64) }))
-    // The event claims a settlement. The chain has not confirmed one.
     expect(deriveEscrowState({ view: claimed, funded: true, now: NOW }).state).toBe('funded')
     expect(deriveEscrowState({ view: claimed, funded: true, spent: true, now: NOW }).state).toBe('settled')
   })

@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Run an escrow end to end on a public test network.
- *
- * Derives the address, waits for you to fund it from a faucet, then builds,
- * signs and broadcasts the settlement through the public Esplora API, with no
+ * Run an escrow end to end on a test network through public Esplora, with no
  * flexmydomain server in the path.
  *
  *   bun scripts/escrow-signet.ts new                      # make an escrow
@@ -11,13 +8,11 @@
  *   bun scripts/escrow-signet.ts settle <recovery> <addr> # cooperative spend
  *   bun scripts/escrow-signet.ts sweep  <recovery> <addr> # timeout spend
  *
- * `--network signet|testnet|mainnet` (default signet). Signet is the default
- * because its faucets work, its blocks are regular, and it is not deliberately
- * reorged the way testnet periodically is.
+ * `--network signet|testnet|mainnet`, default signet (working faucets, no
+ * testnet-style reorgs).
  *
- * The keys this prints are real private keys. On signet they guard play
- * money, but do not reuse them anywhere that matters, and do not paste the
- * recovery string into anything but web/recover.html.
+ * Printed keys are real private keys. Don't reuse them, and paste recovery
+ * strings only into web/recover.html.
  */
 
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -81,9 +76,7 @@ function loadRecovery(text: string | undefined) {
 }
 
 async function cmdNew(): Promise<void> {
-  /* Fresh keys, not derived from a Nostr key: a NIP-07 signer never exposes
-     its private key, so there is nothing stable to derive from. They are
-     generated here and handed to the user to write down. */
+  /* Fresh keys. A NIP-07 signer never exposes its secret, so there's nothing to derive from. */
   const buyerSk = schnorr.utils.randomSecretKey()
   const sellerSk = schnorr.utils.randomSecretKey()
 
@@ -160,10 +153,9 @@ async function cmdSpend(leafName: 'A' | 'D'): Promise<void> {
   const leaf = leafName === 'A' ? tree.leaves.A : tree.leaves.D
   const scriptPubKey = addressToScript(destination)
 
-  /* Leaf A needs both parties' signatures, so this path works only when one
-     process holds both keys, as it does in a signet test. In production each
-     party signs separately and they exchange 64-byte signatures, using
-     sighashFor and finaliseSpend. */
+  /* Leaf A needs both signatures, so this only works when one process holds
+     both keys (a signet test). Real parties sign apart and swap 64-byte sigs
+     via sighashFor and finaliseSpend. */
   const secretKeys: Record<string, Uint8Array> = { [role]: recovery.secretKey }
   const other = flag('other')
   if (other) {

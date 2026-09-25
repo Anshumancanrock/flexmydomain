@@ -1,13 +1,6 @@
 /**
- * Build web/recover.html: one self-contained file, no network, no CDN.
- *
- * The page must work when opened from file:// on a machine with no internet
- * and nothing else from this project installed. That rules out a module
- * import, a stylesheet link and a font, so everything is inlined into a
- * single document.
- *
- * The bundle is built from core/escrow only, with no relays, DNS, RDAP or
- * config, so the recovery path depends on nothing that could be down.
+ * Build web/recover.html as one inlined file that works offline from file://.
+ * Bundles core/escrow only, so recovery depends on nothing that could be down.
  */
 
 export {} // top-level await needs this file to be a module
@@ -16,7 +9,7 @@ const bundle = await Bun.build({
   entrypoints: ['core/escrow/index.ts'],
   target: 'browser',
   format: 'esm',
-  minify: false, // readable, so the inlined code can be checked before use
+  minify: false, // readable, so it can be checked before use
 })
 
 if (!bundle.success) {
@@ -27,10 +20,8 @@ if (!bundle.success) {
 const escrowJs = await bundle.outputs[0].text()
 const shell = await Bun.file('scripts/recover.shell.html').text()
 
-/* The bundle is an ES module ending in `export { ... }`, which a classic
-   <script> cannot contain. Strip the export statement and let the declarations
-   sit in the script's own scope. A type="module" script is not an option:
-   some browsers block modules on file://, which is where this page runs. */
+/* A classic <script> can't hold the bundle's `export { ... }`, so strip it.
+   type="module" is out because some browsers block modules on file://. */
 const inlined = escrowJs.replace(/^export\s*\{[^}]*\};?\s*$/m, '')
 
 const html = shell.replace('/*__ESCROW_BUNDLE__*/', () => inlined)

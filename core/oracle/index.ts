@@ -1,17 +1,6 @@
 /**
- * core/oracle: the two independent domain oracles. A DNS TXT record (or a
- * NIP-05 document) ties a domain to a Nostr key, and RDAP reports what the
- * registry says about the name.
- *
- *   The TXT record says  "this key speaks for this domain."
- *   The unlock says      "this key can actually sell it."
- *   RDAP says            "and here is the registry agreeing that it moved."
- *
- * None of the three sources is this project. This module does the checking
- * and net/ does the fetching that feeds it, so every check here runs with
- * fixed inputs and no network.
- *
- *   import { verifyProofRecords, checkEligibility } from './core/oracle/index.js'
+ * Domain oracles. A DNS TXT record (or NIP-05 document) ties a domain to a Nostr
+ * key, and RDAP reports what the registry sees. Checks only, net/ does the fetching.
  */
 
 export {
@@ -92,32 +81,22 @@ import type { Nip05Verification } from './nip05.js'
 import type { ProofVerification } from './proof.js'
 
 /**
- * Which oracle backed a claim. Always carry this to the UI.
- *
- * `dns` proves control of the zone; `nip05` proves control of the web server.
- * Either is accepted, but they are different claims, and the UI must not
- * collapse them into one green tick. See spec/PROOF.md section 7.
+ * `dns` proves zone control, `nip05` proves web server control. Both count, but the
+ * UI must show which one and never merge them into one green tick (spec/PROOF.md section 7).
  */
 export type ProofSource = 'dns' | 'nip05'
 
-/** A domain's proof state as a page renders it. */
 export interface DomainProofStatus {
   domain: string
   pubkey: string
   proven: boolean
   source?: ProofSource
-  /** Unix seconds the claimant signed at. Only DNS proofs carry one. */
+  /** Unix seconds, DNS proofs only. */
   iat?: number
   reason?: string
 }
 
-/**
- * Combine the two proofs into one verdict, preferring DNS.
- *
- * When both pass, DNS wins: it is the stronger claim and the only one of the
- * two with a signed timestamp. A NIP-05 document says only what was true when
- * it was fetched.
- */
+/** One verdict from both proofs. DNS wins when both pass, as the stronger claim with a signed timestamp. */
 export function combineProofs(params: {
   domain: string
   pubkey: string

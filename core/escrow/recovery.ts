@@ -1,17 +1,14 @@
 /**
- * The recovery string: the only thing a user needs to get their money back.
- * It carries the escrow's private key and every parameter needed to rebuild
- * the tree, so web/recover.html (a single file opened from file://, with no
- * network and no server) can rebuild the address and build and sign a sweep.
+ * The recovery string, the one thing a user needs to get their money back. It
+ * carries the escrow private key and the tree parameters, so web/recover.html
+ * can rebuild the address and sign a sweep offline from file://.
  *
- * It contains a private key. It is not a receipt or an identifier, and does
- * not belong in a support ticket. Nothing in this repository may log it, store
- * it, transmit it or put it in an error message.
+ * It contains a private key. Never log it, store it, send it or put it in an
+ * error message.
  *
- * The escrow key is generated fresh and handed to the user rather than derived
- * from their Nostr key: a NIP-07 signer never exposes the private key, and
- * BIP-340 signing is not reliably deterministic across signers, so there is
- * nothing stable to derive from.
+ * The escrow key is fresh, not derived from the Nostr key. NIP-07 signers never
+ * expose the private key and BIP-340 signing isn't deterministic across
+ * signers, so there's nothing stable to derive from.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -21,7 +18,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { buildTree, type EscrowTree, type TimeoutTo } from './tree.js'
 import { u32, u64 } from './tx.js'
 
-/** Human-readable prefix, so a string found in a notebook is identifiable. */
+/** Human-readable, so a string found in a notebook is recognisable. */
 export const RECOVERY_PREFIX = 'fmdrec1'
 
 const VERSION = 1
@@ -33,23 +30,20 @@ const HAS_FUNDING = 0b0000_0100
 
 export interface Recovery {
   version: number
-  /** The key this user must sign with. 32 bytes of secret. */
+  /** This user's signing key, 32 bytes. Secret. */
   secretKey: Uint8Array
   buyer: Uint8Array
   seller: Uint8Array
   arbiter?: Uint8Array
   timeoutTo: TimeoutTo
   timeoutBlocks: number
-  /** Known once the escrow is funded. Without it a sweep cannot be built. */
+  /** Set once funded. A sweep can't be built without it. */
   funding?: { txid: string; vout: number; amountSats: bigint }
 }
 
 /**
- * Encode. The output is one token with no spaces, safe in a URL and in a QR.
- *
- * Fixed-width fields rather than a self-describing format: this string is
- * meant to be written down, and every byte of framing is a byte a human might
- * mistype. The flags byte carries what varies.
+ * One token, no spaces, safe in a URL or QR. Fixed-width fields plus a flags
+ * byte, since people write this down and every framing byte is one more to mistype.
  */
 export function encodeRecovery(recovery: Recovery): string {
   assertKey(recovery.secretKey, 32, 'secretKey')
@@ -81,8 +75,7 @@ export function encodeRecovery(recovery: Recovery): string {
   }
 
   const payload = concatBytes(...parts)
-  // A truncated sha256, so a mistyped string fails loudly instead of
-  // reconstructing a different tree and a different address.
+  // Truncated sha256, so a typo fails loudly instead of rebuilding another address.
   const checksum = sha256(payload).subarray(0, CHECKSUM_BYTES)
   return RECOVERY_PREFIX + base64urlnopad.encode(concatBytes(payload, checksum))
 }
@@ -90,7 +83,7 @@ export function encodeRecovery(recovery: Recovery): string {
 /** Decode, or explain why not. Never throws on user input. */
 export function decodeRecovery(text: unknown): { ok: true; recovery: Recovery } | { ok: false; reason: string } {
   if (typeof text !== 'string') return { ok: false, reason: 'not a string' }
-  // Tolerate whitespace and line breaks: this is a string people write down.
+  // People write this down, so ignore whitespace and line breaks.
   const trimmed = text.trim().replace(/\s+/g, '')
   if (!trimmed.startsWith(RECOVERY_PREFIX)) {
     return { ok: false, reason: `a recovery string starts with "${RECOVERY_PREFIX}"` }
@@ -158,11 +151,8 @@ export function decodeRecovery(text: unknown): { ok: true; recovery: Recovery } 
 }
 
 /**
- * Rebuild the tree a recovery string describes, and say which party the key is.
- *
- * The role is found by comparing the secret key's public key against the keys
- * in the tree. A string whose key is in no leaf is refused here, instead of
- * producing a sweep that fails only at the signing step.
+ * Rebuild the tree and work out which party the key belongs to. A key in no
+ * leaf is refused here, before it turns into a sweep that fails at signing.
  */
 export function rebuildFromRecovery(recovery: Recovery): {
   tree: EscrowTree

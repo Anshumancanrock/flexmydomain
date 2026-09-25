@@ -1,9 +1,6 @@
-/* flex.html, the portfolio page, plus components the other pages reuse
-   (stepper, record, reports, key dialog). Tokens come from app.css, and
-   nothing here redefines a colour, so every page keeps the one accent and the
-   two-theme token set. */
+/* flex.html, plus components the other pages reuse. Tokens come from app.css.
+   Never redefine a colour here. */
 
-/* ================= who is being viewed ================= */
 .flex-hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
   gap:clamp(16px,3vw,32px);padding-block:clamp(26px,4vw,46px)}
 .flex-id{display:flex;align-items:center;gap:16px;min-width:0}
@@ -19,7 +16,6 @@
 .flex-stats dt{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
 .flex-stats dd{font-size:clamp(20px,2.2vw,26px);font-weight:600;letter-spacing:-.03em;margin-top:3px}
 
-/* ================= the add-a-domain stepper ================= */
 .add-panel{margin-bottom:clamp(26px,4vw,44px)}
 .steps{list-style:none;display:grid;gap:2px;background:var(--line-soft);
   border-top:1px solid var(--line-soft)}
@@ -48,7 +44,6 @@
 .add-form input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .hint.ok{color:var(--live)}
 
-/* ================= the record to paste ================= */
 .record{margin-top:14px;border:1px solid var(--line);border-radius:var(--r-md);
   background:var(--sunk);padding:4px clamp(12px,1.4vw,16px)}
 .record-row{display:flex;align-items:center;gap:12px;padding:11px 0;flex-wrap:wrap;
@@ -61,7 +56,6 @@
 .record .btn{flex:none}
 .record .hint{text-align:left;padding-bottom:12px}
 
-/* ================= resolver and relay reports ================= */
 .observations,.relay-results,.registry{margin-top:14px;display:grid;gap:7px}
 .obs{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:9px 13px;
   border:1px solid var(--line);border-radius:var(--r-sm);background:var(--sunk);flex-wrap:wrap}
@@ -74,7 +68,6 @@
 .obs.good .mark{background:var(--live)}
 .obs.bad .mark{background:var(--accent)}
 
-/* ================= the domain cards ================= */
 .domain-grid{display:grid;gap:var(--gap);padding-bottom:clamp(26px,4vw,48px);
   grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
 .domain{position:relative;display:flex;flex-direction:column;gap:11px;
@@ -95,7 +88,6 @@
 .domain-actions{display:flex;gap:7px;flex-wrap:wrap}
 .domain-actions .btn{height:32px;padding:0 13px;font-size:12px}
 
-/* ================= the key dialog ================= */
 .key-dialog{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel);
   color:var(--ink);padding:clamp(18px,2.4vw,26px);max-width:min(460px,92vw);
   box-shadow:var(--shadow-lg)}
@@ -118,13 +110,11 @@
 .key-choice button:disabled{opacity:.5;cursor:not-allowed}
 .key-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
 
-/* ================= registry findings ================= */
 .finding{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;padding:9px 13px;
   border-radius:var(--r-sm);border:1px solid var(--line);background:var(--sunk);color:var(--muted)}
 .finding.refuse{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--ink)}
 .facts{display:flex;flex-wrap:wrap;gap:6px}
 
-/* ---------- identity: profile line, relays, watchlist ---------- */
 .ident-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;
   font-size:12.5px;color:var(--muted)}
 .ident-line b{color:var(--ink);font-weight:650}

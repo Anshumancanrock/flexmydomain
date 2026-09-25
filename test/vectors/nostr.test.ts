@@ -1,12 +1,5 @@
-/**
- * core/nostr test vectors.
- *
- * The serialisation and NIP-19 cases are anchored to the NIP texts (the npub
- * case uses the vector published in NIP-19), so they test agreement with the
- * protocol rather than with this code. The rest test the two rules that
- * protect a user: an event's id must cover its own content, and a listing must
- * prove the domain it claims under the key that publishes it.
- */
+// core/nostr vectors. Serialisation and NIP-19 cases follow the NIP texts (npub is NIP-19's own
+// vector). The rest: an id must cover its content, and a listing must prove its domain under its own key.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -68,10 +61,6 @@ function proofFor(domain = DOMAIN, signer = SELLER, iat = IAT): ProofRecord {
   return { version: 'fmd1', iat, pubkey: signer.pk, sig: event.sig }
 }
 
-// ---------------------------------------------------------------------------
-// NIP-01
-// ---------------------------------------------------------------------------
-
 describe('NIP-01 events', () => {
   const base = { pubkey: SELLER.pk, created_at: IAT, kind: 1, tags: [['t', 'domain']], content: 'hello' }
 
@@ -82,7 +71,7 @@ describe('NIP-01 events', () => {
   test('NIP-01 escapes, and only those', () => {
     const s = serializeEvent({ ...base, content: 'a"b\\c\nd\te\u0001fég' })
     expect(s).toContain('a\\"b\\\\c\\nd\\te\\u0001fég')
-    // non-ASCII stays as UTF-8, control characters do not
+    // Non-ASCII stays as UTF-8. Control characters don't.
     expect(s).not.toContain('\\u00e9')
   })
 
@@ -132,12 +121,8 @@ describe('NIP-01 events', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// NIP-19
-// ---------------------------------------------------------------------------
-
 describe('NIP-19', () => {
-  // The vector published in NIP-19 itself.
+  // NIP-19's published vector.
   const VECTOR_HEX = '3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d'
   const VECTOR_NPUB = 'npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6'
 
@@ -198,13 +183,9 @@ describe('NIP-19', () => {
     expect(toPubkeyHex(VECTOR_HEX)).toBe(VECTOR_HEX)
     expect(toPubkeyHex(VECTOR_NPUB)).toBe(VECTOR_HEX)
     expect(toPubkeyHex(nprofileEncode({ pubkey: VECTOR_HEX }))).toBe(VECTOR_HEX)
-    expect(toPubkeyHex(noteEncode(VECTOR_HEX))).toBeUndefined() // an id is not a key
+    expect(toPubkeyHex(noteEncode(VECTOR_HEX))).toBeUndefined() // An id is not a key.
   })
 })
-
-// ---------------------------------------------------------------------------
-// the listing
-// ---------------------------------------------------------------------------
 
 describe('the listing, kind 30402', () => {
   const proof = proofFor()
@@ -261,21 +242,19 @@ describe('the listing, kind 30402', () => {
   })
 
   test('a listing for a domain the seller cannot prove is refused', () => {
-    // The classic attack: publish kind 30402 for apple.com and wait.
     const stolen = signEvent(
       buildListing({ ...params, domain: 'apple.com', proof: proofFor('apple.com', SELLER) }),
       SELLER.sk,
       AUX,
     )
-    // It is self-consistent (the seller did sign a claim), but the zone does
-    // not agree, and the zone decides.
+    // Self-consistent, since the seller did sign a claim. The zone decides.
     expect(checkListingAgainstZone({ event: stolen, txtRecords: [], now: NOW }).ok).toBe(false)
     expect(checkListingAgainstZone({ event: stolen, txtRecords: [], now: NOW }).selfConsistent).toBe(true)
   })
 
   test("a proof lifted from another key does not become this seller's", () => {
-    // Take a real proof published by STRANGER and paste it into SELLER's
-    // listing. It cannot be built, and if forged by hand it does not check.
+    // STRANGER's real proof in SELLER's listing. buildListing refuses it, and a hand-forged
+    // one fails the check.
     expect(() => buildListing({ ...params, proof: proofFor(DOMAIN, STRANGER) })).toThrow(/different key/)
 
     const forged = signEvent(
@@ -347,10 +326,6 @@ describe('the listing, kind 30402', () => {
     expect(() => buildListing({ ...params, priceSats: 1.5 })).toThrow()
   })
 })
-
-// ---------------------------------------------------------------------------
-// the portfolio
-// ---------------------------------------------------------------------------
 
 describe('the portfolio, kind 30078', () => {
   const entries: PortfolioEntry[] = [

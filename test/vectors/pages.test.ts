@@ -1,8 +1,5 @@
-/**
- * The committed page scripts must be exactly what their TypeScript sources
- * compile to. The site is served as it is, so a stale web/assets/<page>.js
- * would ship.
- */
+// Committed web/assets/<page>.js must equal what web/src/<page>.ts compiles to.
+// The site is served as is, so a stale build would ship.
 import { test, expect } from 'bun:test'
 import { PAGES, compilePage } from '../../scripts/pages.ts'
 

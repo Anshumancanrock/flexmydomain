@@ -1,41 +1,37 @@
 #!/usr/bin/env bash
-# Start the flexmydomain relay image in one of its roles:
+# Entrypoint for the relay image. Roles:
 #
-#   relay     the relay and its mirror, together (default)
+#   relay     relay plus mirror (default)
 #   backfill  one-off: fetch what the public relays have and this one lacks
 #
-# Anything else goes straight to strfry. Run maintenance commands inside the
-# running container, with `exec`, never with `run`:
+# Anything else goes straight to strfry. Run maintenance in the running
+# container with `exec`, never `run`:
 #
 #   docker compose exec strfry /app/entrypoint.sh scan '{"kinds":[30402]}'
 #   docker compose exec strfry /app/entrypoint.sh backfill
 #
-# Why one container, and why `exec`: every strfry process opens the same LMDB
-# database, and LMDB tells its live readers apart by process id. Processes in
-# one container never share an id. A second container (`docker compose run`,
-# or a separate service) numbers its processes from 1 again, so its strfry can
-# get the same id as one in here and then fails to open the database. Two
-# containers can share a PID namespace, but Docker neither orders nor retries
-# the start of a container that joins another's namespace, so after a reboot
-# or a relay crash the mirror could stay down and nothing would report it.
+# Why one container and `exec`: every strfry process opens the same LMDB, and
+# LMDB tells live readers apart by PID. A second container (`run`, or another
+# service) numbers PIDs from 1 again, can collide with one in here and then
+# fails to open the db. Sharing a PID namespace doesn't help either. Docker
+# won't order or retry the joining container's start, so after a reboot the
+# mirror could stay down silently.
 #
-# The mirror: `strfry router` streams new flexmydomain events from the public
-# relays, and a backfill (negentropy, NIP-77) fetches whatever the stream
-# missed, at start-up and then every FMD_BACKFILL_HOURS. Both pass every event
-# through the same write policy as client writes, so the mirror cannot pull in
-# anything the relay would refuse from a client.
+# Mirror: `strfry router` streams new events from the public relays, and a
+# negentropy (NIP-77) backfill fetches what it missed, at start-up and every
+# FMD_BACKFILL_HOURS. Both go through the client write policy, so the mirror
+# can't pull in anything a client couldn't write.
 set -euo pipefail
 
-# Paths are overridable so this same script can be run outside the image.
+# Overridable so the script also runs outside the image.
 STRFRY=("${STRFRY_BIN:-/app/strfry}" --config="${STRFRY_CONF:-/etc/strfry.conf}")
 POLICY=${FMD_POLICY_BIN:-/app/fmd-write-policy}
 
 die() { echo "fmd-relay: $*" >&2; exit 64; }
 hex64='^[0-9a-f]{64}$'
 
-# --- configuration, checked before anything starts ---------------------------
-# A setting that is present but malformed stops the container with a reason. A
-# silent fallback would leave the relay running without the thing configured.
+# Validate config before anything starts. A malformed setting stops the
+# container with a reason, never a silent fallback.
 
 RELAY_HOST=${RELAY_HOST:-}
 RELAY_URL=${RELAY_URL:-${RELAY_HOST:+wss://$RELAY_HOST}}
@@ -63,17 +59,16 @@ FMD_MIRROR=${FMD_MIRROR:-1}
 FMD_BACKFILL_HOURS=${FMD_BACKFILL_HOURS:-1}
 [[ "$FMD_BACKFILL_HOURS" =~ ^(0|[1-9][0-9]{0,3})$ ]] || die "FMD_BACKFILL_HOURS must be a whole number of hours (0: only at start-up)"
 
-# The public relays mirrored from: the five the site itself reads.
+# Default: the five relays the site reads.
 UPSTREAM_RELAYS=${UPSTREAM_RELAYS:-"wss://relay.damus.io wss://nos.lol wss://relay.primal.net wss://nostr.oxtr.dev wss://nostr.mom"}
 relay_re='^wss?://[^[:space:]"]+$'
 for url in $UPSTREAM_RELAYS; do
   [[ "$url" =~ $relay_re ]] || die "UPSTREAM_RELAYS: '$url' is not a ws:// or wss:// URL"
 done
 
-# What is mirrored, grouped by the tag that selects it, because each router
-# stream opens one connection per upstream relay. Proof events are left out:
-# they carry no tag a filter can select on, and every listing and portfolio
-# embeds its proof anyway.
+# Grouped by selecting tag, since each router stream opens one connection per
+# upstream. Proofs are left out. No tag selects them, and listings and
+# portfolios embed theirs anyway.
 FILTERS=(
   '{"kinds":[30402,30078,6970],"#t":["flexmydomain"]}'
   '{"kinds":[5],"#k":["30402","30078"]}'
@@ -83,8 +78,6 @@ FILTERS=(
 if [[ -n "$FMD_FLEX_RECIPIENT" ]]; then
   FILTERS+=("{\"kinds\":[9735],\"#p\":[\"$FMD_FLEX_RECIPIENT\"]}")
 fi
-
-# --- the mirror ---------------------------------------------------------------
 
 router_conf() {
   echo 'connectionTimeout = 20'
@@ -105,18 +98,15 @@ router_conf() {
   echo '}'
 }
 
-# strfry's start-up banner, which would otherwise be most of what an hourly
-# backfill writes to the log.
+# strfry's start-up banner. Otherwise it's most of each hourly backfill's log.
 banner='^date +time|INFO\| (arguments:|Current dir:|stderr verbosity:|-----|CONFIG: |Setting up write policy|atexit)'
 
-# One relay, one negentropy sync. Returns 0 when it synced, 2 when the relay
-# answered with something other than negentropy (it has it switched off, or
-# refused), and 1 otherwise: no connection, or no answer in time.
+# One negentropy sync against one relay. Returns 0 if synced, 2 if the relay
+# answered without negentropy (off or refused), 1 on no connection or timeout.
 sync_from() {
   local line out pid refused=0 status=0
   echo "backfill: $1"
-  # 300 seconds is far longer than the flexmydomain events take even from
-  # scratch, and a relay that never answers must not stall the backfill.
+  # 300s is far more than a full sync takes. A silent relay must not stall the backfill.
   # --foreground lets Ctrl-C on a manual `exec ... backfill` reach strfry.
   coproc SYNC { exec timeout --foreground 300 "${STRFRY[@]}" sync "$1" --dir down --filter "$2" 2>&1 < /dev/null; }
   pid=$SYNC_PID
@@ -124,9 +114,8 @@ sync_from() {
   while IFS= read -r line <&"$out"; do
     [[ "$line" =~ $banner ]] && continue
     echo "backfill: $line"
-    # Where negentropy is off, the relay answers NEG-OPEN with a NOTICE and
-    # strfry sync goes on waiting for a reply that never comes (nos.lol does
-    # this). Stop it there.
+    # Without negentropy the relay answers NEG-OPEN with a NOTICE and strfry
+    # sync waits forever (nos.lol does this). Kill it.
     if [[ "$line" == *"Unexpected message from relay"* ]] && (( ! refused )); then
       refused=1
       kill "$pid" 2>/dev/null || true
@@ -139,7 +128,7 @@ sync_from() {
   return 0
 }
 
-# With a unix time as $1, only what was published since then.
+# Optional $1 is a unix time. Only events since then are fetched.
 backfill() {
   local filters url status=0 rc failed=() f windowed=()
   for f in "${FILTERS[@]}"; do windowed+=("${f%\}}${1:+,\"since\":$1}}"); done
@@ -152,8 +141,7 @@ backfill() {
       *) failed+=("$url") ;;
     esac
   done
-  # A relay that dropped the connection usually syncs on a retry half a
-  # minute later.
+  # A dropped connection usually syncs on a retry 30s later.
   if (( ${#failed[@]} )); then
     sleep 30
     for url in "${failed[@]}"; do
@@ -168,7 +156,6 @@ backfill() {
   return "$status"
 }
 
-# The stream, started again whenever it stops.
 mirror_stream() {
   while :; do
     "${STRFRY[@]}" router "$1" 2>&1 | sed -u 's/^/router: /' || true
@@ -177,10 +164,9 @@ mirror_stream() {
   done
 }
 
-# The first backfill fetches everything; the hourly ones only the last three
-# days, which is far longer than any gap in the stream. An event the policy
-# refuses is never stored, so every backfill downloads it again, and over all
-# of history those would only pile up.
+# First backfill fetches everything, later ones only the last 3 days (far more
+# than any stream gap). Refused events are never stored, so each backfill
+# downloads them again. Over all of history that only grows.
 mirror_backfill() {
   backfill || true
   while (( FMD_BACKFILL_HOURS > 0 )); do
@@ -189,9 +175,8 @@ mirror_backfill() {
   done
 }
 
-# Stop the relay and the mirror's loops, then exit. As the container's first
-# process, this script takes whatever they started down with it: when process
-# 1 exits, the kernel kills everything else in the container.
+# Stop relay and mirror loops, then exit. We're PID 1, so the kernel kills
+# anything left in the container once we exit.
 stop_all() {
   trap '' TERM INT
   kill -TERM ${relay_pid:+"$relay_pid"} ${mirror_pids[@]+"${mirror_pids[@]}"} 2>/dev/null || true
@@ -211,15 +196,13 @@ case "$role" in
       die "RELAY_ADMIN_PUBKEY must be an npub or a 64-character hex pubkey"
     fi
 
-    # Written before anything starts, so a failure stops the container here
-    # rather than leaving the relay running without its mirror.
+    # Written before anything starts, so a failure stops the container instead
+    # of running the relay without its mirror.
     stream_conf=${TMPDIR:-/tmp}/fmd-router.conf
     [[ "$FMD_MIRROR" == 0 ]] || router_conf > "$stream_conf"
 
-    # This script stays in charge as the container's first process: something
-    # has to start the stream again when it stops, reap the processes a
-    # stopped child leaves behind (process 1 inherits them), and stop the
-    # mirror when the relay stops.
+    # Stay PID 1. Something has to restart the stream, reap orphans (PID 1
+    # inherits them) and stop the mirror when the relay stops.
     relay_pid='' mirror_pids=()
     trap 'stop_all 0' TERM INT
     "${STRFRY[@]}" \
@@ -231,7 +214,7 @@ case "$role" in
       relay &
     relay_pid=$!
 
-    # The relay starts first, so a new database is created by it alone.
+    # Relay starts first so it alone creates a fresh database.
     if [[ "$FMD_MIRROR" == 1 ]]; then
       { sleep 5; mirror_stream "$stream_conf"; } &
       mirror_pids+=($!)
@@ -239,8 +222,7 @@ case "$role" in
       mirror_pids+=($!)
     fi
 
-    # When the relay exits, stop the mirror too and exit with the relay's
-    # status, so Docker's restart policy starts both again together.
+    # Exit with the relay's status so Docker restarts both together.
     status=0
     wait "$relay_pid" || status=$?
     echo "fmd-relay: strfry relay exited with status $status" >&2

@@ -4316,11 +4316,8 @@ function describeTree(tree) {
     ].map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
     $("details").hidden = false;
 
-    /* The string a user saves is made when the escrow is created, before
-       anyone has paid it, so it usually has no funding outpoint. The string
-       alone must still be enough, so the page asks for the outpoint instead:
-       the user reads it off any explorer, and the page makes no request of its
-       own. */
+    /* The saved string predates funding, so it usually has no outpoint. Ask
+       for it instead. The user reads it off an explorer and we stay offline. */
     if (!r.funding) {
       $("sweepPanel").hidden = true;
       if (!canSweep) {
@@ -4351,9 +4348,8 @@ function describeTree(tree) {
     if (!/^[0-9a-f]{64}$/.test(txid)) { say($("fundingMsg"), "A transaction id is 64 hex characters.", "err"); return; }
     if (!Number.isInteger(vout) || vout < 0) { say($("fundingMsg"), "The output index is a whole number, usually 0 or 1.", "err"); return; }
     if (!amount || BigInt(amount) <= 0n) { say($("fundingMsg"), "Enter the amount in satoshis, exactly as the explorer shows it.", "err"); return; }
-    /* BIP-341 signs over the input amount, so a wrong amount yields a
-       signature no node accepts. The message says so now, before the user
-       broadcasts and is refused. */
+    /* BIP-341 sighash commits to the input amount. A wrong one gives a
+       signature every node rejects, so warn before broadcast. */
     state.recovery = { ...state.recovery, funding: { txid, vout, amountSats: BigInt(amount) } };
     say($("fundingMsg"), "Recorded. The amount must match the chain exactly: the signature covers it, and every node refuses a wrong one.", "ok");
     $("leaf").value = "D: timeout, spendable by the " + state.recovery.timeoutTo + " alone after " + state.recovery.timeoutBlocks + " blocks";
@@ -4370,10 +4366,9 @@ function describeTree(tree) {
     if (fee <= 0n) { say($("sweepMsg"), "The fee must be a positive number of satoshis.", "err"); return; }
     if (fee >= funding.amountSats) { say($("sweepMsg"), "The fee is larger than the escrow.", "err"); return; }
 
-    /* decodeAddress comes from the inlined core/escrow bundle: bech32,
-       bech32m and base58check, checksum verified. The string does not say
-       which network the escrow is on, so the destination's own network is
-       named in the result for the person to check. */
+    /* decodeAddress (inlined bundle) verifies bech32, bech32m and base58check
+       checksums. The recovery string doesn't record the network, so name the
+       destination's network in the result for the user to check. */
     let decoded;
     try { decoded = decodeAddress(dest); }
     catch (err) { say($("sweepMsg"), err.message, "err"); return; }

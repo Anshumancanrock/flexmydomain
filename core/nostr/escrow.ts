@@ -1,21 +1,8 @@
 /**
- * The escrow event: NIP-78 kind 30078, `d = "fmd:escrow:<id>"`.
- *
- * Each party publishes its own view of the escrow, signed by its escrow key
- * (the key in the tree). No copy is authoritative. Where views disagree, the
- * disagreement is public and permanent, and the UI shows it: a buyer's view
- * and a seller's view that name different amounts are a dispute anyone can
- * see before funding.
- *
- * The event carries everything needed to re-derive the output. The keys, the
- * timelock and the timeout polarity produce one taproot address, and
- * parseEscrowEvent recomputes it rather than trusting the stated one. A view
- * whose address its own parameters do not produce is refused; that check is
- * what stops somebody publishing a plausible escrow that pays an address only
- * they control.
- *
- * No server holds escrow state. It is derived client-side from signed events,
- * chain data and RDAP observations.
+ * Escrow views: NIP-78 kind 30078, `d = "fmd:escrow:<id>"`. Each party signs its own view
+ * with its key from the tree. None is authoritative, and disagreements stay public.
+ * parseEscrowEvent re-derives the taproot address from the view's params and refuses a
+ * mismatch. That stops a plausible escrow that pays an address only its author controls.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -29,16 +16,16 @@ export const ESCROW_D_PREFIX = 'fmd:escrow:'
 export const ESCROW_TOPIC = 'flexmydomain'
 export const ESCROW_VERSION = 1
 
-/** Where an escrow has got to. Derived, never asserted by one party alone. */
+/** Derived, never asserted by one party alone. */
 export type EscrowState =
-  | 'open'        // published, not yet funded
-  | 'funded'      // a confirmed output pays the address
-  | 'transferring'// the registry shows a transfer underway
-  | 'settled'     // the output has been spent
-  | 'expired'     // never funded, past its deadline
+  | 'open'        // Published, not yet funded.
+  | 'funded'      // A confirmed output pays the address.
+  | 'transferring'// The registry shows a transfer underway.
+  | 'settled'     // The output has been spent.
+  | 'expired'     // Never funded, past its deadline.
 
 export interface EscrowParams {
-  /** 32 random bytes, hex. Makes the id unguessable and the coordinate unique. */
+  /** 32 random bytes, hex. Keeps the id unguessable and the coordinate unique. */
   salt: string
   buyer: Uint8Array
   seller: Uint8Array
@@ -48,7 +35,7 @@ export interface EscrowParams {
   network: NetworkName
   amountSats: number
   domain: string
-  /** The listing this settles, as an naddr. Optional: not every trade has one. */
+  /** naddr of the listing, if the trade has one. */
   listing?: string
   /** Where the buyer commits to receiving the domain. */
   commitment?: { registrarIanaId?: string; nameservers?: string[] }
@@ -58,7 +45,6 @@ export interface EscrowParams {
 export interface EscrowView {
   version: number
   id: string
-  /** Who published this view. */
   author: string
   salt: string
   buyer: string
@@ -67,10 +53,7 @@ export interface EscrowView {
   timeoutTo: TimeoutTo
   timeoutBlocks: number
   network: NetworkName
-  /**
-   * As stated in the event. parseEscrowEvent refuses a view whose parameters
-   * do not produce this address.
-   */
+  /** As stated, and already checked against the params by parseEscrowEvent. */
   address: string
   amountSats: number
   domain: string
@@ -85,15 +68,9 @@ export interface EscrowView {
 }
 
 /**
- * The escrow id: sha256 over the parameters that define the output.
- *
- * Derived rather than random, so every party computes the same coordinate
- * from the same inputs, publishes to `fmd:escrow:<id>` and finds the others'
- * views there. A random id would have to be chosen by one party and sent to
- * the others, and that message could be tampered with.
- *
- * The salt is part of the preimage, so two escrows between the same parties
- * for the same amount still get distinct ids.
+ * sha256 over the output-defining params. Derived, not random, so every party lands on
+ * the same `fmd:escrow:<id>` with no id message to tamper with.
+ * The salt keeps otherwise identical escrows apart.
  */
 export function deriveEscrowId(params: EscrowParams): string {
   const preimage = concatBytes(
@@ -106,12 +83,11 @@ export function deriveEscrowId(params: EscrowParams): string {
       `${params.timeoutTo}:${params.timeoutBlocks}:${params.network}:${params.amountSats}:${normaliseDomain(params.domain)}`,
     ),
   )
-  // Truncated to 16 bytes. The id only names a coordinate; the address is the
-  // commitment, and it is derived and checked separately.
+  // 16 bytes is enough. The id only names a coordinate. The address is the commitment.
   return bytesToHex(sha256(preimage)).slice(0, 32)
 }
 
-/** The taproot address these parameters produce. Re-derived, never trusted. */
+/** Taproot address these params produce. */
 export function escrowAddress(params: Pick<EscrowParams, 'buyer' | 'seller' | 'arbiter' | 'timeoutTo' | 'timeoutBlocks' | 'network'>): string {
   const tree = buildTree({
     buyer: params.buyer,
@@ -123,7 +99,7 @@ export function escrowAddress(params: Pick<EscrowParams, 'buyer' | 'seller' | 'a
   return tree.addresses[params.network]
 }
 
-/** Build one party's view. They sign it; the other parties publish their own. */
+/** One party's view, for that party to sign. */
 export function buildEscrowEvent(params: EscrowParams & { pubkey: string; createdAt: number; funding?: { txid: string; vout: number; amountSats: number }; settlementTxid?: string; rdapSnapshots?: string[] }): UnsignedEvent {
   if (!isHex32(params.pubkey)) throw new Error('buildEscrowEvent: pubkey must be 64 lowercase hex characters')
   if (!/^[0-9a-f]{64}$/.test(params.salt)) throw new Error('buildEscrowEvent: salt must be 64 lowercase hex characters')
@@ -138,8 +114,7 @@ export function buildEscrowEvent(params: EscrowParams & { pubkey: string; create
     ['d', ESCROW_D_PREFIX + id],
     ['t', ESCROW_TOPIC],
     ['fmd_domain', domain],
-    // Both counterparties are `p`-tagged so each can find the others' views
-    // with one filter, and so a relay indexes them by participant.
+    // p-tag every party so one `#p` filter finds all views.
     ['p', bytesToHex(params.buyer)],
     ['p', bytesToHex(params.seller)],
   ]
@@ -174,14 +149,7 @@ export function buildEscrowEvent(params: EscrowParams & { pubkey: string; create
   }
 }
 
-/**
- * Read one view and check its address against its own parameters.
- *
- * The address must never be taken on trust. A view stating an address its
- * keys do not produce is either corrupt or an invitation to fund an output
- * only its author can spend. The two look the same from outside, so both are
- * refused.
- */
+/** Parse one view. Refused unless its params produce the stated address and `d` tag. */
 export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowView } | { ok: false; reason: string } {
   if (event.kind !== ESCROW_KIND) return { ok: false, reason: `kind ${event.kind} is not ${ESCROW_KIND}` }
 
@@ -226,9 +194,7 @@ export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowVie
   if (amountSats === undefined || amountSats <= 0) return { ok: false, reason: 'no amount' }
   if (!domain.ok) return { ok: false, reason: `domain: ${domain.reason}` }
 
-  // Annotated explicitly: the narrowings above (a string union, an optional
-  // key, a network name) do not all survive into an inferred object literal,
-  // and this is the object the address check depends on.
+  // Explicit type. Some narrowings above don't survive into an inferred literal.
   const params: EscrowParams = {
     salt,
     buyer: hexToBytes(buyer),
@@ -241,7 +207,6 @@ export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowVie
     domain: domain.domain,
   }
 
-  // Re-derive the address rather than trust the stated one.
   let derived: string
   try {
     derived = escrowAddress(params)
@@ -310,20 +275,15 @@ export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowVie
   }
 }
 
-/** One disagreement between two parties' views of the same escrow. */
 export interface Disagreement {
   field: string
   values: { author: string; value: string }[]
 }
 
 /**
- * Compare every published view of one escrow.
- *
- * Disagreements are returned rather than resolved, so the UI can show them.
- * Only views signed by the escrow's own participants (the keys in the tree)
- * are compared: anyone can publish an event with this `d` tag, and a
- * stranger's view says nothing about the escrow. Strangers' views are
- * returned separately so the UI can say so instead of dropping them silently.
+ * Compare views of one escrow. Disagreements are returned, not resolved.
+ * Only participants' views count, since anyone can publish with this `d` tag.
+ * Strangers' views come back separately for the UI to flag.
  */
 export function compareViews(views: readonly EscrowView[]): {
   agreed: boolean
@@ -339,7 +299,7 @@ export function compareViews(views: readonly EscrowView[]): {
   const participants = views.filter((v) => members.has(v.author))
   const strangers = views.filter((v) => !members.has(v.author))
 
-  // One view per author: the newest each of them published.
+  // Newest view per author.
   const latest = new Map<string, EscrowView>()
   for (const view of participants) {
     const current = latest.get(view.author)
@@ -387,17 +347,12 @@ export function compareViews(views: readonly EscrowView[]): {
   }
 }
 
-/**
- * Where this escrow is, from signed events plus observed facts.
- *
- * A party's view may claim a `settlement_txid`, but the state becomes
- * `settled` only when the chain shows the output spent.
- */
+/** A view's `settlement_txid` is only a claim. Only a spend seen on chain means `settled`. */
 export function deriveEscrowState(params: {
   view: EscrowView
-  /** From the chain: is a confirmed output paying the address? */
+  /** Chain: a confirmed output pays the address. */
   funded?: boolean
-  /** From the chain: has that output been spent? */
+  /** Chain: that output is spent. */
   spent?: boolean
   /** From RDAP, via core/escrow/transfer.ts. */
   transferPending?: boolean
@@ -420,12 +375,11 @@ export function deriveEscrowState(params: {
   return { state: 'open', reason: 'published, and waiting to be funded' }
 }
 
-/** The filter that fetches every view of one escrow. */
 export function escrowFilter(id: string): Record<string, unknown> {
   return { kinds: [ESCROW_KIND], '#d': [ESCROW_D_PREFIX + id] }
 }
 
-/** The filter that fetches every escrow a key is a party to. */
+/** Every escrow these keys are party to. */
 export function escrowsForFilter(pubkeys: readonly string[]): Record<string, unknown> {
   return { kinds: [ESCROW_KIND], '#p': [...pubkeys] }
 }

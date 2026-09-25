@@ -1,26 +1,14 @@
-/**
- * Signers, for the browser.
- *
- * Both signers implement the `Signer` interface from core/nostr, so no page
- * branches on how a user signs.
- *
- *   NIP-07     a browser extension, the primary path. The site never sees
- *              the key.
- *   local      a key generated in the page and encrypted at rest under a
- *              passphrase. The fallback, and the path anyone on a machine
- *              without an extension takes, so it has to be pleasant to use.
- *
- * Check every change to this file against two rules: no key material is
- * logged, sent anywhere or written unencrypted, and the file makes no network
- * calls at all.
- */
+// Browser signers behind core/nostr's Signer. NIP-07 extension first, the site never
+// sees the key. Fallback is a page-generated key, encrypted at rest under a passphrase.
+// Rules for every change here: key material is never logged, sent or stored
+// unencrypted, and this file makes no network calls.
 
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { eventId, type NostrEvent, type Signer, type UnsignedEvent } from '../core/nostr/event.js'
 import { npubEncode, nsecEncode } from '../core/nostr/nip19.js'
 
-/** The subset of NIP-07 used here. Nothing here asks for a private key. */
+/** The NIP-07 subset we use. Nothing asks for a private key. */
 interface Nip07 {
   getPublicKey(): Promise<string>
   signEvent(event: UnsignedEvent & { id?: string }): Promise<NostrEvent>
@@ -32,18 +20,12 @@ declare global {
   }
 }
 
-/** Is an extension present? Checked at call time, because extensions inject late. */
+/** Checked at call time, extensions inject late. */
 export function hasExtension(): boolean {
   return typeof window !== 'undefined' && typeof window.nostr?.signEvent === 'function'
 }
 
-/**
- * Wait briefly for an extension to inject itself.
- *
- * Alby and nos2x set `window.nostr` from a content script, which usually but
- * not always runs before the page's own script. Polling for up to a second
- * catches the late case and costs nothing when the extension is already there.
- */
+/** Alby and nos2x set `window.nostr` from a content script that sometimes runs after ours. */
 export async function waitForExtension(timeoutMs = 1000): Promise<boolean> {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
@@ -54,13 +36,8 @@ export async function waitForExtension(timeoutMs = 1000): Promise<boolean> {
 }
 
 /**
- * The NIP-07 signer.
- *
- * The extension's answers are checked, not trusted: a returned event must carry
- * the id computed here and the pubkey of the event it was given. Some
- * extensions change `created_at` to avoid leaking the clock; without this
- * check that would produce a TXT record that never verifies, found days later
- * when a buyer reports the listing as unproven.
+ * Checks the extension's answers against our id and pubkey. Some extensions change
+ * `created_at`, which would give a TXT record that never verifies, found days later.
  */
 export function extensionSigner(): Signer {
   return {
@@ -86,12 +63,7 @@ export function extensionSigner(): Signer {
   }
 }
 
-/**
- * A signer over a raw secret key held in memory.
- *
- * `secretKey` is never copied out of this closure. The caller gets a signer
- * and, separately and only on request, the `nsec` backup string.
- */
+/** `secretKey` never leaves this closure. The `nsec` backup comes out only on request. */
 export function localSigner(secretKey: Uint8Array): Signer & { npub: string; backup: () => string } {
   if (secretKey.length !== 32) throw new Error('localSigner: a secret key is 32 bytes')
   const pubkey = bytesToHex(schnorr.getPublicKey(secretKey))
@@ -105,26 +77,19 @@ export function localSigner(secretKey: Uint8Array): Signer & { npub: string; bac
     async signEvent(unsigned: UnsignedEvent): Promise<NostrEvent> {
       if (unsigned.pubkey !== pubkey) throw new Error('localSigner: that event is for a different key')
       const digest = hexToBytes(eventId(unsigned))
-      // No aux randomness argument, so @noble draws it from the platform
-      // CSPRNG. Fixed aux randomness is for tests, not for a user's signer.
+      // No aux randomness passed, so @noble uses the platform CSPRNG. Fixed aux is for tests.
       return { ...unsigned, id: bytesToHex(digest), sig: bytesToHex(schnorr.sign(digest, secretKey)) }
     },
   }
 }
 
-/** Generate a fresh secret key for the local signer. */
 export function generateSecretKey(): Uint8Array {
   return schnorr.utils.randomSecretKey()
 }
 
-// ---------------------------------------------------------------------------
-// encrypted storage for the fallback key
-// ---------------------------------------------------------------------------
-
 const STORAGE_KEY = 'fmd-key-v1'
-// OWASP's 2021 figure for PBKDF2-HMAC-SHA256. The count is not stored with the
-// key, so changing it needs a new StoredKey version or existing keys stop
-// decrypting.
+// OWASP 2021 figure for PBKDF2-HMAC-SHA256. Not stored with the key, so changing it
+// needs a new StoredKey version or existing keys stop decrypting.
 const PBKDF2_ITERATIONS = 310_000
 
 interface StoredKey {
@@ -134,13 +99,7 @@ interface StoredKey {
   ct: string
 }
 
-/**
- * Is there an encrypted key in this browser?
- *
- * It does not say whether anyone knows the passphrase: a stored key nobody can
- * unlock looks the same as one they can. The UI should say the key is
- * encrypted and needs its passphrase.
- */
+/** Says nothing about whether anyone still knows the passphrase. */
 export function hasStoredKey(): boolean {
   try {
     return localStorage.getItem(STORAGE_KEY) !== null
@@ -163,16 +122,10 @@ async function deriveAesKey(passphrase: string, salt: Uint8Array): Promise<Crypt
 }
 
 /**
- * Encrypt a secret key under a passphrase and keep it in this browser.
- *
- * AES-256-GCM under a PBKDF2-SHA256 key, with a fresh salt and IV each time.
- * GCM authenticates, so a wrong passphrase raises an error instead of
- * returning plausible bytes that would then be used to sign.
- *
- * This is storage at rest on one machine, not a backup: clearing site data
- * wipes it, and any script that runs on this origin can read localStorage.
- * The forced `nsec` backup step is the real protection, and the UI must not
- * let a user skip it.
+ * AES-256-GCM under a PBKDF2-SHA256 key, fresh salt and IV each time. GCM authenticates,
+ * so a wrong passphrase throws instead of giving bytes we'd sign with.
+ * Not a backup. Clearing site data wipes it, and any script on this origin can read
+ * localStorage. The UI must never let a user skip the `nsec` backup.
  */
 export async function storeKey(secretKey: Uint8Array, passphrase: string): Promise<void> {
   if (passphrase.length < 8) throw new Error('Choose a passphrase of at least 8 characters')
@@ -186,7 +139,7 @@ export async function storeKey(secretKey: Uint8Array, passphrase: string): Promi
   localStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
 }
 
-/** Decrypt the stored key, or throw. The passphrase never leaves this call. */
+/** Decrypt or throw. The passphrase never leaves this call. */
 export async function loadKey(passphrase: string): Promise<Uint8Array> {
   const raw = localStorage.getItem(STORAGE_KEY)
   if (!raw) throw new Error('No key is stored in this browser')
@@ -202,8 +155,7 @@ export async function loadKey(passphrase: string): Promise<Uint8Array> {
       hexToBytes(stored.ct) as BufferSource,
     )
   } catch {
-    // GCM's authentication tag failed. Almost always the passphrase; possibly
-    // a corrupted store. Either way there is nothing usable here.
+    // GCM tag failed. Almost always the passphrase, maybe a corrupt store.
     throw new Error('That passphrase does not unlock the stored key')
   }
   const secretKey = new Uint8Array(plain)
@@ -211,13 +163,7 @@ export async function loadKey(passphrase: string): Promise<Uint8Array> {
   return secretKey
 }
 
-/**
- * Forget the stored key.
- *
- * Irreversible without the `nsec` backup, so the caller must confirm first.
- * This function does not ask: the confirmation belongs in the UI, where the
- * user will read it.
- */
+/** Irreversible without the `nsec` backup. Confirm in the UI first, this doesn't ask. */
 export function forgetStoredKey(): void {
   localStorage.removeItem(STORAGE_KEY)
 }

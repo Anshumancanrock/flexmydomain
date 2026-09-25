@@ -1,14 +1,5 @@
-/**
- * Spending an escrow: serialisation, the BIP-341 sighash and witness assembly.
- *
- * This code moves money, so it is checked three ways:
- *
- *   1. here, every derived byte against @scure/btc-signer, which core/escrow
- *      does not import, so two implementations are compared;
- *   2. here, the attacks: wrong leaf, wrong key, wrong transaction, and an
- *      arbiter trying to spend alone;
- *   3. in test/regtest/e2e.test.ts, against Bitcoin Core's consensus code.
- */
+// Escrow spends (serialisation, BIP-341 sighash, witness). Every byte is diffed against
+// @scure/btc-signer, which core/escrow doesn't import. test/regtest/e2e.test.ts checks against Core.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
@@ -34,10 +25,6 @@ import {
   type EscrowTree,
   type Tx,
 } from '../../core/escrow/index.ts'
-
-// ---------------------------------------------------------------------------
-// fixtures
-// ---------------------------------------------------------------------------
 
 const AUX = new Uint8Array(32)
 const secret = (fill: number) => new Uint8Array(32).fill(fill)
@@ -80,12 +67,8 @@ const spendFor = (tree: EscrowTree, name: 'A' | 'B' | 'C' | 'D'): { tx: Tx; leaf
   return { tx: buildSpend({ tree, leaf, outpoint: OUTPOINT, destinations: DESTINATIONS }), leaf }
 }
 
-// ---------------------------------------------------------------------------
-// differential: our bytes against @scure/btc-signer
-// ---------------------------------------------------------------------------
-
 describe('differential against @scure/btc-signer', () => {
-  /** The same spend, built with scure, so every byte can be compared. */
+  /** The same spend, built with scure. */
   function scureTx(tree: EscrowTree, leafScript: Uint8Array, sequence: number) {
     const payment = btc.p2tr(
       undefined,
@@ -97,8 +80,7 @@ describe('differential against @scure/btc-signer', () => {
     )
     const tx = new btc.Transaction({ allowUnknownOutputs: true, version: tree.txVersion })
     tx.addInput({
-      // scure takes the txid in wire order; buildSpend takes the display order
-      // a person pastes from an explorer, and reverses it internally.
+      // scure wants wire order. buildSpend takes explorer display order and reverses it.
       txid: hexToBytes(OUTPOINT.txid).reverse(),
       index: OUTPOINT.vout,
       sequence,
@@ -121,9 +103,7 @@ describe('differential against @scure/btc-signer', () => {
       const { tx: reference } = scureTx(TREE, leaf.script, leaf.sequence)
 
       const ours = sighashFor(tx, leaf)
-      // Parameter 6 is the leaf script, not its hash: scure computes the
-      // TapLeaf hash itself, so this compares two derivations of it rather
-      // than a shared assumption.
+      // Parameter 6 is the leaf script, not its hash, so scure derives the TapLeaf hash itself.
       const theirs = reference.preimageWitnessV1(
         0,
         [TREE.scriptPubKey],
@@ -185,10 +165,7 @@ describe('differential against @scure/btc-signer', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// serialisation details that fail quietly when wrong
-// ---------------------------------------------------------------------------
-
+// These fail quietly when wrong.
 describe('serialisation', () => {
   test('amounts are eight bytes little-endian', () => {
     expect(bytesToHex(u64(1000n))).toBe('e803000000000000')
@@ -204,8 +181,7 @@ describe('serialisation', () => {
       destinations: DESTINATIONS,
     })
     const serialised = bytesToHex(serializeUnsigned(tx))
-    // 4 bytes version + 1 byte input count = the outpoint starts at hex 10.
-    // The last byte of the display txid is the first byte on the wire.
+    // Version (4 bytes) and input count (1 byte) put the outpoint at hex offset 10.
     expect(serialised.slice(10, 12)).toBe('ff')
     expect(serialised.slice(12, 14)).toBe('00')
   })
@@ -234,7 +210,7 @@ describe('serialisation', () => {
       auxRand: AUX,
     })
     expect(signed.vbytes).toBe(vsize(signed.tx))
-    // Leaf D needs one signature fewer, so it is cheaper to spend.
+    // Leaf D needs one signature fewer.
     const sweep = spendWith({
       tree: TREE,
       leaf: TREE.leaves.D,
@@ -254,10 +230,8 @@ describe('serialisation', () => {
     expect(estimate.vbytes).toBeGreaterThan(0)
   })
 
-  /* This output has no key path, so an estimate sized for a single 64-byte
-     key-path witness would under-count every spend (by about a third for the
-     cooperative leaf), and a fee chosen from the displayed rate would pay less
-     than shown. */
+  /* No key path here. Sizing for a 64-byte key-path witness under-counts every spend (about a
+     third for the cooperative leaf), so the fee would pay less than the rate shown. */
   test('the unsigned estimate equals the signed size exactly, for every leaf', () => {
     for (const name of ['A', 'B', 'C', 'D'] as const) {
       const leaf = TREE.leaves[name]
@@ -273,10 +247,6 @@ describe('serialisation', () => {
     expect(() => feeOf(tx, false)).toThrow(/sized by its leaf/)
   })
 })
-
-// ---------------------------------------------------------------------------
-// the witness
-// ---------------------------------------------------------------------------
 
 describe('witness assembly', () => {
   test('the stack is [ ...signatures, script, controlBlock ]', () => {
@@ -296,8 +266,7 @@ describe('witness assembly', () => {
   })
 
   test('signatures go in the order the script consumes them', () => {
-    // buildTree worked this out; finalise reads it rather than re-deriving it,
-    // so the two cannot disagree.
+    // finaliseSpend reads buildTree's order and never re-derives it, so they can't disagree.
     const leaf = TREE.leaves.A
     const tx = buildSpend({ tree: TREE, leaf, outpoint: OUTPOINT, destinations: DESTINATIONS })
     const sigs = {
@@ -320,10 +289,6 @@ describe('witness assembly', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// the attacks
-// ---------------------------------------------------------------------------
-
 describe('what must not work', () => {
   test('the arbiter cannot spend alone through any leaf', () => {
     for (const leaf of TREE.leafList) {
@@ -331,7 +296,6 @@ describe('what must not work', () => {
       if (leaf.signatureOrder.includes('arbiter')) {
         expect(leaf.signatureOrder.length).toBeGreaterThan(1)
       }
-      // And no leaf is satisfied by the arbiter's signature alone.
       const tx = buildSpend({ tree: TREE, leaf, outpoint: OUTPOINT, destinations: DESTINATIONS })
       expect(() =>
         finaliseSpend({
@@ -345,8 +309,8 @@ describe('what must not work', () => {
   })
 
   test('a signature for one leaf does not work on another', () => {
-    // Both A and B contain the seller's key, so without the leaf hash in the
-    // sighash a signature would replay between them.
+    // A and B both hold the seller's key. Without the leaf hash in the sighash a signature
+    // would replay between them.
     const leafA = TREE.leaves.A
     const leafB = TREE.leaves.B as NonNullable<typeof TREE.leaves.B>
     const tx = buildSpend({ tree: TREE, leaf: leafA, outpoint: OUTPOINT, destinations: DESTINATIONS })
@@ -362,7 +326,7 @@ describe('what must not work', () => {
       tree: TREE,
       leaf,
       outpoint: OUTPOINT,
-      // one satoshi more to the payee, i.e. a different fee
+      // One more sat to the payee, so a different fee.
       destinations: [{ outputKey: PAYOUT_KEY, amountSats: 2_499_001n }],
     })
     const sig = signSpend({ tx, leaf, secretKey: BUYER_SK, auxRand: AUX })

@@ -7,7 +7,6 @@
 .market-hero .lede{font-size:14px;color:var(--muted);margin-top:9px;max-width:62ch;line-height:1.6}
 .market-tools{display:flex;gap:8px;align-items:center}
 
-/* ---------- the sell panel ---------- */
 .sell-body{padding:clamp(15px,1.7vw,20px)}
 .sell-form{display:grid;gap:13px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .field{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -26,7 +25,6 @@
 .sell-actions{grid-column:1/-1;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .sell-actions .hint{text-align:left;margin:0}
 
-/* ---------- listings ---------- */
 .listing-grid{display:grid;gap:var(--gap);padding:clamp(14px,1.7vw,20px);
   grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
 .listing{display:flex;flex-direction:column;gap:10px;background:var(--panel);
@@ -49,7 +47,6 @@
   margin-top:12px;cursor:pointer}
 .toggle input{width:auto;height:auto;accent-color:var(--accent)}
 
-/* ---------- the inline prove ceremony ---------- */
 .prove{margin-top:16px;border:1px solid var(--line);border-radius:var(--r-md);
   background:var(--sunk);overflow:hidden}
 .prove>summary{cursor:pointer;padding:13px 15px;font-size:13.5px;font-weight:600;
@@ -60,6 +57,5 @@
 .prove>summary:hover{color:var(--accent-ink)}
 .prove .steps{border-top:1px solid var(--line)}
 
-/* An empty-state message spans the whole grid rather than sitting in one
-   narrow column, where it looks like a layout bug. */
+/* Span the grid, or the empty message looks like a layout bug. */
 .listing-grid>.empty{grid-column:1/-1}

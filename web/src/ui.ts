@@ -1,8 +1,5 @@
-/* Shared page furniture: theme, toast, the key dialog and the connect flow.
- *
- * Every page in web/ imports this, so the connect flow and its key backup
- * warning are the same on every page. Nothing here decides anything about
- * domains, listings or proofs; those rules live in fmd.js.
+/* Shared page furniture for every page in web/: theme, toast, key dialog,
+ * connect flow. Domain rules live in fmd.js, not here.
  */
 import {
   DEFAULT_RELAYS,
@@ -19,31 +16,24 @@ import {
 import type { Signer } from "./fmd.js";
 import { CONFIG } from "./config.js";
 
-/* The relays this deployment sweeps and publishes every discoverable event
-   to: the defaults plus any the operator adds in config.js. A sweep of these
-   cannot see an event that is only on its author's own relays, so a listing,
-   its deletion, a proof and a portfolio go to both sets, always in addition
-   to the author's relays and never instead of them. */
+/* Defaults plus config extras. A sweep can't see events that live only on the
+   author's relays, so discoverable events go here too, never instead. */
 export const DISCOVERY_RELAYS = [...new Set([...DEFAULT_RELAYS, ...(CONFIG.extraRelays ?? [])])];
 
-/* Where a zapper service is asked to publish the receipt (NIP-57 `relays`).
-   Three of the defaults, plus this deployment's own relays, so a receipt lands
-   on the relay that ranks the board without waiting for its mirror. */
+/* NIP-57 `relays`. Ours are included so the receipt reaches the board's relay
+   without waiting for a mirror. */
 export const ZAP_RECEIPT_RELAYS = [...new Set([...DEFAULT_RELAYS.slice(0, 3), ...(CONFIG.extraRelays ?? [])])];
 
-/* Pages only look up elements they own, so a missing one is a bug rather
-   than a case to handle. Name the element type where it matters:
-   $<HTMLInputElement>("#pass").value. */
+/* No null check. Pages only query their own elements, so a miss is a bug. */
 export const $ = <T extends HTMLElement = HTMLElement>(s: string): T => document.querySelector(s) as T;
 export const esc = (s: unknown): string => String(s).replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[c]);
 export const now = (): number => Math.floor(Date.now() / 1000);
 
-/** A status row, used by every report panel on every page. */
 export const row = (kind: string, html: string): string =>
   `<div class="obs ${kind}"><span class="mark"></span><span class="what">${html}</span></div>`;
 
-/** Whole days, rendered short. Takes unix seconds. */
+/** Short age of a unix-seconds timestamp. */
 export function ageText(seconds: number): string {
   const days = Math.floor((now() - seconds) / 86400);
   if (days < 1) return "today";
@@ -52,10 +42,7 @@ export function ageText(seconds: number): string {
   return `${(days / 365).toFixed(1).replace(/\.0$/, "")}y`;
 }
 
-/** Sats, grouped. Every amount on the site is in sats. */
 export const sats = (n: number | bigint | string): string => Number(n).toLocaleString("en-US");
-
-/* ------------------------------------------------------------------ toast ---*/
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 export function toast(message: string): void {
@@ -74,8 +61,6 @@ export function copyToClipboard(text: string, message = "Copied."): void {
   );
 }
 
-/* ------------------------------------------------------------------ theme ---*/
-
 const MOON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
@@ -87,8 +72,7 @@ const SUN = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke=
 
 const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
 
-/* Read the theme attribute, never a colour value: the palette gets retuned,
-   and a hardcoded hex would leave the toggle stuck in one position. */
+/* Read the attribute, never a colour. A retuned palette would break a hex check. */
 const currentTheme = () =>
   document.documentElement.dataset.theme || (systemDark.matches ? "dark" : "light");
 
@@ -112,17 +96,13 @@ export function initTheme(): void {
   paint();
 }
 
-/* Hue from the key, so an identity keeps its colour between pages and visits.
-   It is derived here rather than fetched from an avatar service, so no third
-   party learns who is being viewed. */
+/* Derived locally, so no avatar service learns who is being viewed. */
 export function avatarGradient(pubkey: string): string {
   let h = 0;
   for (let i = 0; i < pubkey.length; i++) h = (h * 31 + pubkey.charCodeAt(i)) >>> 0;
   const hue = 186 + (h % 8) * 7;
   return `conic-gradient(from ${h % 360}deg, hsl(${hue} 62% 56%), hsl(${(hue + 40) % 360} 62% 46%), hsl(${hue} 62% 56%))`;
 }
-
-/* ----------------------------------------------------------------- dialog ---*/
 
 export function askDialog(
   title: string,
@@ -142,15 +122,12 @@ export function askDialog(
 
 export const closeDialog = (): void => $<HTMLDialogElement>("#key-dialog")?.close();
 
-/* ---------------------------------------------------------------- session ---*/
-
-/** The connected key, or nulls. Pages read this; only connect/disconnect write. */
+/** Pages only read this. Connect and disconnect write it. */
 export const session: { signer: Signer | null; pubkey: string | null } = { signer: null, pubkey: null };
 
 type SessionListener = (pubkey: string | null) => void;
 const listeners = new Set<SessionListener>();
 
-/** Called on every connect and disconnect, with the pubkey or null. */
 export function onSessionChange(fn: SessionListener): () => boolean {
   listeners.add(fn);
   return () => listeners.delete(fn);
@@ -183,10 +160,7 @@ export function disconnect(): void {
   toast("Disconnected. Any key stored in this browser is still encrypted here.");
 }
 
-/* The connect flow. A NIP-07 extension comes first, because then the page
-   never touches a key. The local key is offered beside it rather than behind
-   an "advanced" link, since on a fresh machine it is the path most people
-   take. */
+/* NIP-07 first, since then the page never touches a key. */
 export async function openConnect(): Promise<void> {
   const extension = await waitForExtension(600);
   const stored = hasStoredKey();
@@ -250,9 +224,7 @@ export async function openConnect(): Promise<void> {
   });
 }
 
-/* Generating a key forces a backup step. localStorage is storage on one
-   machine, not a backup: clearing site data destroys it, and there is nobody
-   to ask for a reset. */
+/* Force a backup. Clearing site data wipes localStorage, and there is no reset. */
 function createKey(): void {
   const secret = generateSecretKey();
   const signer = localSigner(secret);

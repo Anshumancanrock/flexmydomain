@@ -1,0 +1,9 @@
+# Committed build output (sources in client/, core/, net/, web/src/). Marked
+# generated so GitHub collapses it in diffs and skips it in language stats.
+web/assets/fmd.js     linguist-generated=true
+web/assets/ui.js      linguist-generated=true
+web/assets/board.js   linguist-generated=true
+web/assets/market.js  linguist-generated=true
+web/assets/flex.js    linguist-generated=true
+web/assets/escrow.js  linguist-generated=true
+web/recover.html      linguist-generated=true

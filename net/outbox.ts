@@ -1,16 +1,7 @@
 /**
- * The outbox model (NIP-65): routing queries and publishes over the relay
- * pool.
- *
- * Isomorphic. core/nostr/relays.ts holds the routing rules and net/relay.ts
- * does the sockets; this module joins them and decides which relays a query or
- * a publish touches.
- *
- * A seller publishes to the relays they chose and a reader finds them there,
- * so neither side depends on a relay list this project picked. The cost is one
- * extra round trip the first time a key is seen, to fetch its kind 10002 list,
- * which is then cached for the session. A key with no list (most keys, today)
- * uses the fallback relays.
+ * NIP-65 outbox routing. Rules live in core/nostr/relays.ts, sockets in net/relay.ts.
+ * Authors are read where they write, not on relays we picked. A new key costs one
+ * round trip for its kind 10002 list. Keys without one (most, today) use the fallback.
  */
 
 import {
@@ -26,26 +17,24 @@ import { newestPerAddress, publishToRelays, queryRelays, type Filter, type Publi
 import type { NostrEvent } from '../core/nostr/event.js'
 
 /**
- * A session-lived cache of who writes where.
- *
- * Not persisted on purpose: a relay list is a live statement, and a user who
- * moves relays should be found on the new ones at their next visit.
+ * Session cache of who writes where. Not persisted. A user who moves relays
+ * should be found on the new ones at their next visit.
  */
 export class RelayDirectory {
   private lists = new Map<string, RelayEntry[]>()
   private pending = new Map<string, Promise<RelayEntry[]>>()
 
   constructor(
-    /** Where relay lists are looked up, and the relays for a key that has none. */
+    /** Where lists are looked up, and the relays for a key without one. */
     readonly fallback: readonly string[] = DEFAULT_RELAYS,
   ) {}
 
-  /** The cached list for a key, without a network request. */
+  /** Cache only, no network. */
   known(pubkey: string): RelayEntry[] | undefined {
     return this.lists.get(pubkey)
   }
 
-  /** Seed the cache from relay-list events already in hand, with no round trip. */
+  /** Seed the cache from relay-list events we already have. */
   absorb(events: readonly NostrEvent[]): void {
     for (const event of newestPerAddress(events)) {
       const entries = parseRelayList(event)
@@ -54,11 +43,8 @@ export class RelayDirectory {
   }
 
   /**
-   * Fetch relay lists for these keys, once each.
-   *
-   * Concurrent callers asking about the same key share one request; a market
-   * page rendering thirty listings would otherwise ask thirty times about the
-   * same seller.
+   * Fetch relay lists, once per key. Concurrent callers share the request, or a
+   * page with thirty listings would ask about the same seller thirty times.
    */
   async resolve(pubkeys: readonly string[], options: QueryOptions = {}): Promise<Map<string, RelayEntry[]>> {
     const missing = [...new Set(pubkeys)].filter((p) => !this.lists.has(p) && !this.pending.has(p))
@@ -67,9 +53,8 @@ export class RelayDirectory {
       const request = queryRelays(this.fallback, [relayListFilter(missing)], { timeoutMs: 4000, ...options })
         .then((events) => {
           this.absorb(events)
-          // Remember the misses too, as an empty list. Otherwise every render
-          // re-asks the network about every key that has no kind 10002, which
-          // today is most of them.
+          // Cache misses as []. Otherwise every render re-asks about each key
+          // with no kind 10002, which today is most keys.
           for (const pubkey of missing) if (!this.lists.has(pubkey)) this.lists.set(pubkey, [])
           return events
         })
@@ -94,22 +79,19 @@ export class RelayDirectory {
     return out
   }
 
-  /** Where this key's own events should be published. */
   writeRelays(pubkey: string): string[] {
     return writeRelaysFor(this.lists.get(pubkey) ?? [], this.fallback)
   }
 
-  /** Where this key's events are found. Their write relays, not ours. */
+  /** Where to find this key's events. Its write relays, not ours. */
   readRelays(pubkey: string): string[] {
     return readRelaysFor(this.lists.get(pubkey) ?? [], this.fallback)
   }
 }
 
 /**
- * Publish an event to its author's own write relays.
- *
- * The author is the event's pubkey, never the connected user: republishing
- * somebody else's event should still go where that somebody writes.
+ * Publish to the author's write relays. The author is event.pubkey, never the
+ * connected user, so a republished event still goes where its author writes.
  */
 export async function publishOutbox(
   directory: RelayDirectory,
@@ -122,10 +104,8 @@ export async function publishOutbox(
 }
 
 /**
- * Query several authors, each on the relays they write to.
- *
- * One filter per relay, carrying only the authors that relay serves: ten
- * authors on four relays each becomes a few requests rather than forty.
+ * Query each author on the relays they write to. One filter per relay with only
+ * the authors it serves, so 10 authors on 4 relays is a few requests, not 40.
  */
 export async function queryOutbox(
   directory: RelayDirectory,
@@ -147,11 +127,8 @@ export async function queryOutbox(
 }
 
 /**
- * A discovery query with no author list, such as "every listing".
- *
- * With no author to route by, the outbox model does not apply, so this sweeps
- * the relays the caller names. The UI should say that the result covers those
- * relays, not the whole network.
+ * Authorless query like "every listing". Nothing to route by, so this sweeps the
+ * given relays. The UI should say results cover those relays, not the network.
  */
 export async function queryDiscovery(
   relays: readonly string[],

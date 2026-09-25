@@ -1,18 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Check a deployed flexmydomain relay end to end.
+ * End-to-end check of a deployed flexmydomain relay.
  *
  *   bun run relay:check wss://relay.example.com --mine
  *
- * It publishes a handful of test events with a throwaway key and checks what
- * the relay does with each: the listing is stored, counted and then deleted;
- * a listing with a broken proof and an off-topic note are refused. The test
- * listing is for example.com and expires on its own after five minutes, so a
- * failed deletion still cleans up.
- *
- * `--mine` is required because this writes to the relay. Run it only against
- * a relay you operate: test data does not belong on infrastructure other
- * people rely on, and the five public relays the site reads are refused.
+ * Publishes test events with a throwaway key. The example.com listing expires
+ * after 5 minutes, so a failed deletion still cleans up. It writes, so only run
+ * it on your own relay (`--mine`). The site's five public relays are refused.
  */
 
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -49,13 +43,11 @@ function report(ok: boolean, what: string, detail = '') {
   console.log(`${ok ? 'pass' : 'FAIL'}  ${what}${detail ? `: ${detail}` : ''}`)
 }
 
-// 1. The relay says what it is and what it supports.
 const info = (await fetchRelayInfo(url).catch(() => undefined)) as { name?: string; supported_nips?: number[] } | undefined
 report(Boolean(info?.name), 'serves a NIP-11 document', info?.name ?? 'none')
 report(Boolean(info?.supported_nips?.includes(45)), 'advertises NIP-45 COUNT')
 report(Boolean(info?.supported_nips?.includes(77)), 'advertises NIP-77 negentropy, so it can be mirrored')
 
-// 2. A real listing, proof and all, is stored.
 const { record } = await createProof({
   domain: 'example.com',
   iat: now,
@@ -68,7 +60,6 @@ const listing = sign(buildListing({
 const stored = await publishToRelay(url, listing)
 report(stored.ok, 'stores a flexmydomain listing with a valid proof', stored.message ?? '')
 
-// 3. What it must refuse.
 const brokenSig = record.sig.slice(0, -2) + (record.sig.endsWith('00') ? '01' : '00')
 const forged = sign(buildListing({
   pubkey, domain: 'example.com', priceSats: 1, publishedAt: now + 1, proof: { ...record, sig: brokenSig },
@@ -81,14 +72,13 @@ const note = sign({ pubkey, created_at: now, kind: 1, tags: [], content: 'relay:
 const noteResult = await publishToRelay(url, note)
 report(!noteResult.ok && /^blocked:/.test(noteResult.message ?? ''), 'refuses an off-topic note', noteResult.message ?? 'accepted')
 
-// 4. Reads and counts what it stored.
 const filter = { kinds: [listing.kind], authors: [pubkey], '#t': [LISTING_TOPIC] }
 const found = await queryRelay(url, [filter], { timeoutMs: 5000 }).catch(() => [])
 report(found.some((e) => e.id === listing.id), 'returns the stored listing to a REQ')
 const count = await countOnRelay(url, [filter]).catch(() => undefined)
 report(count === 1, 'COUNT returns exactly that one listing', String(count))
 
-// 5. Delisting: a NIP-09 deletion that names the listing by its `a` coordinate.
+// Delist with a NIP-09 deletion naming the listing's `a` coordinate.
 const deletion = sign(buildDeletion({ pubkey, events: [listing], reason: 'relay:check cleanup', createdAt: now + 2 }))
 const deleted = await publishToRelay(url, deletion)
 report(deleted.ok, 'stores the deletion', deleted.message ?? '')

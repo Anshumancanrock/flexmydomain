@@ -1,26 +1,12 @@
 /**
- * NIP-17 private direct messages, over NIP-59 gift wrap and NIP-44.
+ * NIP-17 DMs over NIP-59 gift wrap and NIP-44. Pure, the caller supplies all entropy.
+ * Carries the registrar auth code from seller to buyer. Only the recipient can read it.
  *
- * Pure: all entropy comes from the caller. client/messages.ts draws it in the
- * browser.
+ *   rumor      kind 14, unsigned so the chat stays deniable.
+ *   seal       kind 13, signed by the sender's real key, encrypted to the recipient. Hides content.
+ *   gift wrap  kind 1059, signed by a throwaway key, encrypted to the recipient. Hides the sender.
  *
- * This is how the registrar auth code travels from seller to buyer. Whoever
- * holds that code can take the domain, and sent this way only the recipient
- * can read it: the site cannot read it, be compelled to produce it, or lose
- * it.
- *
- * Three layers, each hiding something different:
- *
- *   rumor      kind 14, unsigned. The message itself. A signature would be a
- *              transferable proof of who said what, so leaving it out makes
- *              the conversation deniable.
- *   seal       kind 13, signed by the sender's real key, encrypted to the
- *              recipient. Hides the content from everyone else.
- *   gift wrap  kind 1059, signed by a throwaway key, encrypted to the
- *              recipient. Hides the sender from the relay.
- *
- * A relay storing a gift wrap learns only that somebody sent something to
- * this pubkey, at a timestamp fuzzed into the past.
+ * A relay learns only that someone sent this pubkey something, at a backdated time.
  */
 
 import { conversationKey, decrypt, encrypt } from './nip44.js'
@@ -28,51 +14,40 @@ import { checkEvent, eventId, isHex32, signEvent, type NostrEvent, type NostrTag
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 
-/** NIP-17 chat message. */
 export const CHAT_KIND = 14
-/** NIP-59 seal. */
 export const SEAL_KIND = 13
-/** NIP-59 gift wrap. */
 export const GIFT_WRAP_KIND = 1059
 
 /**
- * How far into the past a timestamp may be fuzzed. NIP-59 suggests two days.
- *
- * A relay then cannot correlate a seal and its wrap by their clocks, nor tell
- * when a conversation happened.
+ * Max backdating in seconds. NIP-59 suggests two days, so a relay can't match
+ * a seal to its wrap by clock or tell when a conversation happened.
  */
 export const MAX_TIMESTAMP_JITTER = 2 * 24 * 60 * 60
 
-/** An unsigned message. `id` is computed so it can be referenced; `sig` never exists. */
+/** Unsigned. `id` is computed for references, `sig` never exists. */
 export interface Rumor extends UnsignedEvent {
   id: string
 }
 
-/** Everything random a wrap needs, supplied by the caller so core stays pure. */
 export interface WrapEntropy {
-  /** A throwaway key, used for one wrap and then discarded. */
+  /** One wrap only, then discard. */
   ephemeralSecretKey: Uint8Array
-  /** 32 bytes, fresh. Reusing a nonce under one conversation key leaks plaintext. */
+  /** 32 bytes each, fresh. Nonce reuse under one conversation key leaks plaintext. */
   sealNonce: Uint8Array
   wrapNonce: Uint8Array
-  /** Both fuzzed backwards, independently. */
+  /** Each backdated independently. */
   sealCreatedAt: number
   wrapCreatedAt: number
 }
 
-/**
- * Build the unsigned message.
- *
- * `subject` is optional. It is inside the encryption like everything else, so
- * only the recipient sees it.
- */
+/** Unsigned kind 14. `subject` is encrypted with the rest. */
 export function buildRumor(params: {
   pubkey: string
   recipient: string
   content: string
   createdAt: number
   subject?: string
-  /** Extra tags, e.g. an `a` pointing at the escrow this message concerns. */
+  /** E.g. an `a` for the escrow this message is about. */
   tags?: NostrTag[]
 }): Rumor {
   if (!isHex32(params.pubkey)) throw new Error('buildRumor: pubkey must be 64 lowercase hex characters')
@@ -91,13 +66,7 @@ export function buildRumor(params: {
   return { ...unsigned, id: eventId(unsigned) }
 }
 
-/**
- * Seal and wrap a rumor for one recipient.
- *
- * Returns the kind 1059 to publish. Nothing in it ties the wrap to the
- * sender: its author is the ephemeral key, which the caller should discard as
- * soon as this returns.
- */
+/** Seal and wrap for one recipient. Returns the kind 1059. Discard the ephemeral key after. */
 export function giftWrap(params: {
   rumor: Rumor
   senderSecretKey: Uint8Array
@@ -109,27 +78,24 @@ export function giftWrap(params: {
 
   const senderPubkey = bytesToHex(schnorr.getPublicKey(senderSecretKey))
   if (rumor.pubkey !== senderPubkey) {
-    // unwrap checks this on the recipient's side, so a wrap whose rumor
-    // claims another author would only be discarded.
+    // The recipient's unwrap would discard it anyway.
     throw new Error('giftWrap: the rumor claims an author other than the signing key')
   }
 
-  // Layer 2, the seal: signed by the real key, so the recipient learns who
-  // wrote it. It is encrypted to them, so nobody else can.
+  // Seal, signed by the real key.
   const sealed = signEvent(
     {
       pubkey: senderPubkey,
       created_at: entropy.sealCreatedAt,
       kind: SEAL_KIND,
-      // No `p` tag. A seal that names its recipient in the clear would undo
-      // the wrap it is about to go inside.
+      // No `p` tag. Naming the recipient in the clear would undo the wrap.
       tags: [],
       content: encrypt(JSON.stringify(rumor), conversationKey(senderSecretKey, recipient), entropy.sealNonce),
     },
     senderSecretKey,
   )
 
-  // Layer 3, the wrap: signed by a key that exists for this one message.
+  // Wrap, signed by the one-off key.
   const ephemeralPubkey = bytesToHex(schnorr.getPublicKey(entropy.ephemeralSecretKey))
   return signEvent(
     {
@@ -148,16 +114,9 @@ export function giftWrap(params: {
 }
 
 /**
- * Unwrap a gift wrap addressed to the holder of `recipientSecretKey`.
- *
- * The check that matters is that the rumor's author equals the seal's author.
- * Without it anyone could sign a seal with their own key, put a
- * counterparty's pubkey in the rumor, and have the message render as coming
- * from that counterparty. For an auth-code handover that is the attack: a
- * forged "here is the code" from a stranger.
- *
- * Returns a reason instead of throwing, because the caller loops over a
- * relay's output and many wraps in it are not for this key.
+ * The key check is rumor author == seal author. Without it anyone could seal with
+ * their own key, put a counterparty's pubkey in the rumor and forge "here is the code".
+ * Returns a reason instead of throwing. Most wraps on a relay aren't for this key.
  */
 export function unwrap(
   wrap: NostrEvent,
@@ -172,8 +131,7 @@ export function unwrap(
   try {
     sealJson = decrypt(wrap.content, conversationKey(recipientSecretKey, wrap.pubkey))
   } catch (err) {
-    // Usually just "not addressed to this key", which is the common case when
-    // sweeping a relay, so it is a reason rather than an alarm.
+    // Usually just not addressed to this key.
     return { ok: false, reason: `gift wrap does not decrypt to this key: ${(err as Error).message}` }
   }
 
@@ -206,8 +164,7 @@ export function unwrap(
     return { ok: false, reason: 'the message claims an author the seal was not signed by' }
   }
   if ('sig' in rumor && (rumor as { sig?: unknown }).sig !== undefined) {
-    // A signed rumor is a transferable proof of authorship, which NIP-17
-    // leaves out on purpose. Refuse one rather than accept it quietly.
+    // A signed rumor is transferable proof of authorship, which NIP-17 leaves out.
     return { ok: false, reason: 'a rumor must not be signed' }
   }
 
@@ -217,11 +174,9 @@ export function unwrap(
   return { ok: true, rumor, sender: seal.pubkey, sealedAt: seal.created_at }
 }
 
-/** The filter that fetches gift wraps addressed to a key. */
 export function giftWrapFilter(recipient: string, since?: number): Record<string, unknown> {
   const filter: Record<string, unknown> = { kinds: [GIFT_WRAP_KIND], '#p': [recipient] }
-  // Wraps are backdated by up to two days, so a caller asking for "since I last
-  // looked" has to look further back than that or it will miss messages.
+  // Wraps are backdated, so widen `since` by the max jitter or miss messages.
   if (since !== undefined) filter.since = since - MAX_TIMESTAMP_JITTER
   return filter
 }

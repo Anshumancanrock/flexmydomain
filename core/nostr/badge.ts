@@ -1,15 +1,6 @@
-/**
- * NIP-58 badges: definitions (kind 30009), awards (kind 8) and the profile
- * badge list (kind 30008).
- *
- * Badges let a settled-trade record render in other clients, such as Damus
- * and Amethyst, that will never implement this marketplace's checks. A badge
- * is only its issuer's opinion. The evidence is the trade receipts
- * (receipt.ts), which a reader can verify without trusting the issuer.
- *
- * A badge shows only once the recipient adds it to their own kind 30008 list,
- * so nobody can decorate somebody else's profile.
- */
+// NIP-58 badges, so settled trades show in clients like Damus that don't run our checks.
+// A badge is only its issuer's opinion. The trade receipts (receipt.ts) are the evidence.
+// It shows only once the recipient adds it to their own kind 30008 list.
 
 import { addressOf, isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 
@@ -17,7 +8,7 @@ export const BADGE_DEFINITION_KIND = 30009
 export const BADGE_AWARD_KIND = 8
 export const PROFILE_BADGES_KIND = 30008
 
-/** NIP-58 fixes this identifier; a profile badge list uses no other. */
+/** Fixed by NIP-58. */
 export const PROFILE_BADGES_D = 'profile_badges'
 
 export interface BadgeDefinition {
@@ -28,7 +19,7 @@ export interface BadgeDefinition {
   thumb?: string
 }
 
-/** Define a badge. Addressable, so editing the art does not reissue the award. */
+/** Addressable, so editing the art doesn't reissue the award. */
 export function buildBadgeDefinition(params: {
   pubkey: string
   badge: BadgeDefinition
@@ -45,16 +36,10 @@ export function buildBadgeDefinition(params: {
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: BADGE_DEFINITION_KIND, tags, content: '' }
 }
 
-/**
- * Award a badge to one or more keys.
- *
- * Kind 8 is a regular event, so an award cannot be withdrawn by replacing it
- * (the same property that makes a trade receipt evidence). Revoking one takes
- * a NIP-09 deletion request, which relays may ignore.
- */
+/** Kind 8 is regular, so no withdrawal by replacement. Revoking takes a NIP-09 deletion, which relays may ignore. */
 export function buildBadgeAward(params: {
   pubkey: string
-  /** The definition coordinate: `30009:<issuer>:<slug>`. */
+  /** Coordinate `30009:<issuer>:<slug>`. */
   definition: string
   recipients: readonly string[]
   createdAt: number
@@ -74,13 +59,8 @@ export function buildBadgeAward(params: {
 }
 
 /**
- * The recipient's own list of badges they choose to display.
- *
- * NIP-58 requires the `a` and `e` tags to come in pairs and in order: each
- * definition coordinate immediately followed by the award event that granted
- * it. A client reading them positionally gets the wrong badge art if they are
- * interleaved any other way, so the pairing is built here rather than left to
- * a caller to remember.
+ * NIP-58 wants each definition `a` directly followed by its award `e`. Clients read
+ * them by position, so any other order shows the wrong art.
  */
 export function buildProfileBadges(params: {
   pubkey: string
@@ -97,7 +77,6 @@ export function buildProfileBadges(params: {
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: PROFILE_BADGES_KIND, tags, content: '' }
 }
 
-/** Read a badge definition. */
 export function parseBadgeDefinition(event: NostrEvent): (BadgeDefinition & { issuer: string; address: string }) | undefined {
   if (event.kind !== BADGE_DEFINITION_KIND) return undefined
   const slug = tagValue(event, 'd')
@@ -114,7 +93,6 @@ export function parseBadgeDefinition(event: NostrEvent): (BadgeDefinition & { is
   }
 }
 
-/** Read an award: which badge, to whom, from whom. */
 export function parseBadgeAward(event: NostrEvent): { definition: string; issuer: string; recipients: string[] } | undefined {
   if (event.kind !== BADGE_AWARD_KIND) return undefined
   const definition = tagValue(event, 'a')
@@ -126,12 +104,7 @@ export function parseBadgeAward(event: NostrEvent): { definition: string; issuer
   }
 }
 
-/**
- * Read a profile badge list, as ordered pairs.
- *
- * A trailing `a` with no `e`, or the reverse, is dropped rather than guessed
- * at: a half-pair names a badge with no evidence it was ever awarded.
- */
+/** Drops half-pairs. They name a badge with no evidence it was ever awarded. */
 export function parseProfileBadges(event: NostrEvent): { definition: string; awardId: string }[] {
   if (event.kind !== PROFILE_BADGES_KIND) return []
   if (tagValue(event, 'd') !== PROFILE_BADGES_D) return []
@@ -147,13 +120,7 @@ export function parseProfileBadges(event: NostrEvent): { definition: string; awa
   return pairs
 }
 
-/**
- * Which displayed badges are backed by an award to this key.
- *
- * A kind 30008 is self-published, so it says only "I would like these shown".
- * Without this check a key can display any badge, including ones it was never
- * awarded.
- */
+/** Displayed badges backed by an award to this key. A 30008 is self-published, so it proves nothing alone. */
 export function verifiedBadges(params: {
   pubkey: string
   profile: NostrEvent
@@ -170,15 +137,14 @@ export function verifiedBadges(params: {
     if (!parsed) continue
     if (parsed.definition !== claim.definition) continue
     if (!parsed.recipients.includes(params.pubkey)) continue
-    // The issuer must be the definition's author, or anyone could award
-    // somebody else's badge.
+    // Issuer must be the definition's author, or anyone could award somebody else's badge.
     if (!claim.definition.startsWith(`${BADGE_DEFINITION_KIND}:${parsed.issuer}:`)) continue
     out.push({ ...claim, issuer: parsed.issuer })
   }
   return out
 }
 
-/** The badges this marketplace issues. Slugs are stable; the art is not. */
+/** Slugs are stable, the art is not. */
 export const FMD_BADGES = {
   verifiedSale: {
     slug: 'fmd-verified-sale',

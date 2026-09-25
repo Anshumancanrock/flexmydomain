@@ -1,25 +1,15 @@
-/**
- * A minimal in-memory Nostr relay, for tests.
- *
- * Implements enough of NIP-01 to exercise net/relay.ts over a real WebSocket:
- * REQ with filters, EVENT frames, EOSE, CLOSE, OK on publish, and NIP-45
- * COUNT. No dependencies and nothing on disk.
- *
- * Public relays would make the tests slow and flaky, and would publish test
- * events to infrastructure other people rely on. This is a fixture, not a
- * relay implementation: it stores what it is sent without verifying anything.
- */
+// In-memory NIP-01 relay (plus NIP-45 COUNT) for exercising net/relay.ts over a real WebSocket.
+// A fixture, not a relay. It stores what it gets and verifies nothing.
 
 import type { NostrEvent } from '../../core/nostr/event.js'
 
 export interface RelayOptions {
-  /** Refuse every publish with this message, to test the failure path. */
+  /** Refuse every publish with this message. */
   refuseWith?: string
-  /** Answer COUNT requests. Real relays often do not. */
+  /** Answer COUNT. Many real relays don't. */
   supportsCount?: boolean
   /** Never send EOSE, so the caller has to time out. */
   withholdEose?: boolean
-  /** Drop the connection as soon as it opens. */
   dropOnOpen?: boolean
   /** Seed events. */
   events?: NostrEvent[]
@@ -27,15 +17,15 @@ export interface RelayOptions {
 
 export interface TestRelay {
   url: string
-  /** Every event the relay currently holds. */
+  /** What the relay holds now, after replacement. */
   events: NostrEvent[]
-  /** Events received via EVENT frames, in order. */
+  /** Every EVENT received, in order. */
   published: NostrEvent[]
   add(...events: NostrEvent[]): void
   close(): void
 }
 
-/** NIP-01 filter matching. Enough for the filters this project sends. */
+/** NIP-01 filter match. Covers the filters we send. */
 export function matches(event: NostrEvent, filter: Record<string, unknown>): boolean {
   if (Array.isArray(filter.ids) && !filter.ids.includes(event.id)) return false
   if (Array.isArray(filter.authors) && !filter.authors.includes(event.pubkey)) return false
@@ -53,12 +43,8 @@ export function matches(event: NostrEvent, filter: Record<string, unknown>): boo
 }
 
 /**
- * Start a relay on an ephemeral port.
- *
- * Replaceable and addressable kinds are collapsed as a real relay does, to one
- * event per (kind, pubkey, d). Several tests depend on the newest version
- * winning, and a fixture that returned every version would let them pass for
- * the wrong reason.
+ * Start a relay on an ephemeral port. Replaceable and addressable kinds keep one
+ * event per (kind, pubkey, d) like a real relay. Tests rely on the newest winning.
  */
 export function startRelay(options: RelayOptions = {}): TestRelay {
   const events: NostrEvent[] = []
@@ -84,7 +70,6 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
     events.push(event)
   }
 
-  // Seeds go through the same replacement rules as published events.
   for (const seed of options.events ?? []) store(seed)
 
   const server = Bun.serve({
@@ -142,7 +127,7 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
         }
 
         if (type === 'CLOSE') {
-          // Nothing to tear down; the fixture holds no subscriptions.
+          // No subscriptions are kept, so nothing to tear down.
         }
       },
     },

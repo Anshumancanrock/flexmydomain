@@ -1,24 +1,15 @@
-/**
- * NIP-19 bech32 entities: npub, nsec, note, nprofile, nevent, naddr.
- *
- * A listing is shared as an `naddr`, not as a URL on any server. Whoever has
- * one can open the listing in any client, from any relay, whether or not this
- * site still exists.
- */
+// NIP-19 bech32 entities. Listings are shared as an naddr, which opens in any
+// client from any relay, with or without this site.
 
 import { bech32 } from '@scure/base'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { isHex32 } from './event.js'
 
-/**
- * bech32's 90-character limit is a BIP-173 rule for Bitcoin addresses, where
- * it bounds the error-correction properties. NIP-19 entities carry relay
- * hints and identifiers and routinely run past it, so the limit is raised
- * rather than honoured. Every Nostr implementation does the same.
- */
+// BIP-173's 90-char cap is for Bitcoin addresses. NIP-19 entities with relay
+// hints run past it, and every Nostr implementation raises it.
 const BECH32_LIMIT = 5000
 
-/** TLV types, NIP-19. `special` means "whatever this entity is mainly about". */
+/** NIP-19 TLV types. `special` is whatever the entity is mainly about. */
 const TLV_SPECIAL = 0
 const TLV_RELAY = 1
 const TLV_AUTHOR = 2
@@ -38,7 +29,7 @@ export interface EventPointer {
   kind?: number
 }
 
-/** NIP-01's addressable coordinate, as the three fields it is made of. */
+/** NIP-01 addressable coordinate. */
 export interface AddressPointer {
   identifier: string
   pubkey: string
@@ -54,48 +45,32 @@ export type DecodedNip19 =
   | { type: 'nevent'; data: EventPointer }
   | { type: 'naddr'; data: AddressPointer }
 
-// ---------------------------------------------------------------------------
-// the bare forms
-// ---------------------------------------------------------------------------
-
 function encodeBytes(prefix: string, bytes: Uint8Array): string {
   return bech32.encode(prefix, bech32.toWords(bytes), BECH32_LIMIT)
 }
 
-/** An x-only pubkey as `npub1…`. */
 export function npubEncode(pubkeyHex: string): string {
   if (!isHex32(pubkeyHex)) throw new Error(`npubEncode: expected 64 lowercase hex characters, got ${JSON.stringify(pubkeyHex)}`)
   return encodeBytes('npub', hexToBytes(pubkeyHex))
 }
 
-/** An event id as `note1…`. */
 export function noteEncode(idHex: string): string {
   if (!isHex32(idHex)) throw new Error(`noteEncode: expected 64 lowercase hex characters, got ${JSON.stringify(idHex)}`)
   return encodeBytes('note', hexToBytes(idHex))
 }
 
 /**
- * A secret key as `nsec1…`.
- *
- * Exists for the in-browser generated-key fallback, which must show the user
- * something to write down, and `nsec` is the form other clients accept.
- * Nothing else in this repository may call it, and nothing may log, store or
- * transmit its output.
+ * Only for the generated-key fallback, which must show the user something to write down.
+ * Nothing else may call it. Never log, store or transmit its output.
  */
 export function nsecEncode(secretKey: Uint8Array): string {
   if (secretKey.length !== 32) throw new Error('nsecEncode: a secret key is 32 bytes')
   return encodeBytes('nsec', secretKey)
 }
 
-// ---------------------------------------------------------------------------
-// the TLV forms
-// ---------------------------------------------------------------------------
-
 function tlv(type: number, value: Uint8Array): Uint8Array {
   if (value.length > 255) {
-    // NIP-19 gives the length one byte. A relay URL longer than 255 bytes is
-    // not a real relay URL, so this is a caller error. A continuation scheme
-    // could work around it, but no other implementation would read one.
+    // NIP-19 gives the length one byte. A longer relay URL isn't real, so this is a caller error.
     throw new Error(`nip19: a TLV value of ${value.length} bytes does not fit in one length byte`)
   }
   const out = new Uint8Array(2 + value.length)
@@ -124,8 +99,7 @@ function kindBytes(kind: number): Uint8Array {
   if (!Number.isInteger(kind) || kind < 0 || kind > 0xffffffff) {
     throw new Error(`nip19: kind must be a uint32, got ${kind}`)
   }
-  // Big-endian, four bytes. NIP-19 says so, and a little-endian kind decodes
-  // to a plausible-looking wrong number rather than to an error.
+  // Big-endian per NIP-19. Little-endian decodes to a plausible wrong kind, not an error.
   return Uint8Array.of((kind >>> 24) & 0xff, (kind >>> 16) & 0xff, (kind >>> 8) & 0xff, kind & 0xff)
 }
 
@@ -148,12 +122,7 @@ export function neventEncode(pointer: EventPointer): string {
   return encodeBytes('nevent', concat(parts))
 }
 
-/**
- * `naddr1…`: a pointer to an addressable event by (kind, author, d).
- *
- * Listings are shared this way. An naddr survives the seller editing the
- * price, because it names the coordinate rather than one version.
- */
+/** Points at (kind, author, d), not one version, so a listing's naddr survives price edits. */
 export function naddrEncode(pointer: AddressPointer): string {
   if (!isHex32(pointer.pubkey)) throw new Error('naddrEncode: pubkey must be 64 lowercase hex characters')
   return encodeBytes(
@@ -166,10 +135,6 @@ export function naddrEncode(pointer: AddressPointer): string {
     ]),
   )
 }
-
-// ---------------------------------------------------------------------------
-// decoding
-// ---------------------------------------------------------------------------
 
 function parseTlv(bytes: Uint8Array): Map<number, Uint8Array[]> {
   const found = new Map<number, Uint8Array[]>()
@@ -202,13 +167,7 @@ function decodeKind(found: Map<number, Uint8Array[]>): number | undefined {
   return ((raw[0] << 24) | (raw[1] << 16) | (raw[2] << 8) | raw[3]) >>> 0
 }
 
-/**
- * Decode any NIP-19 entity, or throw with a reason.
- *
- * Rejects an unknown prefix rather than guessing. One of the valid prefixes
- * marks a secret key, so a near-miss must fail rather than be read as the
- * closest match.
- */
+/** Decode or throw. Never guess at an unknown prefix, since nsec is one of the valid ones. */
 export function decodeNip19(value: string): DecodedNip19 {
   const trimmed = value.trim().replace(/^nostr:/i, '')
   const { prefix, words } = bech32.decode(trimmed as `${string}1${string}`, BECH32_LIMIT)
@@ -275,7 +234,7 @@ function assertLength(bytes: Uint8Array, expected: number, what: string): void {
   }
 }
 
-/** The non-throwing form, for anything reading user input. */
+/** Non-throwing form, for user input. */
 export function tryDecodeNip19(value: unknown): DecodedNip19 | undefined {
   if (typeof value !== 'string') return undefined
   try {
@@ -285,13 +244,7 @@ export function tryDecodeNip19(value: unknown): DecodedNip19 | undefined {
   }
 }
 
-/**
- * Accept an npub, an nprofile or bare hex, and return hex.
- *
- * Every field in this project that asks for a pubkey should run its input
- * through this, because users paste whichever form their other client showed
- * them.
- */
+/** npub, nprofile or hex to hex. Use for every pubkey input, users paste whatever form they have. */
 export function toPubkeyHex(value: unknown): string | undefined {
   if (isHex32(value)) return value
   const decoded = tryDecodeNip19(value)
@@ -301,12 +254,12 @@ export function toPubkeyHex(value: unknown): string | undefined {
   return undefined
 }
 
-/** NIP-21: the URI form, which opens in whatever client the reader prefers. */
+/** NIP-21 URI, opens in the reader's own client. */
 export function nostrUri(entity: string): string {
   return `nostr:${entity.trim().replace(/^nostr:/i, '')}`
 }
 
-/** A short, unambiguous rendering: `npub1abcd…wxyz`. For labels, never for ids. */
+/** `npub1abcd…wxyz`. For labels, never for ids. */
 export function shorten(entity: string, keep = 8): string {
   if (entity.length <= keep * 2 + 1) return entity
   return `${entity.slice(0, keep)}…${entity.slice(-keep)}`

@@ -1,16 +1,10 @@
 /**
- * core/escrow: the taproot escrow's script tree and addresses, spending, the
- * recovery string, and the registrar-transfer checks that gate funding and
- * release.
+ * core/escrow: the taproot escrow tree and addresses, spending, the recovery
+ * string, and the registrar-transfer checks that gate funding and release.
  *
- * Produces identical bytes under Bun and in a browser page opened from
- * file://. Uint8Array in, Uint8Array out; no Buffer, node:*, fetch, clock,
- * randomness or config.
- *
- *   import { buildTree } from './core/escrow/index.js'
- *
- * Intra-module specifiers end in .js, not .ts: Bun resolves them to the .ts
- * sources, and they stay valid if the sources are compiled to plain .js.
+ * Identical bytes under Bun and in a file:// page. Uint8Array in, Uint8Array
+ * out. No Buffer, node:*, fetch, clock, randomness or config. Specifiers end in
+ * .js so they stay valid if the sources are compiled to plain .js.
  *
  *   const tree = buildTree({ buyer, seller, arbiter, timeoutTo: 'buyer', timeoutBlocks: 4320 })
  *   tree.addresses.signet       // fund this
@@ -121,13 +115,8 @@ import { bytesToHex } from '@noble/hashes/utils.js'
 import type { EscrowTree } from './tree.js'
 
 /**
- * Render every derived value as hex, so the derivation panel on the escrow
- * page (and anyone auditing an escrow) can read back what was committed to:
- * the leaf bytes, each leaf hash, every branch, the root, the tweak, the
- * output key with its parity, the scriptPubKey, and per leaf the control block
- * and the witness order that leaf requires.
- *
- * The bytes remain the source of truth; this only renders them.
+ * Every derived value as hex, for the escrow page's derivation panel and for
+ * anyone auditing an escrow. Display only, the bytes stay the source of truth.
  */
 export function describeTree(tree: EscrowTree): {
   shape: string

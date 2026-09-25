@@ -1,10 +1,5 @@
-/**
- * net/relay.ts over a real WebSocket, against the local relay in
- * test/harness/relay.ts.
- *
- * Each case is a failure mode that would otherwise show up only in a browser,
- * against somebody else's relay.
- */
+// net/relay.ts over a real WebSocket against test/harness/relay.ts. Each case is a failure mode
+// that would otherwise only show up in a browser, on somebody else's relay.
 
 import { test, expect, describe, afterEach } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -84,7 +79,7 @@ describe('querying', () => {
   })
 
   test('an event that does not verify is dropped', async () => {
-    // A relay can return anything; checking every event is the only defence.
+    // Relays can return anything. Checking every event is the only defence.
     const good = listingFor(ALICE, 'lumenary.com')
     const tampered: NostrEvent = { ...good, content: 'rewritten after signing' }
     const r = relay({ events: [tampered] })
@@ -96,7 +91,6 @@ describe('querying', () => {
     const r = relay({ events: [listingFor(ALICE, 'lumenary.com')], withholdEose: true })
     const started = performance.now()
     const events = await queryRelay(r.url, [listingFilter()], { timeoutMs: 700 })
-    // A hanging relay must not hang the page.
     expect(events).toHaveLength(1)
     expect(performance.now() - started).toBeGreaterThan(600)
   })
@@ -130,8 +124,8 @@ describe('querying', () => {
     expect(seen['ws://localhost:1'].error ?? seen['ws://localhost:1'].count === 0).toBeTruthy()
   })
 
-  /* A page about to replace an event (a portfolio) from what it read must know
-     whether the read finished: a timeout does not mean "there is nothing". */
+  /* A page replacing an event (a portfolio) from what it read must know the read finished.
+     A timeout doesn't mean "there is nothing". */
   test('onRelayDone says complete only when the relay said EOSE', async () => {
     const finished = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
     const hanging = relay({ events: [listingFor(ALICE, 'lumenary.com')], withholdEose: true })
@@ -222,8 +216,7 @@ describe('NIP-45 COUNT', () => {
   })
 
   test('a relay without COUNT support answers undefined, not zero', async () => {
-    // "Could not count" and "there are none" are different facts, and a UI
-    // that showed the first as 0 would misreport the market as empty.
+    // Showing "could not count" as 0 would report the market as empty.
     const r = relay({ supportsCount: false, events: [listingFor(ALICE, 'a.com')] })
     expect(await countOnRelay(r.url, [listingFilter()])).toBeUndefined()
   })
@@ -232,7 +225,7 @@ describe('NIP-45 COUNT', () => {
     const a = relay({ supportsCount: true, events: [listingFor(ALICE, 'a.com')] })
     const b = relay({ supportsCount: true, events: [listingFor(ALICE, 'a.com'), listingFor(BOB, 'b.com')] })
     const c = relay({ supportsCount: false })
-    // Not a sum: relays hold overlapping sets, so adding them double-counts.
+    // Not a sum. Relays hold overlapping sets.
     expect(await countOnRelays([a.url, b.url, c.url], [listingFilter()])).toBe(2)
   })
 
@@ -301,7 +294,7 @@ describe('the outbox model, over the wire', () => {
     expect(a.get(ALICE.pk)).toEqual([])
     expect(b.get(ALICE.pk)).toEqual([])
     expect(c.get(BOB.pk)).toEqual([])
-    // A miss is cached, or every render re-asks the network about every key.
+    // Misses are cached, or every render re-asks the network about every key.
     expect(directory.known(ALICE.pk)).toEqual([])
   })
 })

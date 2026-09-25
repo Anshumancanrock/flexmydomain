@@ -1,41 +1,25 @@
-/**
- * A minimal Nostr relay pool: NIP-01 over WebSocket.
- *
- * Isomorphic: `WebSocket` only, which exists in a browser and in Bun. The pool
- * decides where a user's events go, so it is small enough to read in full
- * rather than a dependency. It does no reconnection, subscription
- * multiplexing or caching: a query opens sockets, collects until EOSE and
- * closes.
- *
- * Relays are untrusted, and an event from one is unverified until
- * `checkEvent` from core/nostr has run on it. The query functions here run it
- * on every event and drop the failures; any other code that reads from a
- * relay must do the same.
- */
+// Minimal NIP-01 relay pool. No reconnects or caching: open, read to EOSE, close.
+// Relays are untrusted. Every event goes through checkEvent before we keep it.
 
 import { checkEvent, type NostrEvent } from '../core/nostr/event.js'
 
-/** A NIP-01 filter, loosely typed on purpose: relays accept more than we send. */
+/** NIP-01 filter. Loosely typed, since relays accept more than we send. */
 export type Filter = Record<string, unknown>
 
 export interface QueryOptions {
-  /** Give up on a relay after this long. A slow relay must not stall a page. */
+  /** Per relay. A slow relay must not stall the page. */
   timeoutMs?: number
-  /** Return early once this many verified events have arrived. */
+  /** Stop reading a relay after this many verified events. */
   limit?: number
   signal?: AbortSignal
   /**
-   * Called as each relay finishes, so a UI can show progress per relay.
-   *
-   * `complete` is true only when the relay sent EOSE or the limit was met. A
-   * timeout or a dropped connection hands back whatever arrived, which may not
-   * be everything, so a caller about to replace an event it rebuilt from what
-   * it read must check this flag.
+   * Called per relay. `complete` means EOSE or the limit was hit. After a
+   * timeout or a drop the events may be partial, so check it before replacing
+   * an event you rebuilt from them.
    */
   onRelayDone?: (relay: string, count: number, error?: string, complete?: boolean) => void
 }
 
-/** One relay's answer to one publish. */
 export interface PublishResult {
   relay: string
   ok: boolean
@@ -45,15 +29,8 @@ export interface PublishResult {
 const DEFAULT_TIMEOUT_MS = 6000
 
 /**
- * Query several relays and merge the results.
- *
- * Every event is verified (id recomputed, signature checked) before it is
- * kept, because a relay can return anything. Events that fail are dropped
- * without an error, and `onRelayDone` reports how many each relay contributed.
- *
- * Duplicates across relays are collapsed by event id. For addressable kinds
- * the caller picks the version to show; `newestPerAddress` applies the NIP-01
- * replacement rule.
+ * Query relays in parallel and dedupe by id. Invalid events drop silently.
+ * For addressable kinds, pick the version with newestPerAddress.
  */
 export async function queryRelays(
   relays: readonly string[],
@@ -75,12 +52,11 @@ export async function queryRelays(
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at)
 }
 
-/** Query one relay. Resolves at EOSE, at the limit, or at the timeout. */
+/** One relay. Resolves at EOSE, the limit or the timeout. */
 export async function queryRelay(relay: string, filters: Filter[], options: QueryOptions = {}): Promise<NostrEvent[]> {
   return (await queryRelayDetailed(relay, filters, options)).events
 }
 
-/** {@link queryRelay}, also saying whether the relay finished its answer. */
 function queryRelayDetailed(
   relay: string,
   filters: Filter[],
@@ -110,7 +86,7 @@ function queryRelayDetailed(
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(['CLOSE', subId]))
         socket.close()
       } catch {
-        // already closed
+        // Already closed.
       }
       if (error) reject(error)
       else resolve({ events, complete })
@@ -119,9 +95,7 @@ function queryRelayDetailed(
     const onAbort = () => finish(new Error('aborted'))
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
-    // A timeout resolves with what arrived rather than rejecting: three good
-    // relays and one hanging one should render three relays' worth of
-    // listings, not an error page.
+    // A timeout resolves with what we have. One hung relay must not blank the page.
     const timer = setTimeout(() => finish(), timeoutMs)
 
     socket.onopen = () => socket.send(JSON.stringify(['REQ', subId, ...filters]))
@@ -156,12 +130,9 @@ function queryRelayDetailed(
 }
 
 /**
- * Publish one event to several relays.
- *
- * Returns every relay's answer, including refusals, and a UI should show them:
- * two acceptances out of five is not "published", and a refusal usually has a
- * reason the user can act on (a paid relay, a PoW requirement, a kind the
- * relay does not carry).
+ * Returns every relay's answer, refusals included, and the UI should show them.
+ * Two of five accepting is not "published". Refusals usually give a reason the
+ * user can fix.
  */
 export async function publishToRelays(
   relays: readonly string[],
@@ -170,14 +141,13 @@ export async function publishToRelays(
 ): Promise<PublishResult[]> {
   const checked = checkEvent(event)
   if (!checked.ok) {
-    // Refuse locally instead of sending an event that cannot verify and getting
-    // back a different error string from each relay.
+    // Fail here once, not with a different error from each relay.
     throw new Error(`publishToRelays: this event does not verify: ${checked.reason}`)
   }
   return Promise.all(relays.map((relay) => publishToRelay(relay, checked.event, options)))
 }
 
-/** Publish to one relay, resolving on its OK frame. */
+/** One relay. Resolves on its OK frame. */
 export function publishToRelay(
   relay: string,
   event: NostrEvent,
@@ -202,7 +172,7 @@ export function publishToRelay(
       try {
         socket.close()
       } catch {
-        // already closed
+        // Already closed.
       }
       resolve(result)
     }
@@ -229,15 +199,8 @@ export function publishToRelay(
 }
 
 /**
- * NIP-45 COUNT: ask a relay how many events match, without fetching them.
- *
- * Useful for result totals, where the alternative is downloading every
- * matching event to count it.
- *
- * Support is optional and patchy. A relay that does not implement COUNT
- * answers with a NOTICE, an error or nothing at all, so the result is
- * `undefined` rather than 0. Render it as a missing value, not as "0": "could
- * not count" and "there are none" are different facts.
+ * NIP-45 COUNT. Support is patchy, and a relay without it sends NOTICE, an
+ * error or nothing. That gives undefined, never 0. Render it as unknown.
  */
 export function countOnRelay(
   relay: string,
@@ -264,7 +227,7 @@ export function countOnRelay(
       try {
         socket.close()
       } catch {
-        // already closed
+        // Already closed.
       }
       resolve(value)
     }
@@ -290,11 +253,8 @@ export function countOnRelay(
 }
 
 /**
- * The largest count any relay reports.
- *
- * Not a sum: relays hold overlapping sets, so adding the counts would count an
- * event once for every relay that holds it. The maximum is a lower bound on
- * the true total, and the best figure available without fetching the events.
+ * Max of the relay counts, not the sum. Relays overlap, so a sum counts an
+ * event once per relay holding it. The max is a lower bound on the true total.
  */
 export async function countOnRelays(
   relays: readonly string[],
@@ -307,12 +267,7 @@ export async function countOnRelays(
   return counts.length === 0 ? undefined : Math.max(...counts)
 }
 
-/**
- * Fetch a relay's NIP-11 information document.
- *
- * Lets a page show, for each relay, whether it accepts kind 30402, what it
- * charges and what limits it imposes.
- */
+/** NIP-11 info document. Tells us if a relay takes kind 30402, its fees and limits. */
 export async function fetchRelayInfo(relay: string, options: { signal?: AbortSignal } = {}): Promise<unknown> {
   const url = relay.replace(/^ws:/i, 'http:').replace(/^wss:/i, 'https:')
   const response = await fetch(url, {
@@ -325,12 +280,8 @@ export async function fetchRelayInfo(relay: string, options: { signal?: AbortSig
 }
 
 /**
- * The newest event per addressable coordinate.
- *
- * Relays should hold one event per (kind, pubkey, d), but several also return
- * older versions, especially just after an update. Keeping the newest
- * `created_at`, and the lowest id on a tie as NIP-01 says, stops a stale price
- * from reappearing on the page.
+ * Newest event per (kind, pubkey, d), lowest id on a tie (NIP-01). Some relays
+ * also return older versions, which would bring back a stale price.
  */
 export function newestPerAddress(events: readonly NostrEvent[]): NostrEvent[] {
   const best = new Map<string, NostrEvent>()

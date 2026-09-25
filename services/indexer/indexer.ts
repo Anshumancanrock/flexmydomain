@@ -1,18 +1,12 @@
 #!/usr/bin/env bun
 /**
- * The indexer: subscribes to relays, verifies every listing, writes SQLite and
- * serves one read-only search endpoint.
+ * Indexer: reads listings from relays, verifies them, stores SQLite, serves /search.
  *
- *   bun services/indexer/indexer.ts [--db ./fmd.db] [--port 8788] [--once]
+ *   bun services/indexer/indexer.ts [--db ./fmd-index.db] [--port 8788] [--once]
  *
- * It is a cache: delete the database and it rebuilds from the relays. Nothing
- * may live only here; everything it holds must be rebuildable from relays and
- * the chain. The market page queries relays directly and does not depend on
- * it. What it adds is search, TLD facets and sorting across thousands of
- * listings, which relays cannot do.
- *
- * Listings are checked with the functions the browser runs, imported from
- * core/ and net/, so the index and the pages cannot disagree about a listing.
+ * A cache for search, TLD facets and sorting, which relays can't do. Nothing
+ * may live only here. Delete the db and it rebuilds from the relays.
+ * Verifies with the browser's own core/ and net/ code so the two agree.
  */
 
 import { Database } from 'bun:sqlite'
@@ -124,8 +118,7 @@ async function sweep(db: Database, options: Options): Promise<void> {
     if (!parsed.ok) return
     const listing = parsed.listing
 
-    /* The browser's check: signature, embedded proof, and the zone still
-       agreeing. The index must not serve a listing the client would refuse. */
+    /* Same check the browser runs. Never serve a listing a client would refuse. */
     const report = await checkDomainProof({
       domain: listing.domain,
       pubkey: event.pubkey,
@@ -155,11 +148,8 @@ async function sweep(db: Database, options: Options): Promise<void> {
     })
   })
 
-  /* Drop listings that no longer appear on the relays, so the index holds
-     nothing its source has lost. Every row written by this sweep carries this
-     sweep's timestamp, so an older row was not seen. */
-  // bun:sqlite accepts a named-binding object here, but its types only
-  // describe the positional form, hence the cast.
+  /* Rows this sweep didn't touch (older checked_at) are gone from the relays. Drop them. */
+  // bun:sqlite takes named bindings here but only types the positional form.
   const dropped = db.run('DELETE FROM listings WHERE checked_at < $at', {
     $at: startedAt,
   } as never).changes
@@ -193,7 +183,7 @@ function serve(db: Database, options: Options): void {
 
       const q = (url.searchParams.get('q') ?? '').trim().toLowerCase()
       const tld = (url.searchParams.get('tld') ?? '').trim().toLowerCase()
-      // Unverified listings are served only on request, and always labelled.
+      // Unverified only on request, and always labelled.
       const includeUnverified = url.searchParams.get('unverified') === '1'
       const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50)))
       const sort = url.searchParams.get('sort') ?? 'price-desc'
@@ -221,8 +211,7 @@ function serve(db: Database, options: Options): void {
 
       return Response.json(
         {
-          // Every response says it comes from a cache of the relays, so no
-          // consumer mistakes it for the marketplace itself.
+          // Say it's a cache so nobody mistakes it for the marketplace.
           cache: true,
           source: 'nostr relays',
           relays: options.relays,

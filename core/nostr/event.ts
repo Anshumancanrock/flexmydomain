@@ -1,21 +1,14 @@
 /**
- * NIP-01 events: serialisation, id, signature, verification.
- *
- * Pure: the only impurity is entropy, and only when a caller passes it in.
- *
- * Built on @noble directly, with no Nostr library underneath. nostr-tools is
- * only a dev dependency: test/vectors/nip17.test.ts uses it as an independent
- * implementation and verifies events it signed.
+ * NIP-01 events on @noble directly, no Nostr library. Pure apart from signing entropy.
+ * nostr-tools is dev-only, as the independent implementation in test/vectors/nip17.test.ts.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 
-/** A tag is a list of strings. The first element names it; NIP-01 says no more. */
 export type NostrTag = string[]
 
-/** What a signer is given: everything but `id` and `sig`, which it derives. */
 export interface UnsignedEvent {
   pubkey: string
   created_at: number
@@ -24,22 +17,14 @@ export interface UnsignedEvent {
   content: string
 }
 
-/** A complete event, as it travels on the wire. */
 export interface NostrEvent extends UnsignedEvent {
   id: string
   sig: string
 }
 
 /**
- * The NIP-07 window.nostr surface, as an interface rather than a global.
- *
- * core/ may not touch `window`. A NIP-07 extension, the in-browser
- * generated-key fallback and the tests all implement this shape, so the code
- * above it needs no branch.
- *
- * There is no method to sign an arbitrary message because no extension offers
- * one. That is why spec/PROOF.md signs a reconstructible event id instead of a
- * bare string.
+ * NIP-07 window.nostr as an interface, since core/ may not touch `window`.
+ * Extensions can't sign arbitrary messages, so spec/PROOF.md signs a reconstructible event id.
  */
 export interface Signer {
   getPublicKey(): Promise<string>
@@ -49,30 +34,20 @@ export interface Signer {
 const HEX32_RE = /^[0-9a-f]{64}$/
 const HEX64_RE = /^[0-9a-f]{128}$/
 
-/** 32 bytes of lowercase hex: an event id, or an x-only pubkey. */
+/** 32 bytes, lowercase hex. An event id or x-only pubkey. */
 export function isHex32(value: unknown): value is string {
   return typeof value === 'string' && HEX32_RE.test(value)
 }
 
-/** 64 bytes of lowercase hex: a BIP-340 signature. */
+/** 64 bytes, lowercase hex. A BIP-340 signature. */
 export function isHex64(value: unknown): value is string {
   return typeof value === 'string' && HEX64_RE.test(value)
 }
 
 /**
- * NIP-01's id preimage:
- *
- *   [0, <pubkey>, <created_at>, <kind>, <tags>, <content>]
- *
- * serialised as JSON with no whitespace and only the escapes NIP-01 lists.
- * `JSON.stringify` produces that for any well-formed JS string: it emits
- * `\n \r \t \b \f \" \\`, leaves every other printable character (all
- * non-ASCII included) unescaped as UTF-8, and escapes the remaining C0
- * controls as `\uXXXX`, which NIP-01 also requires. Do not replace it with a
- * hand-rolled serialiser: one byte of difference is a different event id.
- *
- * The pubkey must already be lowercase hex. An uppercase one serialises to a
- * different string, and so to an id no relay will accept.
+ * NIP-01 id preimage `[0, pubkey, created_at, kind, tags, content]` as compact JSON.
+ * JSON.stringify emits exactly the escapes NIP-01 wants for any well-formed string.
+ * Don't hand-roll a serialiser. One byte off is a different id.
  */
 export function serializeEvent(event: UnsignedEvent): string {
   assertSerialisable(event)
@@ -115,27 +90,19 @@ function show(value: unknown): string {
   return String(value)
 }
 
-/** sha256 of the NIP-01 serialisation, as bytes. This is what gets signed. */
+/** sha256 of the serialisation. This is what gets signed. */
 export function eventDigest(event: UnsignedEvent): Uint8Array {
   return sha256(utf8ToBytes(serializeEvent(event)))
 }
 
-/** The same digest as lowercase hex: the event's `id`. */
 export function eventId(event: UnsignedEvent): string {
   return bytesToHex(eventDigest(event))
 }
 
 /**
- * Sign an event with a raw secret key.
- *
- * `auxRand` is BIP-340's auxiliary randomness. Pass 32 bytes for a
- * deterministic signature, as every test vector in this repo does. Omit it and
- * @noble draws from the platform CSPRNG, which is the right default for a real
- * signature (it hardens against side channels) but makes the output
- * non-deterministic.
- *
- * Most signing goes through a {@link Signer} instead: a NIP-07 extension,
- * which never exposes the key.
+ * Sign with a raw secret key. 32 bytes of BIP-340 `auxRand` give a deterministic sig,
+ * as the test vectors use. Omit it for real signing and @noble uses the CSPRNG (side-channel hardening).
+ * Most signing goes through a {@link Signer}, which never exposes the key.
  */
 export function signEvent(
   unsigned: UnsignedEvent,
@@ -155,16 +122,10 @@ export function signEvent(
 }
 
 /**
- * Check an event end to end: shape, then id, then signature.
- *
- * Skipping either check is a vulnerability. Verifying the signature without
- * recomputing the id lets an attacker keep a valid signature while rewriting
- * the content it is supposed to cover, because a relay supplies the id as an
- * unchecked field. Checking the id without the signature proves only that
- * somebody ran sha256.
- *
- * Returns a reason rather than throwing: the caller is usually a loop over a
- * relay's output, where bad events are routine.
+ * Checks shape, then id, then sig. Both crypto checks are required. Relays supply `id`
+ * unchecked, so a sig check alone lets content be rewritten under a valid sig.
+ * An id check alone proves only that someone ran sha256.
+ * Returns a reason instead of throwing. Bad events from relays are routine.
  */
 export function checkEvent(event: unknown): { ok: true; event: NostrEvent } | { ok: false; reason: string } {
   if (typeof event !== 'object' || event === null) return { ok: false, reason: 'not an object' }
@@ -195,17 +156,12 @@ export function checkEvent(event: unknown): { ok: true; event: NostrEvent } | { 
   return { ok: true, event: e as unknown as NostrEvent }
 }
 
-/** The boolean form, for filters and assertions. */
+/** Boolean form of checkEvent. */
 export function verifyEvent(event: unknown): event is NostrEvent {
   return checkEvent(event).ok
 }
 
-/**
- * Verify a BIP-340 signature over a digest directly.
- *
- * For a caller with a digest but no event, such as a proof record read from
- * DNS, where the event is reconstructed rather than received.
- */
+/** BIP-340 check over a bare digest, for events rebuilt locally (e.g. a DNS proof record). */
 export function verifyDigestSignature(sigHex: string, digest: Uint8Array, pubkeyHex: string): boolean {
   if (!isHex64(sigHex) || !isHex32(pubkeyHex)) return false
   try {
@@ -215,37 +171,27 @@ export function verifyDigestSignature(sigHex: string, digest: Uint8Array, pubkey
   }
 }
 
-// ---------------------------------------------------------------------------
-// tags
-// ---------------------------------------------------------------------------
-
-/** The first tag with this name, or undefined. */
 export function findTag(event: Pick<UnsignedEvent, 'tags'>, name: string): NostrTag | undefined {
   return event.tags.find((t) => t[0] === name)
 }
 
-/** The value (element 1) of the first tag with this name. */
 export function tagValue(event: Pick<UnsignedEvent, 'tags'>, name: string): string | undefined {
   return findTag(event, name)?.[1]
 }
 
-/** Every value of every tag with this name: `t` topics, `relay` hints, `p`s. */
 export function tagValues(event: Pick<UnsignedEvent, 'tags'>, name: string): string[] {
   return event.tags.filter((t) => t[0] === name && t.length > 1).map((t) => t[1])
 }
 
 /**
- * NIP-01 addressable identifier: `<kind>:<pubkey>:<d>`.
- *
- * This is the coordinate a NIP-19 `naddr` encodes and the string an `a` tag
- * carries. A replaceable event with no `d` tag addresses as `<kind>:<pubkey>:`
- * with an empty third field, which is a valid address.
+ * NIP-01 address `<kind>:<pubkey>:<d>`, as in a NIP-19 naddr or an `a` tag.
+ * With no `d` tag the third field is empty, which is still valid.
  */
 export function addressOf(event: Pick<NostrEvent, 'kind' | 'pubkey' | 'tags'>): string {
   return `${event.kind}:${event.pubkey}:${tagValue(event, 'd') ?? ''}`
 }
 
-/** Kind ranges, NIP-01 section "Kinds". Relay retention depends on these. */
+/** NIP-01 kind ranges. Relay retention depends on them. */
 export function isReplaceable(kind: number): boolean {
   return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000)
 }

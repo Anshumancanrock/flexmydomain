@@ -1,12 +1,5 @@
-/**
- * Payout address decoding (core/escrow/address.ts).
- *
- * Every accepted address is cross-checked against @scure/btc-signer, an
- * independent decoder, so "valid" here means two implementations agree on the
- * scriptPubKey byte for byte. Every refusal is constructed rather than copied:
- * a hand-copied invalid vector with a typo in it would fail for the wrong
- * reason and pass anyway.
- */
+// Payout address decoding (core/escrow/address.ts), checked byte for byte against @scure/btc-signer.
+// Bad inputs are built in code. A hand-copied invalid vector with a typo would fail for the wrong reason.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -17,13 +10,13 @@ import { addressToScript, decodeAddress } from '../../core/escrow/address.js'
 
 const REGTEST = { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
 
-/** The scriptPubKey btc-signer derives for an address, as hex. */
+/** btc-signer's scriptPubKey for the address, as hex. */
 function reference(address: string, network: typeof btc.NETWORK): string {
   return bytesToHex(btc.OutScript.encode(btc.Address(network).decode(address)))
 }
 
 const program = (n: number, fill: number) => new Uint8Array(n).fill(fill)
-/** A taproot program must be a real x-only key, or btc-signer (rightly) refuses it. */
+/** btc-signer refuses a taproot program that isn't a real x-only key. */
 const xonly = (fill: number) => schnorr.getPublicKey(program(32, fill))
 const segwit = (coder: typeof bech32, hrp: string, version: number, bytes: Uint8Array) =>
   coder.encode(hrp, [version, ...coder.toWords(bytes)])
@@ -41,8 +34,7 @@ const P2TR_MAIN = segwit(bech32m, 'bc', 1, xonly(0x33))
 const P2TR_TEST = segwit(bech32m, 'tb', 1, xonly(0x44))
 const P2TR_REGTEST = segwit(bech32m, 'bcrt', 1, xonly(0x55))
 
-// Well-known base58 addresses, generated from their hashes so no string is
-// copied from memory.
+// Base58 addresses built from hashes, not copied from memory.
 const P2PKH_MAIN = btc.Address(btc.NETWORK).encode({ type: 'pkh', hash: program(20, 0x66) })
 const P2SH_MAIN = btc.Address(btc.NETWORK).encode({ type: 'sh', hash: program(20, 0x77) })
 const P2PKH_TEST = btc.Address(btc.TEST_NETWORK).encode({ type: 'pkh', hash: program(20, 0x88) })

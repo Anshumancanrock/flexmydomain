@@ -1,4 +1,4 @@
-# Secrets and key material. Nothing derived from a private key goes in git.
+# Secrets: nothing derived from a private key goes in git
 .env
 .env.*
 !.env.example
@@ -11,7 +11,7 @@ nsec*
 secrets/
 recovery-*.txt
 
-# Bitcoin data directories. Anchored so that test/regtest/ is not matched.
+# Bitcoin data dirs, anchored so test/regtest/ isn't matched
 /.bitcoin/
 /.bitcoin-data/
 wallet.dat
@@ -39,13 +39,13 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Bitcoin Core for the regtest tests, downloaded per machine (see spec/VERIFY.md)
+# Bitcoin Core for regtest, downloaded per machine (spec/VERIFY.md)
 tools/
 
-# services/relay: the locally compiled write policy, backups, a local database
+# Relay: local policy build, backups, local db
 services/relay/fmd-write-policy
 services/relay/backups/
 strfry-db/
 
-# The Vercel CLI's project link
+# Vercel CLI
 .vercel/

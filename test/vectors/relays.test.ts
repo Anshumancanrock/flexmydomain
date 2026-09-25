@@ -1,10 +1,5 @@
-/**
- * NIP-65 vectors for core/nostr/relays.ts.
- *
- * The routing rules get the most tests because getting them backwards fails
- * silently: you still see listings, but only the ones that happened to land
- * on your own relays, and nothing in the UI says so.
- */
+// NIP-65 vectors for core/nostr/relays.ts. Backwards routing fails silently. You'd see only the
+// listings that happened to land on your own relays, and the UI wouldn't say so.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -51,7 +46,7 @@ describe('relay URL normalisation', () => {
   })
 
   test('a path is kept, and its case is preserved', () => {
-    // Some relays route on the path; lowercasing it points somewhere else.
+    // Some relays route on the path, so lowercasing it points elsewhere.
     expect(normaliseRelayUrl('wss://relay.example/Inbox')).toBe('wss://relay.example/Inbox')
     expect(normaliseRelayUrl('wss://relay.example/Inbox/')).toBe('wss://relay.example/Inbox')
   })
@@ -156,9 +151,7 @@ describe('outbox routing', () => {
   })
 
   test('a published list replaces the fallback instead of leading it', () => {
-    // Appending the defaults behind a user's own relays looks harmless, and
-    // means a user who deliberately chose one relay still has their events
-    // pushed to five public ones they did not pick.
+    // Appending defaults would push a user who chose one relay onto public ones they didn't pick.
     const relays = readRelaysFor(alice, FALLBACK)
     expect(relays).toEqual(['wss://alice-writes.example'])
     expect(relays).not.toContain('wss://relay.damus.io')
@@ -169,8 +162,7 @@ describe('outbox routing', () => {
   })
 
   test('a list with only read relays still falls back for publishing', () => {
-    // They said where they read, not where they write. The list says nothing
-    // about publishing, so the fallback applies.
+    // The list says nothing about where they write, so the fallback applies.
     const readOnly = [{ url: 'wss://only-reads.example', read: true, write: false }]
     expect(writeRelaysFor(readOnly, FALLBACK)).toEqual(FALLBACK)
     expect(inboxRelaysFor(readOnly, FALLBACK)).toEqual(['wss://only-reads.example'])

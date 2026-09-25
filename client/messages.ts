@@ -1,16 +1,6 @@
-/**
- * Browser helpers for NIP-17 private messages, and the randomness core/ does
- * not draw itself.
- *
- * core/nostr/nip17.ts is pure and takes every random value as an argument, so
- * a wrap is reproducible in a test and every nonce is visible at the call
- * site. This file draws those values.
- *
- * Sealing needs the sender's secret key for ECDH, and a NIP-07 extension signs
- * events without exposing its key. So sealing here works only with a local
- * key; for any other signer `canSealWith` returns false, and the caller should
- * say so rather than fall back to something weaker.
- */
+// NIP-17 DMs in the browser. Draws the randomness core/nostr/nip17.ts takes as arguments.
+// Sealing needs the sender's secret key for ECDH, and NIP-07 never exposes it,
+// so only a local key can seal.
 
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -32,8 +22,7 @@ export function wrapEntropy(now: number): {
   sealCreatedAt: number
   wrapCreatedAt: number
 } {
-  /* Both timestamps are moved back by independent random amounts. One shared
-     jitter would let a relay pair a seal with its wrap by their offset. */
+  /* Jitter each timestamp independently. A shared offset lets a relay pair seal and wrap. */
   const jitter = () => now - Math.floor(Math.random() * MAX_TIMESTAMP_JITTER)
   return {
     ephemeralSecretKey: schnorr.utils.randomSecretKey(),
@@ -44,12 +33,7 @@ export function wrapEntropy(now: number): {
   }
 }
 
-/**
- * Seal a message for one recipient, with a local key.
- *
- * The ephemeral key is generated inside {@link wrapEntropy} and never leaves
- * this call, so there is nothing to discard afterwards.
- */
+/** The ephemeral key from {@link wrapEntropy} never leaves this call. */
 export function sealMessage(params: {
   senderSecretKey: Uint8Array
   recipient: string
@@ -74,13 +58,7 @@ export function sealMessage(params: {
   })
 }
 
-/**
- * Read every wrap in a batch that this key can open.
- *
- * Most wraps a relay returns are for somebody else and fail to decrypt. That
- * is normal, so they are dropped without an error and only counted, for a UI
- * that wants to show the number.
- */
+/** Most wraps are for somebody else and fail to decrypt. That's normal, so they're only counted. */
 export function readMessages(
   wraps: readonly NostrEvent[],
   recipientSecretKey: Uint8Array,
@@ -93,20 +71,12 @@ export function readMessages(
     if (out.ok) messages.push({ rumor: out.rumor, sender: out.sender, sealedAt: out.sealedAt, wrap })
     else unreadable++
   }
-  // Newest first by the rumor's own created_at. The seal and wrap timestamps
-  // are random noise, and sorting by them would shuffle a conversation.
+  // By the rumor's created_at. Seal and wrap timestamps are random noise.
   messages.sort((a, b) => b.rumor.created_at - a.rumor.created_at)
   return { messages, unreadable }
 }
 
-/**
- * Can this session send a private message at all?
- *
- * True only when the signer holds a local secret key. Sealing needs ECDH with
- * the sender's key, which a NIP-07 extension does not hand over. When this is
- * false, say so rather than fall back to something weaker: an auth code sent
- * over NIP-04, or in the clear, is an auth code given away.
- */
+/** When false, say so and never fall back. An auth code over NIP-04 or in the clear is given away. */
 export function canSealWith(signer: { secretKey?: Uint8Array } | null): boolean {
   return Boolean(signer?.secretKey)
 }

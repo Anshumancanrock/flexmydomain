@@ -1,24 +1,8 @@
 /**
- * RDAP, the registry oracle: parsing a domain response, and the eligibility
- * rules.
- *
- * Pure: this module parses a response fetched elsewhere (net/rdap.ts) and
- * decides eligibility from it. Every function that needs the time takes `now`
- * as a parameter, so an eligibility verdict can be reproduced from the
- * snapshot alone months later, in a dispute.
- *
- * Where RDAP is used:
- *
- *   at listing      is this name sellable at all (age, expiry, holds, TLD)
- *   before funding  the transfer lock seen on, then off: registrant control
- *   at transfer     pendingTransfer appearing is the point of no return
- *   at release      registrar IANA id or nameservers match what the buyer
- *                   committed to when the escrow opened
- *   in a dispute    the snapshot history is the evidence file
- *
- * RDAP does not identify the registrant. Since GDPR that is redacted almost
- * everywhere, so a snapshot shows that a name moved and to which registrar,
- * never to whom. That is why the buyer commits to a fingerprint up front.
+ * RDAP registry oracle. Parsing and eligibility only, net/rdap.ts fetches.
+ * Time comes in as `now`, so a verdict replays from the snapshot in a dispute.
+ * GDPR redacts the registrant almost everywhere. We see which registrar a name
+ * moved to, never to whom, which is why the buyer commits to a fingerprint.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -27,34 +11,19 @@ import { normaliseDomain, tldOf, tryNormaliseDomain } from './domain.js'
 
 export const SECONDS_PER_DAY = 86400
 
-/** ICANN's transfer lock after a registration or a transfer, in days. */
+/** ICANN lock after a registration or transfer. */
 export const TRANSFER_LOCK_DAYS = 60
 
-/**
- * Refuse a name that expires sooner than this many days: the renewal could
- * fall due mid-sale, and it is unclear who pays it.
- */
+/** Refuse anything expiring sooner. Renewal could fall due mid-sale, and who pays is unclear. */
 export const MIN_EXPIRY_DAYS = 45
 
-/** The IANA bootstrap file. Cache it daily; never hardcode a TLD list. */
+/** IANA bootstrap (RFC 7484). Cache daily, never hardcode a TLD list. */
 export const RDAP_BOOTSTRAP_URL = 'https://data.iana.org/rdap/dns.json'
 
-// ---------------------------------------------------------------------------
-// bootstrap (RFC 7484)
-// ---------------------------------------------------------------------------
-
 /**
- * Find the RDAP base URLs for a domain in the IANA bootstrap file.
- *
- * Returns every URL the registry publishes, in the order given, because the
- * first is often slow or down and a second attempt costs little. An empty
- * array means the TLD has no RDAP service. That is an answer, not an error:
- * such a name can be flexed but not escrowed, and `.ai` has historically been
- * one.
- *
- * Matching is longest-suffix over the service's label lists, per RFC 7484
- * section 4: a registry may publish an entry for `co.uk` as well as for `uk`,
- * and the more specific one wins.
+ * All base URLs for the domain, in bootstrap order, since the first is often slow
+ * or down. Empty means no RDAP, so the name can be flexed but not escrowed (`.ai`
+ * has been one). Longest suffix wins, `co.uk` over `uk` (RFC 7484 section 4).
  */
 export function rdapBaseUrls(bootstrap: unknown, domain: string): string[] {
   const d = tryNormaliseDomain(domain)
@@ -87,66 +56,54 @@ export function rdapBaseUrls(bootstrap: unknown, domain: string): string[] {
     }
   }
 
-  // RFC 7484 section 4: a base URL ends with a slash, and the query path is
-  // appended to it. Registries are inconsistent about publishing the slash.
+  // RFC 7484 section 4 base URLs end in a slash. Registries don't always publish it.
   return best.map((u) => (u.endsWith('/') ? u : `${u}/`))
 }
 
-/** The full query URL for one domain against one base. */
 export function rdapDomainUrl(baseUrl: string, domain: string): string {
   const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
   return `${base}domain/${normaliseDomain(domain)}`
 }
 
-/** True when the TLD has an RDAP service. Without one, a name cannot be escrowed. */
+/** No RDAP, no escrow. */
 export function tldHasRdap(bootstrap: unknown, domain: string): boolean {
   return rdapBaseUrls(bootstrap, domain).length > 0
 }
 
-// ---------------------------------------------------------------------------
-// parsing
-// ---------------------------------------------------------------------------
-
 /**
- * Normalise an RDAP status or event action for comparison.
- *
- * RFC 8056 registers these values in lowercase with spaces ("client transfer
- * prohibited"), EPP and most of the industry write camelCase
- * ("clientTransferProhibited"), and real servers return both. Comparing raw
- * strings would read a lock that is present as absent, which here would let an
- * escrow fund against a domain that cannot move. Both forms fold to one:
- * lowercase, with no spaces, hyphens or underscores.
+ * Fold a status or event action for comparison. RFC 8056 writes "client transfer
+ * prohibited", EPP writes "clientTransferProhibited", and servers send both. A
+ * missed lock could let an escrow fund against a name that can't move.
  */
 export function foldStatus(value: string): string {
   return value.toLowerCase().replace(/[\s\-_]/g, '')
 }
 
-/** One RDAP event, with its date already resolved to unix seconds. */
+/** `unix` is `date` in seconds, undefined when it doesn't parse. */
 export interface RdapEvent {
   action: string
   date: string
   unix: number | undefined
 }
 
-/** Everything downstream reads out of a domain response. */
 export interface RdapFacts {
-  /** The name the registry echoed, normalised. May differ from the name queried. */
+  /** As echoed by the registry, normalised. Can differ from the query. */
   domain: string | undefined
-  /** Folded status values. Compare against these, never against the raw ones. */
+  /** Folded. Compare against these, never the raw ones. */
   statuses: string[]
-  /** Raw status values, kept verbatim for the evidence file. */
+  /** Verbatim, for the evidence file. */
   rawStatuses: string[]
   events: RdapEvent[]
   registration: number | undefined
   expiration: number | undefined
   lastTransfer: number | undefined
   lastChanged: number | undefined
-  /** The destination fingerprint: who holds the name. */
+  /** Registrar, the destination fingerprint. */
   registrarName: string | undefined
   registrarIanaId: string | undefined
-  /** The other destination fingerprint, for a same-registrar push. */
+  /** Second fingerprint, for a same-registrar push. */
   nameservers: string[]
-  /** RFC 9537: the registry says it withheld or redacted something. */
+  /** RFC 9537 redaction notice present. */
   hasRedaction: boolean
 }
 
@@ -155,8 +112,7 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}[Tt]/
 function parseDate(value: unknown): number | undefined {
   if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) return undefined
   const ms = Date.parse(value)
-  // Date.parse is the one host facility in core/. It only reads a timestamp
-  // the registry wrote, never the current time.
+  // Only host facility in core/. Reads registry timestamps, never the clock.
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined
 }
 
@@ -169,7 +125,7 @@ function lastEvent(events: RdapEvent[], action: string): number | undefined {
   return latest
 }
 
-/** Pull the facts out of a parsed RDAP domain response. Tolerates any input. */
+/** Takes parsed JSON. Tolerates any input. */
 export function parseRdapDomain(response: unknown): RdapFacts {
   const r = (typeof response === 'object' && response !== null ? response : {}) as Record<string, unknown>
 
@@ -234,11 +190,8 @@ function findRegistrar(entities: unknown): { name?: string; ianaId?: string } {
 }
 
 /**
- * The registrar's display name out of a jCard (RFC 7095).
- *
- * jCard is `["vcard", [["fn", {}, "text", "Example Registrar, Inc."], ...]]`,
- * three levels of array for one string. The IANA id is the machine
- * fingerprint, but a person reading a dispute file wants to see a name.
+ * Registrar `fn` from a jCard (RFC 7095), `["vcard", [["fn", {}, "text", "Name"], ...]]`.
+ * A person reading a dispute file wants a name, not just the IANA id.
  */
 function vcardName(vcardArray: unknown): string | undefined {
   if (!Array.isArray(vcardArray) || vcardArray.length < 2) return undefined
@@ -251,11 +204,7 @@ function vcardName(vcardArray: unknown): string | undefined {
   return undefined
 }
 
-// ---------------------------------------------------------------------------
-// eligibility
-// ---------------------------------------------------------------------------
-
-/** The statuses that make a name unsellable outright. */
+/** Unsellable outright. */
 export const REFUSING_STATUSES = [
   'pendingdelete',
   'redemptionperiod',
@@ -264,16 +213,13 @@ export const REFUSING_STATUSES = [
   'pendingrestore',
 ] as const
 
-/** Statuses that are not fatal but that a buyer must be shown. */
+/** Not fatal, but the buyer must see them. */
 export const WARNING_STATUSES = ['clienthold', 'serverhold', 'inactive', 'pendingupdate'] as const
 
-/**
- * The transfer lock. Before funding it must be seen on and then off, a change
- * only the registrant can make.
- */
+/** Must be seen on, then off, before funding. Only the registrant can flip it. */
 export const TRANSFER_LOCK_STATUS = 'clienttransferprohibited'
 
-/** The status of a transfer in progress: the point of no return. */
+/** Transfer in progress, the point of no return. */
 export const PENDING_TRANSFER_STATUS = 'pendingtransfer'
 
 export type FindingLevel = 'refuse' | 'warn'
@@ -285,11 +231,9 @@ export interface Finding {
 }
 
 export interface Eligibility {
-  /** May this name be listed at all? */
   listable: boolean
-  /** Is the transfer lock off right now? Not enough on its own to fund. */
+  /** Lock off right now. Not enough on its own to fund. */
   unlocked: boolean
-  /** Has a transfer already started? */
   pendingTransfer: boolean
   findings: Finding[]
   facts: RdapFacts
@@ -299,19 +243,11 @@ export interface Eligibility {
 }
 
 /**
- * Decide whether a domain can be listed, and whether it can move right now.
+ * `listable` gates the marketplace, where zone control is enough. `unlocked` is the
+ * lock state now. Neither gates money. The escrow funds only after lock on then off
+ * (`registrantActed` in core/escrow/transfer.ts).
  *
- * The two answers are separate because listing and funding need different
- * evidence: zone control is enough to list, and selling needs registrant
- * control. `listable` gates the marketplace. `unlocked` says whether the name
- * can move right now. Neither gates money: the escrow funds only once the
- * registry has been seen with the lock on and then off, a change only the
- * registrant can make (`registrantActed` in core/escrow/transfer.ts). A locked
- * domain is listable; so is an unlocked one.
- *
- * `bootstrap` is optional: pass the IANA file to apply the TLD rule, or omit it
- * to check everything else. "Could not check" is not the same as "the TLD has
- * no RDAP", so without the file the rule is skipped, not failed.
+ * Without `bootstrap` the TLD rule is skipped, not failed. Unchecked isn't "no RDAP".
  */
 export function checkEligibility(params: {
   domain: string
@@ -325,9 +261,7 @@ export function checkEligibility(params: {
 
   const domain = tryNormaliseDomain(params.domain)
   if (domain.ok && facts.domain && facts.domain !== domain.domain) {
-    // A registry answering about a different name than we asked about is
-    // either a redirect we followed wrongly or a response for somebody else's
-    // domain. Neither is evidence about this one.
+    // A bad redirect or someone else's response. Either way, not evidence about this name.
     findings.push({
       level: 'refuse',
       code: 'domain-mismatch',
@@ -359,8 +293,7 @@ export function checkEligibility(params: {
   const daysUntilExpiry =
     facts.expiration === undefined ? undefined : (facts.expiration - params.now) / SECONDS_PER_DAY
 
-  // The 60-day lock is a refusal, not a warning: the sale cannot complete, and
-  // without the check the parties would find out after an escrow is funded.
+  // Refuse, don't warn. The sale can't complete, and they'd only find out after funding.
   if (daysSinceRegistration !== undefined && daysSinceRegistration < TRANSFER_LOCK_DAYS) {
     findings.push({
       level: 'refuse',
@@ -428,12 +361,8 @@ export function checkEligibility(params: {
 }
 
 /**
- * The fingerprint a buyer commits to when the escrow opens, and that release
- * is checked against.
- *
- * Two values, because either alone has a gap: a transfer between registrars
- * changes `registrarIanaId`, but a same-registrar push does not change it at
- * all, and then the nameservers are what move.
+ * Buyer commits to this at escrow open, and release is checked against it. A registrar
+ * transfer changes `registrarIanaId`. A same-registrar push only moves the nameservers.
  */
 export interface Fingerprint {
   registrarIanaId: string | undefined
@@ -444,7 +373,6 @@ export function fingerprintOf(facts: RdapFacts): Fingerprint {
   return { registrarIanaId: facts.registrarIanaId, nameservers: facts.nameservers.slice() }
 }
 
-/** Did the name actually move to what the buyer committed to? */
 export function fingerprintMatches(observed: Fingerprint, committed: Fingerprint): boolean {
   if (committed.registrarIanaId && observed.registrarIanaId === committed.registrarIanaId) return true
   if (committed.nameservers.length === 0) return false
@@ -453,12 +381,9 @@ export function fingerprintMatches(observed: Fingerprint, committed: Fingerprint
 }
 
 /**
- * sha256 of the raw response text, for the snapshot taken at every poll.
- *
- * Hash the bytes as received, never a re-serialised object: `JSON.parse` then
- * `JSON.stringify` normalises whitespace, number formatting and escapes, and
- * the digest would then prove nothing about what the registry sent. Store the
- * text, publish the digest.
+ * sha256 of the response text as received, for each poll's snapshot. Never hash
+ * re-serialised JSON, which won't match what the registry sent. Store the text,
+ * publish the digest.
  */
 export function snapshotHash(rawResponseText: string): string {
   return bytesToHex(sha256(utf8ToBytes(rawResponseText)))

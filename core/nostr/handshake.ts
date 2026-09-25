@@ -1,25 +1,11 @@
-/**
- * Opening an escrow between two people: the invite and the reply.
- *
- * The escrow address and id depend on both parties' escrow keys, a salt and
- * the terms, so neither side can derive them alone. Two messages carry
- * everything that must match:
- *
- *   invite  initiator -> joiner   salt, terms, the initiator's escrow key
- *   reply   joiner -> initiator   the joiner's escrow key
- *
- * After both, the two sides hold identical inputs and derive the same tree,
- * address and id. The salt must come from the invite: it is part of the id,
- * so if each side minted its own, the two would publish to different
- * coordinates and never see each other's views. The buyer's transfer
- * commitment travels in whichever message the buyer sends, because only the
- * buyer knows where they will receive the domain.
- *
- * Nothing here is secret. Escrow public keys end up in the output script on
- * chain, and the salt and terms are in the published escrow event, so these
- * strings can be pasted in a chat or sent as a link. The private key never
- * leaves the page that generated it and is in neither message.
- */
+// Escrow invite and reply. Address and id need both escrow keys, a salt and the terms.
+//   invite  initiator -> joiner   salt, terms, initiator's escrow key
+//   reply   joiner -> initiator   joiner's escrow key
+// The salt is part of the id, so only the invite mints it. Two salts means two
+// coordinates that never see each other. The buyer's transfer commitment rides in
+// the buyer's message, since only the buyer knows where the domain goes.
+// Nothing here is secret (pubkeys go on chain, salt and terms in the escrow event),
+// so paste it anywhere. Private keys never leave their page.
 
 import { base64urlnopad } from '@scure/base'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
@@ -42,25 +28,22 @@ export interface Invite {
   network: NetworkName
   timeoutBlocks: number
   timeoutTo: TimeoutTo
-  /** x-only hex, or undefined for the two-leaf no-arbiter tree. */
+  /** x-only hex. Omit for the 2-leaf tree. */
   arbiter?: string
-  /** The initiator's side of the trade. The joiner takes the other. */
+  /** The joiner takes the other side. */
   initiatorRole: Role
-  /** The initiator's escrow public key, x-only hex. */
+  /** Escrow pubkey, x-only hex. */
   initiatorKey: string
   /** Present when the initiator is the buyer. */
   commitment?: Commitment
 }
 
 export interface Reply {
-  /** The joiner's escrow public key, x-only hex. */
+  /** Escrow pubkey, x-only hex. */
   joinerKey: string
   /** Present when the joiner is the buyer. */
   commitment?: Commitment
-  /**
-   * The salt of the invite this answers. Echoed so a reply pasted into the
-   * wrong escrow is refused rather than silently producing a third address.
-   */
+  /** Echoed from the invite, so a reply pasted into the wrong escrow fails instead of making a third address. */
   salt: string
 }
 
@@ -100,10 +83,7 @@ function readCommitment(raw: unknown): Commitment | undefined {
   return { registrarIanaId, nameservers }
 }
 
-/**
- * Build the invite. Everything is validated here, so a bad invite fails on
- * the sender's page rather than the receiver's.
- */
+/** Validates everything, so a bad invite fails on the sender's page. */
 export function encodeInvite(invite: Invite): string {
   if (!HEX32.test(invite.salt)) throw new Error('encodeInvite: salt must be 64 lowercase hex characters')
   if (!HEX32.test(invite.initiatorKey)) throw new Error('encodeInvite: initiatorKey must be x-only hex')
@@ -114,9 +94,7 @@ export function encodeInvite(invite: Invite): string {
     throw new Error('encodeInvite: amountSats must be a positive integer')
   }
   if (invite.initiatorRole === 'buyer' && !invite.commitment) {
-    // The buyer is the only party who knows where they will receive the
-    // domain. An invite from a buyer without it would open an escrow whose
-    // release condition can never be shown to have been met.
+    // Without it the escrow's release condition could never be shown met.
     throw new Error('encodeInvite: a buyer must commit to where they will receive the domain')
   }
   return encode(INVITE_PREFIX, {
@@ -181,7 +159,6 @@ export function decodeInvite(text: unknown): { ok: true; invite: Invite } | { ok
   }
 }
 
-/** Build the reply to an invite. */
 export function encodeReply(reply: Reply): string {
   if (!HEX32.test(reply.joinerKey)) throw new Error('encodeReply: joinerKey must be x-only hex')
   if (!HEX32.test(reply.salt)) throw new Error('encodeReply: salt must be 64 lowercase hex characters')
@@ -193,12 +170,7 @@ export function encodeReply(reply: Reply): string {
   })
 }
 
-/**
- * Read a reply and check it answers this invite.
- *
- * `invite` is required: a reply means nothing on its own, and the salt check
- * is what stops a reply for one escrow being pasted into another.
- */
+/** A reply means nothing alone. The salt check stops one escrow's reply landing in another. */
 export function decodeReply(text: unknown, invite: Invite): { ok: true; reply: Reply } | { ok: false; reason: string } {
   const parsed = decode(REPLY_PREFIX, text)
   if (!parsed.ok) return parsed
@@ -227,12 +199,7 @@ export function decodeReply(text: unknown, invite: Invite): { ok: true; reply: R
   return { ok: true, reply: { joinerKey: v.joinerKey, salt: v.salt as string, commitment } }
 }
 
-/**
- * Everything both sides need, in one place, once the handshake is done.
- *
- * Both parties call this with the same invite and reply and get identical
- * inputs, so the tree, the address and the id cannot differ between them.
- */
+/** Same invite and reply on both sides give identical inputs, so tree, address and id match. */
 export function resolveHandshake(invite: Invite, reply: Reply): {
   salt: string
   domain: string

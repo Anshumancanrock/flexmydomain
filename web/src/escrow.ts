@@ -1,19 +1,6 @@
-/* escrow.html: opening an escrow, and watching one.
- *
- * The output is a 2-of-3 taproot script tree (2-of-2 with no arbiter). Before
- * the timelock no single key can spend it, and no leaf is ever satisfied by
- * the arbiter's key alone. If everyone walks away, the timeout leaf settles it
- * with nobody's cooperation, ours included: it pays the buyer when there is an
- * arbiter and the seller when there is not.
- *
- * No state lives on a server. Each party publishes its own signed view of the
- * escrow, and the state shown is derived here from those events, the chain
- * and RDAP. Where the views disagree, the page shows the disagreement instead
- * of picking one, because that is a dispute to see before funding anything.
- *
- * The address is never taken on trust. `parseEscrowEvent` re-derives it from
- * the three keys and refuses any view whose stated address is not the one its
- * own parameters produce.
+/* escrow.html: open and watch a 2-of-3 taproot escrow (2-of-2 with no arbiter).
+ * No server state. Each party publishes its own signed view, and we show any
+ * disagreement, never pick a side. Addresses are re-derived, never trusted.
  */
 import {
   CHAIN_APIS,
@@ -69,18 +56,15 @@ import {
   openConnect, row, sats, session,
 } from "./ui.js";
 
-/* Where escrow views are written and read. Both sides must use the same set,
-   and they do: it comes from this deployment, not from either person. The
-   views are signed by per-escrow keys, which have no NIP-65 list to consult. */
+/* Both sides must use the same relays, so they come from the deployment.
+   Per-escrow keys have no NIP-65 list. */
 const ESCROW_RELAYS = DISCOVERY_RELAYS;
 const chain = chainApi(CONFIG.network as NetworkName, CONFIG.chainApiBase.trim() || CHAIN_APIS[CONFIG.network as NetworkName]);
 
 type Side = "buyer" | "seller";
 
-/** A finished handshake, turned into the escrow itself: the same on both sides. */
 type Realised = ReturnType<typeof realise>;
 
-/** The joiner's side of an escrow, from the invite it was sent. */
 interface Joining {
   invite: Invite;
   side: Side;
@@ -89,7 +73,7 @@ interface Joining {
   myRole?: Side;
 }
 
-/** The initiator's escrow, filled in as the form advances. */
+/** The initiator's escrow, filled in step by step. */
 interface Draft extends Omit<Joining, "invite"> {
   domain: string;
   amountSats: number;
@@ -113,12 +97,10 @@ const state: {
   watchBusy?: boolean;
   settleFor?: string | null;
 } = {
-  draft: null,   // the escrow being opened
-  views: null,   // every published view of the escrow being watched
+  draft: null,
+  views: null,
   watching: null,
 };
-
-/* ------------------------------------------------------------ the network ---*/
 
 function paintNetwork(): void {
   const el = $("#net-badge");
@@ -127,8 +109,6 @@ function paintNetwork(): void {
     ? `<b>mainnet</b>: real money`
     : `<b>${esc(CONFIG.network)}</b>: test coins, no value`;
 }
-
-/* ------------------------------------------------------------- the terms ---*/
 
 async function checkTerms(event: Event): Promise<void> {
   event.preventDefault();
@@ -150,8 +130,7 @@ async function checkTerms(event: Event): Promise<void> {
     fail(hint, "The price must be a whole number of sats.");
     return;
   }
-  /* Below the dust limit the escrow output could not be spent at all, and a
-     fee has to come out of it too. Refuse early rather than at signing. */
+  /* Must stay above dust after the settlement fee. Fail now, not at signing. */
   if (amountSats < 2000) { fail(hint, "Too small to escrow: the settlement fee would exceed it."); return; }
 
   const counterparty = toPubkeyHex($<HTMLInputElement>("#e-counterparty").value.trim());
@@ -180,11 +159,8 @@ async function checkTerms(event: Event): Promise<void> {
 
 const fail = (el: HTMLElement, message: string): void => { el.className = "hint err"; el.textContent = message; };
 
-/* ---------------------------------------------------------- the arbiter ---*/
-
-/* Each side publishes the arbiters it accepts as a NIP-51 set, and an escrow
-   may open with any arbiter in the intersection. An empty intersection means
-   no trade, and the page says so instead of falling back to a default. */
+/* Each side publishes accepted arbiters as a NIP-51 set. An empty
+   intersection means no trade, never a default. */
 async function loadArbiters(): Promise<void> {
   const { buyerNostr, sellerNostr } = state.draft!;
   let mine: string[] | undefined, theirs: string[] | undefined;
@@ -215,10 +191,8 @@ async function loadArbiters(): Promise<void> {
   const el = $("#arbiters");
   const rows: string[] = [];
 
-  /* With no lists on either side there is no constraint, and this deployment's
-     own arbiter (if it names one) is offered. Nobody is offered a box to paste
-     an arbitrary key into: a counterparty's own key passed off as "the
-     arbiter" would hold two of the three, and a newcomer cannot tell. */
+  /* With no lists, offer only the site's arbiter. No paste box: a counterparty's
+     own key posing as the arbiter would hold 2 of 3, and a newcomer can't tell. */
   const unconstrained = mine === undefined && theirs === undefined;
   const siteArbiter = toPubkeyHex(String(CONFIG.arbiterPubkey ?? "").trim());
   if (unconstrained) {
@@ -254,9 +228,6 @@ async function loadArbiters(): Promise<void> {
        ${esc(o.title)}<span>${esc(o.note)}</span>
      </button>`).join("") + `</div>`);
 
-  /* With no arbiter the timeout pays the seller. Otherwise nothing would stop a
-     buyer who already has the domain from waiting out the clock and taking the
-     refund. */
   rows.push(row("", `<b>The timeout.</b> With an arbiter, the timelock returns the money to the
     <b>buyer</b> after ${esc(String(timeoutBlocks()))} blocks. With no arbiter it pays the
     <b>seller</b> instead, because otherwise a buyer who already had the domain could simply wait.`));
@@ -266,7 +237,7 @@ async function loadArbiters(): Promise<void> {
 
 const timeoutBlocks = () => (CONFIG.network === "mainnet" ? 4320 : 144);
 
-/* Every byte, so anyone can recompute the address rather than believe it. */
+/* Show every input, so anyone can recompute the address. */
 function renderDerivation(tree: EscrowTree, address: string, id: string): string {
   const t = describeTree(tree);
   return `<div class="derive">
@@ -298,23 +269,11 @@ const describeLeaf = (l: { role: string }): string => ({
   timeout: "the timeout party alone, after the timelock (the backstop)",
 } as Record<string, string>)[l.role] ?? l.role;
 
-/* ------------------------------------------------------ the handshake ---
- *
- * The address and the id depend on both escrow keys, a salt and the terms, so
- * the two sides exchange two messages that carry everything that must match,
- * the salt included: with a salt of its own, each side would derive a
- * different id and never find the other's view. The joiner derives the full
- * escrow on accepting, because the invite already holds the initiator's key;
- * the initiator derives it once the reply arrives. Both reach the same
- * address and id.
- *
- * Each key and the salt are made once per draft. A fresh key on a second
- * click would orphan the key already sent to the counterparty.
- */
-
+/* Invite and reply carry every input both sides must match, salt included, or
+   each side derives a different id. Keys and salt are made once per draft,
+   since re-keying orphans the key already sent. */
 const hexOf = (bytes: Uint8Array): string => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-/** This draft's escrow public key; the secret is made once and reused. */
 function ensureKey(draft: { mySecret?: Uint8Array }): string {
   if (!draft.mySecret) draft.mySecret = crypto.getRandomValues(new Uint8Array(32));
   return escrowPublicKeyHex(draft.mySecret);
@@ -323,11 +282,11 @@ function ensureKey(draft: { mySecret?: Uint8Array }): string {
 function readCommitment(registrarId: string, nsId: string): TransferCommitment {
   const registrarIanaId = $<HTMLInputElement>(registrarId).value.trim() || undefined;
   const nameservers = $<HTMLInputElement>(nsId).value.split(",").map((n) => n.trim()).filter(Boolean);
-  // buildCommitment refuses an empty one: it could never be shown to complete.
+  // buildCommitment refuses an empty one, which could never show as complete.
   return buildCommitment({ registrarIanaId, nameservers, committedAt: now() });
 }
 
-/** Turn a resolved handshake into the tree, address and id, identical on both sides. */
+/** Tree, address and id from a resolved handshake. Identical on both sides. */
 function realise(resolved: ReturnType<typeof resolveHandshake>) {
   const params = {
     salt: resolved.salt,
@@ -352,14 +311,12 @@ function realise(resolved: ReturnType<typeof resolveHandshake>) {
     tree,
     id: deriveEscrowId(params),
     address: tree.addresses[params.network],
-    // Resolved by the handshake from whichever message the buyer sent.
+    // From whichever message the buyer sent.
     commitment: resolved.commitment,
   };
 }
 
-/* Show the recovery string, the derivation and the publish control. Each is
-   set by assignment: prepending to innerHTML would re-create the existing
-   elements and drop their event listeners. */
+/* Assign each element. Prepending to innerHTML re-creates the rest and drops their listeners. */
 function showReady(draft: Draft | Joining, realised: Realised, myRole: Side): void {
   draft.realised = realised;
   draft.myRole = myRole;
@@ -379,19 +336,14 @@ function showReady(draft: Draft | Joining, realised: Realised, myRole: Side): vo
   $<HTMLButtonElement>("#publish-escrow").disabled = !$<HTMLInputElement>("#saved-recovery").checked;
 }
 
-/* ---- the initiator --------------------------------------------------- */
-
-/* A commitment the registry already matches can never show a transfer: it
-   reads as complete from the first poll, before anything has moved. This is
-   the ordinary same-registrar case, where the buyer commits the registrar
-   both people already use. So the commitment is checked against a live
-   reading and refused if it matches. */
+/* Refuse a commitment the registry already matches. It would read as
+   transferred from the first poll, the usual same-registrar trap. */
 async function checkCommitmentAgainstRegistry(domain: string, commitment: TransferCommitment, hint: HTMLElement): Promise<boolean> {
   hint.className = "hint";
   hint.textContent = "Checking your destination against the registry…";
   const result = await observe({ domain, now: now() }).catch(() => ({} as Awaited<ReturnType<typeof observe>>));
   if (!result.observation) {
-    // An unreadable registry fails: the transfer could not be watched either.
+    // Unreadable now means the transfer can't be watched either.
     fail(hint, `The registry could not be read for ${domain} (${result.reason ?? "no answer"}), so a
       transfer could not be watched. Try again in a minute.`);
     return false;
@@ -421,7 +373,6 @@ async function createInvite(): Promise<void> {
     if (!(await checkCommitmentAgainstRegistry(d.domain, commitment, hint))) return;
   }
 
-  // Once per draft: clicking again shows the same invite and never re-keys.
   if (!d.salt) d.salt = hexOf(crypto.getRandomValues(new Uint8Array(32)));
   const myKey = ensureKey(d);
 
@@ -478,8 +429,6 @@ function useReply(): void {
   showReady(d, realised, d.side);
 }
 
-/* ---- the joiner ------------------------------------------------------ */
-
 function openInvite(code: string): void {
   const parsed = decodeInvite(code);
   $("#open-section").hidden = true;
@@ -496,8 +445,7 @@ function openInvite(code: string): void {
   const mySide: Side = inv.initiatorRole === "buyer" ? "seller" : "buyer";
   state.joining = { invite: inv, side: mySide };
 
-  // The network is part of the terms. Refuse rather than quietly derive an
-  // address on a network this deployment is not watching.
+  // Never derive an address on a network this site isn't watching.
   if (inv.network !== CONFIG.network) {
     $("#join-terms").innerHTML = row("bad", `This invite is for <b>${esc(inv.network)}</b>, and this
       site is set to <b>${esc(CONFIG.network)}</b>. Open it on a site set to the same network.`);
@@ -552,7 +500,7 @@ async function acceptInvite(): Promise<void> {
       : undefined,
   });
 
-  // The joiner now has both keys, so it derives the full escrow immediately.
+  // The joiner has both keys now, so derive the escrow here.
   const reply = decodeReply(replyText, j.invite);
   if (!reply.ok) { fail(hint, reply.reason); return; }
 
@@ -577,8 +525,6 @@ async function acceptInvite(): Promise<void> {
   showReady(j, realised, j.side);
 }
 
-/* ---------------------------------------------------------- publishing ---*/
-
 async function publishEscrow(): Promise<void> {
   const d = state.draft;
   if (!d?.realised || !d.mySecret) return;
@@ -589,11 +535,8 @@ async function publishEscrow(): Promise<void> {
   const commitment = d.realised.commitment;
 
   try {
-    /* Signed by this side's escrow key (the key inside the tree), not by the
-       Nostr identity. A participant is whoever holds a tree key, and that is
-       the only thing a stranger reading the escrow can check. A view signed by
-       any other key says nothing about who can spend, and the watch page files
-       it as a stranger's. */
+    /* Sign with this side's tree key, not the Nostr identity. Only a tree key
+       says who can spend, and the watch page treats any other signer as a stranger. */
     const event = signEvent(
       buildEscrowEvent({
         ...d.realised.params,
@@ -629,16 +572,14 @@ async function publishEscrow(): Promise<void> {
   }
 }
 
-/* ------------------------------------------------------------- watching ---*/
-
 async function watch(id: string): Promise<void> {
-  // One reading at a time: the timer and the Refresh button must not interleave.
+  // The timer and Refresh must not interleave.
   if (state.watchBusy) return;
   state.watchBusy = true;
   try { await watchOnce(id); } finally { state.watchBusy = false; }
 }
 
-/** Who wrote a view, by role. Tree keys are per-escrow, so an npub would mean nothing. */
+/** Author by role. Tree keys are per-escrow, so an npub would mean nothing. */
 const roleOf = (view: EscrowView, author: string): string =>
   author === view.buyer ? "buyer" : author === view.seller ? "seller" : author === view.arbiter ? "arbiter" : "someone else";
 
@@ -666,8 +607,7 @@ async function watchOnce(id: string): Promise<void> {
   const comparison = compareViews(views);
   state.views = comparison;
 
-  /* Anyone may publish at any id. Only views signed by a key inside the tree
-     count, and if there are none there is nothing here to trust. */
+  /* Anyone can publish at any id. Only views signed by a tree key count. */
   if (comparison.participants.length === 0) {
     $("#escrow-sub").textContent = "";
     $("#state-line").innerHTML = row("bad", `Found ${views.length} view(s) at this id and
@@ -683,11 +623,7 @@ async function watchOnce(id: string): Promise<void> {
   $("#escrow-sub").textContent =
     `${comparison.participants.length} view(s) published · ${esc(view.domain)} · ${sats(view.amountSats)} sats`;
 
-  /* The disagreement panel sits above the derivation and the chain: if the
-     parties do not agree on what they are trading, nothing below it matters.
-     A single view trivially agrees with itself, so until both sides have
-     published (each after saving their own recovery string) the page says who
-     is missing. */
+  /* A lone view trivially agrees with itself, so name the missing side until both publish. */
   const missing = !hasBuyer ? "buyer" : !hasSeller ? "seller" : null;
   $("#disagreements").innerHTML = !comparison.agreed
     ? `<div class="clash">
@@ -726,9 +662,8 @@ async function watchOnce(id: string): Promise<void> {
 
 const bytesOf = (hex: string): Uint8Array => Uint8Array.from(hex.match(/../g)!.map((h) => parseInt(h, 16)));
 
-/* Funded when one confirmed output pays at least the amount. Partial payments
-   are not summed: the tree spends outputs, and a multi-input settlement would
-   multiply the signing work. */
+/* Funded means one confirmed output of at least the amount. Partials aren't
+   summed, which keeps settlement single-input. */
 async function checkChain(view: EscrowView, gate: { bothSides: boolean; agreed: boolean }): Promise<void> {
   $("#chain-view").innerHTML = row("", `Asking ${esc(chain.network)} about the address…`);
 
@@ -752,14 +687,11 @@ async function checkChain(view: EscrowView, gate: { bothSides: boolean; agreed: 
     `<span class="state-pill ${esc(derived.state)}">${esc(derived.state)}</span>
      <p class="hint" style="text-align:left;margin:0 0 12px">${esc(derived.reason)}</p>`;
 
-  // The transfer reading decides whether funding is advisable, so it comes first.
+  // Read the transfer first. It gates the funding advice.
   const reading = await checkTransfer(view);
   const verdict = reading?.verdict;
 
-  /* The instruction to pay is the most consequential line on this page, so it
-     appears only when every precondition holds: both sides published, their
-     views agree, a destination was committed, and the registry confirms the
-     transfer lock is off. Otherwise the page says which one is missing. */
+  /* "Ready to fund" shows only when every check passes. Otherwise name the first blocker. */
   const blocker =
     !gate.agreed ? "the published views disagree about the terms"
     : !gate.bothSides ? "both the buyer and the seller have to publish their views first"
@@ -770,14 +702,13 @@ async function checkChain(view: EscrowView, gate: { bothSides: boolean; agreed: 
     : verdict.state === "locked" ? "the transfer lock is confirmed on. Buyer: tell the seller your page shows this line. Seller: then turn the lock off at your registrar"
     : verdict.state === "pending" ? "a transfer of this domain is already underway, before anything has been paid. The buyer starts the transfer only after funding, so this one is somebody else's: do not fund"
     : !transferAllowed(verdict) ? `the registry shows "${verdict.state}", which is not a state to fund in`
-    /* Unlocked, but never seen locked: that proves nothing about who holds the
-       registrar account. The seller shows it by changing the lock. */
+    /* Never seen locked proves nothing about who holds the registrar account.
+       The seller proves it by toggling the lock. */
     : reading!.acted.lockedAt ? "the transfer lock has been seen on and turned off; two readings at least 30 minutes apart must confirm it is off"
     : "the domain has been unlocked the whole time this page has watched, which does not show that the seller holds it at the registrar. Seller: turn the transfer lock on at your registrar. Once the buyer's page confirms it (two readings 30 minutes apart), turn it off again. Only the registrant can change the lock, and each side's page trusts only its own readings";
 
-  /* Once the money is in, the page says whose move it is. The order matters:
-     the auth code goes out only now, and nobody signs a release until the
-     registry shows the domain where the buyer said it would arrive. */
+  /* After funding. The auth code goes out only now, and nobody signs a release
+     until the registry shows the committed destination. */
   const transferState = verdict?.confirmed ? verdict.state : undefined;
   const nextStep =
     transferState === "transferred"
@@ -809,8 +740,7 @@ async function checkChain(view: EscrowView, gate: { bothSides: boolean; agreed: 
         <a href="${esc(chain.explorer)}/address/${esc(view.address)}" target="_blank"
         rel="noopener">Watch the address on the explorer</a>`);
 
-  /* The settle form is rendered once per funding output. A periodic refresh
-     must not wipe a destination or a recovery string somebody is typing. */
+  /* Render once per funding output, so a refresh can't wipe what someone is typing. */
   if (found.funded) {
     const key = `${found.utxo.txid}:${found.utxo.vout}`;
     if (state.settleFor !== key) { state.settleFor = key; renderSettle(view, found.utxo); }
@@ -820,18 +750,9 @@ async function checkChain(view: EscrowView, gate: { bothSides: boolean; agreed: 
   }
 }
 
-/* ----------------------------------------------------- the transfer watch ---
- *
- * The site holds no registrar account and no API key, so it cannot move a
- * domain for anybody. It watches through RDAP, which is public, read-only and
- * the same for every registrar. Nothing moves on one observation: a state
- * changes only when two polls at least thirty minutes apart agree (see
- * spec/PROTOCOL.md).
- */
-/* This browser's own registry readings, per escrow. The two-poll rule needs
-   readings at least thirty minutes apart, so they are kept across visits.
-   Each party watches the registry for itself and trusts nobody else's
-   readings. Losing them is harmless: the verdict goes back to unconfirmed. */
+/* RDAP readings, per escrow. A state counts once two polls 30+ minutes apart
+   agree (spec/PROTOCOL.md), so each browser keeps its own readings across
+   visits and trusts nobody else's. Losing them only resets to unconfirmed. */
 const OBS_PREFIX = "fmd:rdap:";
 const isObservation = (o: any): boolean =>
   o && Number.isSafeInteger(o.at) && typeof o.snapshotHash === "string" &&
@@ -844,10 +765,10 @@ function loadObservations(id: string): Observation[] {
   } catch { return []; }
 }
 function saveObservations(id: string, list: Observation[]): void {
-  try { localStorage.setItem(OBS_PREFIX + id, JSON.stringify(list)); } catch { /* private mode: this visit still counts */ }
+  try { localStorage.setItem(OBS_PREFIX + id, JSON.stringify(list)); } catch { /* Private mode. This visit still counts. */ }
 }
 
-/** A fresh reading is not taken more often than this; Refresh reuses the last one. */
+/** Seconds between fresh readings. Refresh reuses the last one. */
 const READING_REUSE_SECONDS = 300;
 
 async function checkTransfer(view: EscrowView) {
@@ -870,7 +791,7 @@ async function checkTransfer(view: EscrowView) {
       history = record(history, result.observation);
       saveObservations(view.id, history);
     } else {
-      // Not recorded: a failed fetch is not evidence of anything.
+      // A failed fetch is not evidence. Record nothing.
       note = row("", `<b>No new reading</b> (${esc(result.reason ?? "the registry did not answer")}).
         This says nothing about the domain, and nothing was recorded.`);
     }
@@ -911,16 +832,9 @@ async function checkTransfer(view: EscrowView) {
   return { verdict, acted, history, commitment };
 }
 
-/* ------------------------------------------------------ the settlement ---
- *
- * The cooperative path needs both signatures and nobody else. Each side
- * builds the same transaction, signs it and sends the other its 64-byte
- * signature; either can then finalise and broadcast.
- *
- * The same outpoint, destination and fee give the same sighash on both
- * machines, so the proposer fixes the destination and fee, and the responder
- * reviews those numbers before signing anything.
- */
+/* Cooperative settle. Both sides build the same tx and swap 64-byte signatures.
+   The proposer fixes destination and fee, and the responder must match them
+   exactly or the sighashes differ. */
 function renderSettle(view: EscrowView, utxo: Utxo): void {
   const el = $("#settle-view");
   el.innerHTML = `
@@ -986,8 +900,7 @@ function reviewSettlement(view: EscrowView, utxo: Utxo): void {
 
   const estimate = feeOf(tx, false, leaf);
 
-  /* The confirm screen shows the destination and amount large and explicit:
-     it is the last chance to catch a wrong address. */
+  /* Last chance to catch a wrong address, so show it big. */
   out.innerHTML = `
     <div class="confirm">
       <div class="amount">${sats(Number(payout))} sats</div>
@@ -1004,8 +917,7 @@ function reviewSettlement(view: EscrowView, utxo: Utxo): void {
     const theirs = $<HTMLInputElement>("#s-theirs").value.trim();
 
     if (!theirs) {
-      // First to sign: hand over a bundle the other side can verify against
-      // the same numbers.
+      // First signer: hand over a bundle the other side checks against the same numbers.
       const bundle = "fmdsig1" + btoa(JSON.stringify({
         role: rebuilt.role,
         dest,
@@ -1022,7 +934,7 @@ function reviewSettlement(view: EscrowView, utxo: Utxo): void {
       return;
     }
 
-    // Second to sign: verify their half against these exact numbers, finalise.
+    // Second signer: their terms must match these exact numbers.
     let other: { role: string; dest: string; fee: string; sig: string };
     try {
       const json = atob(theirs.slice(7).replace(/-/g, "+").replace(/_/g, "/"));
@@ -1067,8 +979,6 @@ function reviewSettlement(view: EscrowView, utxo: Utxo): void {
   });
 }
 
-/* ------------------------------------------------------------- wiring ---*/
-
 initTheme();
 initConnect();
 paintNetwork();
@@ -1093,9 +1003,7 @@ $("#saved-recovery").addEventListener("change", (e) => {
   $<HTMLButtonElement>("#publish-escrow").disabled = !((e.target as HTMLInputElement).checked && state.draft?.realised);
 });
 
-/* Until the recovery string is saved, this side's escrow key exists only in
-   this tab. Closing it orphans an invite the counterparty may already be
-   answering, so the browser is asked to confirm first. */
+/* Until the recovery string is saved, the escrow key lives only in this tab. */
 window.addEventListener("beforeunload", (e) => {
   if (state.draft?.mySecret && !state.saved && !state.published) {
     e.preventDefault();
@@ -1103,8 +1011,7 @@ window.addEventListener("beforeunload", (e) => {
   }
 });
 
-/* The two-poll rule needs readings thirty minutes apart, so a watched escrow
-   re-reads itself every ten minutes while its tab is visible. */
+/* Feed the two-poll rule while the tab is visible. */
 setInterval(() => {
   if (state.watching && document.visibilityState === "visible") watch(state.watching);
 }, 10 * 60 * 1000);
@@ -1118,17 +1025,14 @@ $("#arbiters").addEventListener("click", (e) => {
     b.classList.toggle("btn-accent", b === btn);
     b.classList.toggle("btn-ghost", b !== btn);
   }
-  // Only the buyer knows where the domain is going, so only the buyer is asked.
+  // Only the buyer knows the destination.
   const isBuyer = state.draft.side === "buyer";
   $("#commit-fields").hidden = !isBuyer;
   $("#commit-seller-note").hidden = isBuyer;
   step(3);
 });
 
-/* Arriving from a listing's Buy button: the domain, the asking price and the
-   seller are already known, so fill them in. The fields stay editable, since
-   a price is often negotiated, and nothing is sent until the buyer checks the
-   terms themselves. */
+/* Prefill from a listing's Buy link. Fields stay editable, since prices get negotiated. */
 {
   const q = new URL(location.href).searchParams;
   const domain = q.get("domain");

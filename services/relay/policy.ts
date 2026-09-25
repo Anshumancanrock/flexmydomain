@@ -1,26 +1,9 @@
 /**
- * What a flexmydomain relay stores: the rules behind its strfry write policy.
- *
- * Pure: an event in, a decision out, with no clock, network or state. The rate
- * limiter lives in write-policy.ts, the process strfry talks to.
- *
- * The relay stores what this project publishes, in the shape it publishes it,
- * and refuses the rest. An open relay draws spam and fills its disk with
- * things that have nothing to do with selling domains, and this one is
- * optional (the site works with it switched off), so it carries nothing the
- * site does not read.
- *
- * Where core/ has a parser for a kind, the policy uses it rather than a looser
- * copy. A listing whose embedded proof does not verify, or an escrow view
- * whose stated address its own keys do not produce, is refused on write
- * instead of being filtered out by every reader later.
- *
- * The policy does not check:
- *   - the event signature: strfry verifies it before consulting the plugin;
- *   - DNS: a listing's zone check needs the network, and a write path must not
- *     wait on a resolver. Readers still resolve the record themselves;
- *   - zap receipts against the zapper's LNURL key, for the same reason. The
- *     board verifies each receipt against the provider's published key.
+ * Rules behind the relay's strfry write policy. Pure: event in, decision out
+ * (rate limits live in write-policy.ts). We store only what the site publishes,
+ * parsed with the same core/ code readers use, so bad events are refused on write.
+ * Not checked: signatures (strfry does that first), DNS and zap LNURL keys (need
+ * the network, readers check them).
  */
 
 import { tagValue, tagValues, type NostrEvent } from '../../core/nostr/event.js'
@@ -50,24 +33,14 @@ import { PROOF_D_PREFIX, PROOF_KIND, proofFromEvent } from '../../core/oracle/pr
 export type Decision = { action: 'accept' } | { action: 'reject'; msg: string }
 
 export interface PolicyOptions {
-  /**
-   * The flex board's zap recipient, x-only hex (web/assets/config.js,
-   * `featuredRecipientPubkey`). When set, only receipts paid to it are kept;
-   * when unset, any receipt for a flexmydomain zap request is.
-   */
+  /** x-only hex (config.js `featuredRecipientPubkey`). If set, only receipts paid to it are kept. */
   flexRecipient?: string
-  /**
-   * Verifier keys whose NIP-90 job feedback (kind 7000) is kept. Feedback
-   * carries nothing that ties it to this project, so it is taken only from
-   * verifiers the operator names.
-   */
+  /** Keys whose NIP-90 feedback (kind 7000) is kept. Nothing in it ties it to us. */
   verifiers?: readonly string[]
   /**
-   * Gift wraps (kind 1059). Refused by default: no page reads them yet, and a
-   * relay that stores wraps for any recipient is a general DM store whose
-   * contents it cannot inspect. Turn this on together with the private-channel
-   * UI, and with NIP-42-gated reads (strfry's `restrictedReadKinds`, which the
-   * 1.1.x releases do not have yet).
+   * Kind 1059. Off by default: nothing reads them yet, and storing wraps for
+   * anyone makes us an opaque DM store. Enable along with the private-channel UI
+   * and NIP-42-gated reads (strfry `restrictedReadKinds`, not in 1.1.x yet).
    */
   acceptGiftWraps?: boolean
 }
@@ -122,9 +95,7 @@ export function decide(event: NostrEvent, options: PolicyOptions = {}): Decision
   }
 }
 
-/* A listing must carry the flexmydomain topic and a proof that verifies for
-   its own key. Readers apply the same rule (spec/PROTOCOL.md); the relay
-   applies it once, on write. */
+/* Same rule readers apply (spec/PROTOCOL.md): our topic plus a proof signed by the listing's key. */
 function decideListing(event: NostrEvent): Decision {
   if (!tagValues(event, 't').includes(LISTING_TOPIC)) return reject(OFF_TOPIC)
   const check = checkListing({ event })
@@ -134,8 +105,7 @@ function decideListing(event: NostrEvent): Decision {
   return accept
 }
 
-/* Kind 30078 is shared by every application on nostr (NIP-78). Only our three
-   `d` namespaces are stored, and each must parse the way readers parse it. */
+/* Every NIP-78 app shares 30078. Keep only our three `d` namespaces, parsed as readers parse them. */
 function decideAppData(event: NostrEvent): Decision {
   const d = tagValue(event, 'd') ?? ''
   if (d.startsWith(PROOF_D_PREFIX)) {
@@ -153,19 +123,14 @@ function decideAppData(event: NostrEvent): Decision {
   return reject(OFF_TOPIC)
 }
 
-/* A deletion is kept when it can remove something this relay stores: one of
-   its `a` coordinates names an address this project publishes. The site
-   deletes by address (a listing, when it is delisted). A deletion that names
-   only other apps' addresses, or only event ids, is refused: it names nothing
-   this relay could hold, and the apps that share kinds 30402 and 30078 publish
-   such deletions by the hundred. strfry itself refuses a deletion of somebody
-   else's event. */
+/* Keep a deletion only if an `a` tag names one of our addresses (the site
+   deletes by address). Apps sharing 30402/30078 send id-only or foreign
+   deletions by the hundred. strfry itself refuses deleting another key's event. */
 function decideDeletion(event: NostrEvent): Decision {
   return tagValues(event, 'a').some(isOurAddress) ? accept : reject(OFF_TOPIC)
 }
 
-/** Whether `<kind>:<pubkey>:<d>` is an address this project publishes. The d
-    tag can itself contain colons (`fmd:listing:example.com`). */
+/** Whether `<kind>:<pubkey>:<d>` is one of ours. d can contain colons (`fmd:listing:example.com`). */
 export function isOurAddress(coordinate: string): boolean {
   const [kind, pubkey, ...rest] = coordinate.split(':')
   if (!/^\d+$/.test(kind ?? '') || !/^[0-9a-f]{64}$/.test(pubkey ?? '') || rest.length === 0) return false
@@ -173,7 +138,7 @@ export function isOurAddress(coordinate: string): boolean {
   switch (Number(kind)) {
     case LISTING_KIND:
       return d.startsWith(LISTING_D_PREFIX)
-    case PROOF_KIND: // proofs, the portfolio and escrow views are all kind 30078
+    case PROOF_KIND:
       return d.startsWith(PROOF_D_PREFIX) || d === PORTFOLIO_D || d.startsWith(ESCROW_D_PREFIX)
     case FOLLOW_SET_KIND:
       return d === ARBITER_SET_D || d === WATCHLIST_D
@@ -186,9 +151,8 @@ export function isOurAddress(coordinate: string): boolean {
   }
 }
 
-/* A receipt is ours when the zap request inside it is. The payer signs the
-   request, which carries the flex tags; the zapper service writes the receipt
-   and copies no custom tags into it. */
+/* Judge by the embedded zap request. The payer's request carries the flex tags,
+   and zappers copy no custom tags into the receipt. */
 function decideZapReceipt(event: NostrEvent, options: PolicyOptions): Decision {
   if (options.flexRecipient && tagValue(event, 'p') !== options.flexRecipient) return reject(OFF_TOPIC)
   let request: { kind?: unknown; tags?: unknown } | undefined
@@ -205,11 +169,9 @@ function decideZapReceipt(event: NostrEvent, options: PolicyOptions): Decision {
   return ours ? accept : reject(OFF_TOPIC)
 }
 
-/* NIP-65 relay lists. The site publishes them (flex.js), and the outbox model
-   reads them to route a user's events. Anyone can mint a key and a list, so a
-   list is bounded. Profiles (kind 0) are not stored at all: the site never
-   publishes one, they are all on the public relays, and an unverifiable 64 KB
-   document from any fresh key is the cheapest way to fill this relay's disk. */
+/* NIP-65 relay lists, read by the outbox model. Anyone can mint a key, so lists
+   are bounded. Kind 0 isn't stored at all. The site never publishes one, and
+   64 KB profiles from fresh keys are the cheapest way to fill the disk. */
 export const MAX_RELAY_LIST_ENTRIES = 50
 
 function decideRelayList(event: NostrEvent): Decision {

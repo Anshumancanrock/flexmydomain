@@ -1,21 +1,13 @@
 #!/usr/bin/env bun
 /**
- * The domain verifier: a NIP-90 daemon that publishes kind 6970 attestations.
- *
- * It watches listings and portfolios, re-resolves each domain's proof from
- * wherever this machine sits, and publishes what it saw as a signed
- * attestation. Anyone can run one. Verifiers count as independent only when
- * they run on different networks behind different resolvers.
- *
- * It is optional: every page in web/ resolves DNS itself and reaches its own
- * verdict, so turning this off leaves the marketplace unchanged. Attestations
- * add a second opinion from another network; a client that relies on them
- * instead of its own lookup trades a check it controls for one it does not.
+ * Domain verifier: NIP-90 daemon that re-resolves listing and portfolio proofs
+ * from this machine and publishes kind 6970 attestations. Optional, since every
+ * page checks DNS itself. Verifiers only count as independent on different
+ * networks and resolvers.
  *
  *   bun services/verifier/verifier.ts --nsec <nsec1...> [--once] [--interval 3600]
  *
- * Give it a key that signs attestations and nothing else, so a compromise
- * cannot cost funds or an identity.
+ * Use a key that signs attestations and nothing else, so a leak costs no funds or identity.
  */
 
 import { readFileSync } from 'node:fs'
@@ -40,7 +32,7 @@ interface Options {
   relays: string[]
   intervalSeconds: number
   once: boolean
-  /** At most this many DoH lookups at once; providers rate-limit. */
+  /** Max parallel DoH lookups. Providers rate-limit. */
   concurrency: number
 }
 
@@ -98,7 +90,6 @@ async function collectSubjects(relays: string[]): Promise<Map<string, { domain: 
   return subjects
 }
 
-/** Run `fn` over `items`, `limit` at a time. DoH providers rate-limit. */
 async function pool<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items]
   const workers = Array.from({ length: Math.max(1, limit) }, async () => {
@@ -130,10 +121,8 @@ async function sweep(options: Options, pubkey: string): Promise<void> {
       return
     }
 
-    /* `unreachable` means no resolver answered, which says nothing about the
-       domain. Recording it as `absent` would make a network problem here look
-       like a vanished proof to everyone reading. A failed lookup is never a
-       negative result (spec/PROOF.md). */
+    /* A failed lookup is never a negative result (spec/PROOF.md). Calling it
+       `absent` would make our network trouble look like a vanished proof. */
     const verdict = report.status.proven ? 'proven' : report.answered ? 'absent' : 'unreachable'
     if (verdict === 'proven') proven++
     else if (verdict === 'absent') absent++

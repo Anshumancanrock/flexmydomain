@@ -1,11 +1,5 @@
-/**
- * The escrow handshake, core/nostr/handshake.ts.
- *
- * The salt is part of the escrow id, so if each side's page minted its own,
- * the two would derive different ids and never see each other's views. The
- * tests that matter most check that both sides derive the same address and
- * id.
- */
+// Escrow handshake (core/nostr/handshake.ts). The salt is part of the escrow id, so both
+// sides must share one or they derive different ids and never see each other's views.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
@@ -56,7 +50,7 @@ const fromSeller: Invite = {
   commitment: undefined,
 }
 
-/** What each side feeds into the tree. Used to prove both sides agree. */
+/** What one side feeds into the tree. */
 function inputs(invite: Invite, reply: ReturnType<typeof decodeReply>) {
   if (!reply.ok) throw new Error(reply.reason)
   const r = resolveHandshake(invite, reply.reply)
@@ -105,7 +99,7 @@ describe('both sides derive the same escrow', () => {
     if (!invite.ok) return
     const replyText = encodeReply({ joinerKey: SELLER_KEY, salt: invite.invite.salt })
 
-    // The initiator decodes the reply; the joiner already holds its own key.
+    // The initiator decodes the reply. The joiner already holds its own key.
     const onInitiatorsPage = inputs(invite.invite, decodeReply(replyText, invite.invite))
     const onJoinersPage = inputs(invite.invite, decodeReply(replyText, invite.invite))
 
@@ -168,9 +162,9 @@ describe('what must not work', () => {
   test('an empty commitment counts as no commitment', () => {
     expect(() =>
       encodeInvite({ ...fromBuyer, commitment: { registrarIanaId: '', nameservers: [] } }),
-    ).not.toThrow() // encoding accepts the object...
+    ).not.toThrow() // Encoding accepts it.
     const back = decodeInvite(encodeInvite({ ...fromBuyer, commitment: { registrarIanaId: '', nameservers: [] } }))
-    expect(back.ok).toBe(false) // ...but decoding refuses it as empty
+    expect(back.ok).toBe(false) // Decoding refuses it as empty.
   })
 
   test('malformed input returns a reason instead of throwing', () => {
@@ -185,22 +179,15 @@ describe('what must not work', () => {
   })
 
   test('nothing in either message is a private key', () => {
-    // Both carry only public keys, a salt and terms. Guard it structurally.
+    // Only public keys, a salt and terms belong here.
     const invite = JSON.stringify(decodeInvite(encodeInvite(fromBuyer)))
     expect(invite).not.toMatch(/secret|private|nsec/i)
   })
 })
 
-// ---------------------------------------------------------------------------
-// what escrow.html publishes after the handshake
-// ---------------------------------------------------------------------------
-
 describe('the published views, as the page makes them', () => {
-  /* The page mints a fresh escrow key per trade, separate from the person's
-     Nostr identity, and signs each view with it. compareViews admits only
-     authors holding a tree key, so a view signed with the Nostr key would be
-     filed as a stranger's and the watch page would have nothing to show.
-     These two tests pin the contract from both sides. */
+  /* escrow.html signs each view with a fresh per-trade escrow key, not the Nostr identity.
+     compareViews admits only tree keys, so a Nostr-signed view counts as a stranger's. */
   const BUYER_ESCROW_SK = new Uint8Array(32).fill(0x41)
   const SELLER_ESCROW_SK = new Uint8Array(32).fill(0x42)
   const BUYER_NOSTR_SK = new Uint8Array(32).fill(0x51)

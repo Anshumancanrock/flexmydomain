@@ -1,15 +1,9 @@
 #!/usr/bin/env bun
 /**
- * strfry write-policy plugin for a flexmydomain relay.
+ * strfry write-policy plugin: one JSON line in per event, one out (strfry
+ * docs/plugins.md). policy.ts decides. This adds the event source and rate limits.
  *
- * strfry starts this process once and writes one JSON line per incoming event
- * to its stdin; this process answers each with one JSON line on stdout. The
- * protocol is strfry's docs/plugins.md. The decision itself is policy.ts,
- * which is pure; this file adds the two things a decision cannot know about:
- * where the event came from, and how often that source has been writing.
- *
- * Configuration is by environment, so one binary serves the relay and the
- * router alike:
+ * Env config, so one binary serves both relay and router:
  *
  *   FMD_FLEX_RECIPIENT      x-only hex; keep only flex zaps paid to this key
  *   FMD_VERIFIERS           comma-separated x-only hex; keep their NIP-90 feedback
@@ -17,7 +11,7 @@
  *   FMD_RATE_PER_MINUTE     sustained writes per client IP, or IPv6 /64 (default 30)
  *   FMD_RATE_BURST          burst allowance per client IP, or IPv6 /64 (default 60)
  *
- * Build a standalone binary for the container with:
+ * Standalone build:
  *   bun build --compile services/relay/write-policy.ts --outfile fmd-write-policy
  */
 
@@ -41,11 +35,9 @@ export interface PluginOutput {
 }
 
 /**
- * A token bucket per client address. Only events from clients are limited:
- * imports, router streams and syncs are the operator's own traffic.
- *
- * Idle buckets are dropped after ten minutes, so a crawler rotating through
- * addresses cannot grow this map without bound.
+ * Token bucket per client address. Only client writes hit it. Imports, router
+ * and sync are our own traffic. Buckets idle 10 minutes are dropped so address
+ * rotation can't grow the map without bound.
  */
 export function createRateLimiter(perMinute: number, burst: number) {
   const buckets = new Map<string, { tokens: number; at: number }>()
@@ -66,11 +58,7 @@ export function createRateLimiter(perMinute: number, burst: number) {
   }
 }
 
-/**
- * The address a client is rate-limited by. Every IPv6 host gets a whole /64
- * and can pick the rest of its address at will, so an IPv6 client is limited
- * by its /64. An IPv4-mapped address counts as the IPv4 address it maps.
- */
+/** Rate-limit key. IPv6 hosts pick any address in their /64, so key on the /64. IPv4-mapped counts as IPv4. */
 export function rateKey(sourceType: string | undefined, sourceInfo: string | undefined): string {
   const ip = (sourceInfo ?? 'unknown').toLowerCase()
   if (sourceType !== 'IP6') return ip
@@ -120,9 +108,8 @@ export function handle(
   }
 
   if (decision.action === 'accept') return { id, action: 'accept' }
-  /* A client is told why. A router stream is not: every off-topic event on a
-     busy upstream would otherwise become a line in strfry's log, and an empty
-     message is how the plugin protocol asks for silence. */
+  /* Only clients get a reason. An empty msg keeps strfry from logging every
+     off-topic event a busy upstream sends. */
   return { id, action: 'reject', msg: fromClient ? decision.msg : '' }
 }
 

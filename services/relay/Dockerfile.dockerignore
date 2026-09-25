@@ -1,6 +1,5 @@
-# Build context for services/relay/Dockerfile (a Dockerfile-specific ignore
-# file, which BuildKit reads instead of a root .dockerignore). Everything is
-# excluded except what the image is built from.
+# Context for services/relay/Dockerfile (BuildKit uses this over a root
+# .dockerignore). Excludes everything except the image's inputs.
 *
 !package.json
 !bun.lock
