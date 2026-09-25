@@ -11,7 +11,7 @@
     "test": "bun test test/vectors",
     "test:all": "bun test",
     "test:regtest": "bun test test/regtest",
-    "serve": "python3 serve.py",
+    "serve": "bun run scripts/serve.ts",
     "indexer": "bun run services/indexer/indexer.ts",
     "verifier": "bun run services/verifier/verifier.ts",
     "publish:handler": "bun run scripts/publish-handler.ts",

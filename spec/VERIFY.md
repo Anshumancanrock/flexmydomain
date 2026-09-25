@@ -8,7 +8,7 @@ If a check fails, the project does not do what it says. Please tell us.
 ## 0. There is no backend
 
 ```bash
-python3 serve.py
+bun run serve
 ```
 
 Open `http://localhost:8000/flex.html` and watch the network tab. Every
