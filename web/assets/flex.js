@@ -91,7 +91,8 @@ async function loadPortfolio(pubkey) {
   let events = [];
   try {
     await directory.resolve([pubkey]);
-    events = await queryRelays(directory.readRelays(pubkey), [portfolioFilter(pubkey)], { timeoutMs: 5000 });
+    const relays = [...new Set([...directory.readRelays(pubkey), ...DISCOVERY_RELAYS])];
+    events = await queryRelays(relays, [portfolioFilter(pubkey)], { timeoutMs: 5000 });
   } catch (err) {
     toast(`Relays: ${err.message}`);
   } finally {

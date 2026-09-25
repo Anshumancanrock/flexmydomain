@@ -122,9 +122,13 @@ async function loadPortfolio(pubkey: string): Promise<void> {
 
   let events: NostrEvent[] = [];
   try {
-    // Their portfolio lives on the relays they write to (NIP-65).
+    /* Their portfolio lives on the relays they write to (NIP-65), and a copy
+       goes to the discovery relays, this deployment's own among them. With no
+       relay list, readRelays() returns only the first few fallbacks, so the
+       discovery relays are always asked as well. */
     await directory.resolve([pubkey]);
-    events = await queryRelays(directory.readRelays(pubkey), [portfolioFilter(pubkey)], { timeoutMs: 5000 });
+    const relays = [...new Set([...directory.readRelays(pubkey), ...DISCOVERY_RELAYS])];
+    events = await queryRelays(relays, [portfolioFilter(pubkey)], { timeoutMs: 5000 });
   } catch (err) {
     toast(`Relays: ${(err as Error).message}`);
   } finally {
