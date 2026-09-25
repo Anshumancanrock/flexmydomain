@@ -1,13 +1,4 @@
-/* flex.html: a public portfolio of every domain one Nostr key has proven.
- *
- * There is no backend. Everything this page shows comes from Nostr relays,
- * DNS resolvers or the domain's own NIP-05 document, and every signature is
- * made by the user's own signer; nothing here talks to a host we run.
- *
- * Domains are proven on the market page. Rendering a portfolio takes one
- * relay query for one event, and every entry is verified offline against the
- * portfolio's own key.
- */
+// Generated from web/src/flex.ts by scripts/build-web.ts. Edit that file instead.
 import {
   DEFAULT_RELAYS,
   RelayDirectory,
@@ -35,54 +26,51 @@ import {
   publishOutbox,
   relayListFilter,
   tryNormaliseDomain,
+  buildPortfolio
 } from "./fmd.js";
 import { CONFIG } from "./config.js";
 import {
-  $, DISCOVERY_RELAYS, ageText, avatarGradient, copyToClipboard, esc,
-  initConnect, initTheme, now, onSessionChange, row, session, toast,
+  $,
+  DISCOVERY_RELAYS,
+  ageText,
+  avatarGradient,
+  copyToClipboard,
+  esc,
+  initConnect,
+  initTheme,
+  now,
+  onSessionChange,
+  row,
+  session,
+  toast
 } from "./ui.js";
-
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
-
-/* `viewing` is whose page this is, which is not always the connected key: a
-   flex page is public, and opening someone else's must work with no key at
-   all. */
 const state = {
   viewing: null,
   entries: [],
-  liveProof: new Map(),
+  liveProof: new Map,
   loading: false,
-  attestations: [],   // second opinions, from verifiers the reader trusts
-  profile: null,      // kind 0 of whoever is being viewed
-  relays: [],         // their NIP-65 list, as entries
-  relayInfo: new Map(),// url -> NIP-11 document, or null when unreachable
-  watch: [],          // their NIP-51 watchlist
+  attestations: [],
+  profile: null,
+  relays: [],
+  relayInfo: new Map,
+  watch: []
 };
-
-/* ------------------------------------------------------------- the view ---*/
-
-/* The key whose page this is comes from a query parameter, so it works on a
-   plain static host with no rewrite rules. `nostr:`, npub, nprofile and bare
-   hex are all accepted, because people paste whatever their other client
-   showed them. */
 function pubkeyFromUrl() {
   const url = new URL(location.href);
   const raw = url.searchParams.get("p") ?? decodeURIComponent(location.hash.replace(/^#/, ""));
   return raw ? toPubkeyHex(raw.trim()) : undefined;
 }
-
 async function view(pubkey, { replaceUrl = false } = {}) {
   state.viewing = pubkey;
   state.entries = [];
   state.liveProof.clear();
-
   if (replaceUrl) {
     const url = new URL(location.href);
     url.searchParams.set("p", npubEncode(pubkey));
     url.hash = "";
     history.replaceState(null, "", url);
   }
-
   $("#avatar").style.background = avatarGradient(pubkey);
   $("#avatar").hidden = false;
   const npub = npubEncode(pubkey);
@@ -90,24 +78,18 @@ async function view(pubkey, { replaceUrl = false } = {}) {
   $("#who").textContent = mine ? "Your domains" : "Domains held by";
   $("#npub").innerHTML = `<button type="button" id="copy-npub" title="Copy">${esc(shorten(npub, 12))}</button>`;
   $("#copy-npub").addEventListener("click", () => copyToClipboard(npub, "npub copied."));
-
   $("#recheck").hidden = false;
   $("#identity-open").hidden = !mine;
-  if (!mine) $("#identity").hidden = true;
+  if (!mine)
+    $("#identity").hidden = true;
   render();
-
   await loadPortfolio(pubkey);
 }
-
-/* One filter and one replaceable event populate the page; there is nothing
-   else to fetch. */
 async function loadPortfolio(pubkey) {
   state.loading = true;
   render();
-
   let events = [];
   try {
-    // Their portfolio lives on the relays they write to (NIP-65).
     await directory.resolve([pubkey]);
     events = await queryRelays(directory.readRelays(pubkey), [portfolioFilter(pubkey)], { timeoutMs: 5000 });
   } catch (err) {
@@ -115,15 +97,14 @@ async function loadPortfolio(pubkey) {
   } finally {
     state.loading = false;
   }
-  if (state.viewing !== pubkey) return; // the user navigated away mid-flight
-
+  if (state.viewing !== pubkey)
+    return;
   const newest = newestPerAddress(events)[0];
   if (!newest) {
     state.entries = [];
     render();
     return;
   }
-
   const parsed = parsePortfolio(newest);
   if (!parsed.ok) {
     state.entries = [];
@@ -131,71 +112,46 @@ async function loadPortfolio(pubkey) {
     toast(`That portfolio event is malformed: ${parsed.reason}`);
     return;
   }
-
-  /* Verify every entry offline before anything is drawn: the event came from a
-     relay, and the signature inside each entry is the only reason to believe
-     it. */
   const verdicts = verifyPortfolio(parsed.portfolio);
   state.entries = parsed.portfolio.entries.map((entry, i) => ({
     ...entry,
     signedOk: verdicts[i].proven,
-    signedReason: verdicts[i].reason,
+    signedReason: verdicts[i].reason
   }));
   render();
   recheckAll();
   loadAttestations(pubkey);
   loadIdentity(pubkey);
 }
-
-/* Profile, watchlist and relay list: three replaceable events, fetched in
- * parallel.
- *
- * Everything in a kind 0 is self-attested and none of it is checked here. A
- * NIP-05 field is a claim until the document at that domain is fetched; a
- * NIP-39 identity is a claim until the proof on that platform is read, and
- * most of those platforms send no CORS headers, so a browser cannot read them
- * at all. They are rendered as links to look at, never as verified badges. */
 async function loadIdentity(pubkey) {
   try {
     const [meta, relayEvents] = await Promise.all([
       queryRelays(DISCOVERY_RELAYS, profileFilter([pubkey]), { timeoutMs: 5000 }),
-      queryRelays(DISCOVERY_RELAYS, [relayListFilter([pubkey])], { timeoutMs: 5000 }),
+      queryRelays(DISCOVERY_RELAYS, [relayListFilter([pubkey])], { timeoutMs: 5000 })
     ]);
-    if (state.viewing !== pubkey) return;
-
+    if (state.viewing !== pubkey)
+      return;
     const newest = newestPerAddress(meta);
     state.profile = parseProfile(newest.find((e) => e.kind === 0) ?? {}) ?? null;
     state.watch = parseWatchlist(newest.find((e) => e.kind === 30000 && parseWatchlist(e)) ?? {}) ?? [];
-
     const listEvent = newestPerAddress(relayEvents)[0];
     state.relays = listEvent ? parseRelayList(listEvent) : [];
-
     renderProfile();
     renderIdentity();
     probeRelays();
-  } catch {
-    /* Identity is decoration; failing to load it says nothing about the domains. */
-  }
+  } catch {}
 }
-
-/* NIP-11: ask each relay what it is, so the relay panel shows which of them
-   are up and what each calls itself. */
 async function probeRelays() {
-  const urls = state.relays.length
-    ? state.relays.map((r) => r.url)
-    : [...DEFAULT_RELAYS];
-  await Promise.all(
-    urls.map(async (url) => {
-      try {
-        state.relayInfo.set(url, await fetchRelayInfo(url));
-      } catch {
-        state.relayInfo.set(url, null); // unreachable; shown as down
-      }
-      renderIdentity();
-    }),
-  );
+  const urls = state.relays.length ? state.relays.map((r) => r.url) : [...DEFAULT_RELAYS];
+  await Promise.all(urls.map(async (url) => {
+    try {
+      state.relayInfo.set(url, await fetchRelayInfo(url));
+    } catch {
+      state.relayInfo.set(url, null);
+    }
+    renderIdentity();
+  }));
 }
-
 function renderProfile() {
   const el = $("#profile");
   const p = state.profile;
@@ -204,99 +160,70 @@ function renderProfile() {
     return;
   }
   const bits = [];
-  if (p.displayName || p.name) bits.push(`<b>${esc(p.displayName || p.name)}</b>`);
-  // A nip05 here is only what the key claims; it is not checked.
-  if (p.nip05) bits.push(`<span title="self-attested, not verified here">${esc(p.nip05)}</span>`);
+  if (p.displayName || p.name)
+    bits.push(`<b>${esc(p.displayName || p.name)}</b>`);
+  if (p.nip05)
+    bits.push(`<span title="self-attested, not verified here">${esc(p.nip05)}</span>`);
   for (const identity of p.identities) {
     const url = identityProofUrl(identity);
     const label = `${esc(identity.platform)}/${esc(identity.identity)}`;
-    bits.push(url
-      ? `<a href="${esc(url)}" target="_blank" rel="noopener" title="Self-attested. Open the proof and check it yourself.">${label}</a>`
-      : `<span title="self-attested, no proof given">${label}</span>`);
+    bits.push(url ? `<a href="${esc(url)}" target="_blank" rel="noopener" title="Self-attested. Open the proof and check it yourself.">${label}</a>` : `<span title="self-attested, no proof given">${label}</span>`);
   }
   el.innerHTML = bits.length ? bits.join('<span aria-hidden="true">·</span>') : "";
 }
-
-/* Attestations are a second opinion, fetched beside the page's own DNS lookup
-   and never instead of it. Only the configured verifiers are counted, and only
-   distinct ones: a single daemon publishing four times is one opinion, and
-   without that rule one machine could meet any threshold. */
 async function loadAttestations(pubkey) {
-  if (CONFIG.verifiers.length === 0 || state.entries.length === 0) return;
+  if (CONFIG.verifiers.length === 0 || state.entries.length === 0)
+    return;
   const domains = state.entries.map((e) => e.domain);
   try {
-    const events = await queryRelays(
-      DISCOVERY_RELAYS,
-      [attestationFilter({ domains, verifiers: CONFIG.verifiers, since: now() - 7 * 86400 })],
-      { timeoutMs: 5000 },
-    );
-    if (state.viewing !== pubkey) return;
-    state.attestations = events
-      .map((e) => parseAttestation(e))
-      .filter((r) => r.ok)
-      .map((r) => r.attestation);
+    const events = await queryRelays(DISCOVERY_RELAYS, [attestationFilter({ domains, verifiers: CONFIG.verifiers, since: now() - 7 * 86400 })], { timeoutMs: 5000 });
+    if (state.viewing !== pubkey)
+      return;
+    state.attestations = events.map((e) => parseAttestation(e)).filter((r) => r.ok).map((r) => r.attestation);
     render();
-  } catch {
-    /* Missing attestations say nothing against any domain. */
-  }
+  } catch {}
 }
-
-/* The live check. A signature proves the holder once made the claim; only DNS
-   shows the zone still agrees today. A domain whose record has vanished is
-   marked stale and stays visible, because hiding it would hide the fact a
-   buyer most needs. */
 async function recheckAll() {
   const pubkey = state.viewing;
-  if (!pubkey) return;
-  await Promise.all(
-    state.entries.map(async (entry) => {
-      try {
-        const report = await checkDomainProof({ domain: entry.domain, pubkey });
-        if (state.viewing !== pubkey) return;
-        state.liveProof.set(entry.domain, report);
-        render();
-      } catch {
-        /* A failed lookup is not a negative result. Leave it unknown. */
-      }
-    }),
-  );
+  if (!pubkey)
+    return;
+  await Promise.all(state.entries.map(async (entry) => {
+    try {
+      const report = await checkDomainProof({ domain: entry.domain, pubkey });
+      if (state.viewing !== pubkey)
+        return;
+      state.liveProof.set(entry.domain, report);
+      render();
+    } catch {}
+  }));
 }
-
 function render() {
   const grid = $("#grid");
   const entries = [...state.entries].sort((a, b) => a.firstSeen - b.firstSeen);
-
   $("#stats").hidden = entries.length === 0;
-  $("#stat-count").textContent = entries.length;
-  $("#stat-proven").textContent = entries.filter((e) => state.liveProof.get(e.domain)?.status.proven).length;
+  $("#stat-count").textContent = String(entries.length);
+  $("#stat-proven").textContent = String(entries.filter((e) => state.liveProof.get(e.domain)?.status.proven).length);
   $("#stat-oldest").textContent = entries.length ? ageText(entries[0].firstSeen) : "—";
-
   if (entries.length === 0) {
-    grid.innerHTML = `<p class="empty">${
-      state.loading
-        ? "Asking the relays…"
-        : !state.viewing
-          ? "No portfolio open. Connect a key to see yours, or <a href=\"market.html\">prove a domain on the market</a>."
-          : state.viewing === session.pubkey
-            ? "No domains yet. Prove one on the <a href=\"market.html\">market</a>; it takes one DNS record."
-            : "This key has not published a portfolio."
-    }</p>`;
+    grid.innerHTML = `<p class="empty">${state.loading ? "Asking the relays…" : !state.viewing ? 'No portfolio open. Connect a key to see yours, or <a href="market.html">prove a domain on the market</a>.' : state.viewing === session.pubkey ? 'No domains yet. Prove one on the <a href="market.html">market</a>; it takes one DNS record.' : "This key has not published a portfolio."}</p>`;
     return;
   }
-
   grid.innerHTML = entries.map((entry) => {
     const live = state.liveProof.get(entry.domain);
     const proven = live?.status.proven;
     const stale = live && !proven && live.answered;
     const mine = state.viewing === session.pubkey;
-
     const tags = [];
-    if (proven) tags.push(`<span class="tag proven">✓ ${live.status.source === "nip05" ? "NIP-05" : "DNS"}</span>`);
-    else if (stale) tags.push(`<span class="tag unproven">proof not found</span>`);
-    else if (live) tags.push(`<span class="tag">resolver unreachable</span>`);
-    else tags.push(`<span class="tag">checking…</span>`);
-    if (live?.dnssec) tags.push(`<span class="tag dnssec">DNSSEC</span>`);
-
+    if (proven)
+      tags.push(`<span class="tag proven">✓ ${live.status.source === "nip05" ? "NIP-05" : "DNS"}</span>`);
+    else if (stale)
+      tags.push(`<span class="tag unproven">proof not found</span>`);
+    else if (live)
+      tags.push(`<span class="tag">resolver unreachable</span>`);
+    else
+      tags.push(`<span class="tag">checking…</span>`);
+    if (live?.dnssec)
+      tags.push(`<span class="tag dnssec">DNSSEC</span>`);
     if (CONFIG.verifiers.length > 0) {
       const verdict = tally({
         attestations: state.attestations,
@@ -305,7 +232,7 @@ function render() {
         trusted: CONFIG.verifiers,
         threshold: CONFIG.verifierThreshold,
         maxAgeSeconds: 7 * 86400,
-        now: now(),
+        now: now()
       });
       if (verdict.proven) {
         tags.push(`<span class="tag proven">${verdict.agreeing} verifiers agree</span>`);
@@ -313,10 +240,11 @@ function render() {
         tags.push(`<span class="tag unproven">${verdict.absent} verifiers disagree</span>`);
       }
     }
-    if (!entry.signedOk) tags.push(`<span class="tag unproven">unsigned claim</span>`);
+    if (!entry.signedOk)
+      tags.push(`<span class="tag unproven">unsigned claim</span>`);
     tags.push(`<span class="tag">held ${ageText(entry.firstSeen)}</span>`);
-    if (entry.forSale) tags.push(`<span class="tag">for sale</span>`);
-
+    if (entry.forSale)
+      tags.push(`<span class="tag">for sale</span>`);
     return `<article class="domain${stale ? " stale" : ""}">
       <div class="domain-name">${esc(entry.domain)}</div>
       ${entry.tagline ? `<p class="domain-tagline">${esc(entry.tagline)}</p>` : ""}
@@ -328,18 +256,11 @@ function render() {
     </article>`;
   }).join("");
 }
-
-/* -------------------------------------------------------- keys and relays ---*/
-
-/* The draft the editor works on, so nothing is published until asked. */
 const draft = { relays: null, watch: null };
-
 function renderIdentity() {
   const relays = draft.relays ?? state.relays.map((r) => r.url);
   const known = new Set(relays);
-  // With no list of their own, show the fallback relays used in its place.
   const shown = relays.length ? relays : [...DEFAULT_RELAYS];
-
   $("#relay-list").innerHTML = `<div class="chip-row">` + shown.map((url) => {
     const info = state.relayInfo.get(url);
     const down = info === null;
@@ -349,54 +270,34 @@ function renderIdentity() {
       <span class="mark">${down ? "down" : known.has(url) ? "yours" : "fallback"}</span>
       ${known.has(url) ? `<button type="button" data-drop-relay="${esc(url)}" aria-label="Remove">&times;</button>` : ""}
     </span>`;
-  }).join("") + `</div>` +
-  (relays.length === 0
-    ? `<p class="hint" style="text-align:left">You have published no relay list, so these
-       five are used as a fallback. Add your own and they stop being used.</p>`
-    : "");
-
+  }).join("") + `</div>` + (relays.length === 0 ? `<p class="hint" style="text-align:left">You have published no relay list, so these
+       five are used as a fallback. Add your own and they stop being used.</p>` : "");
   const watch = draft.watch ?? state.watch;
-  $("#watch-list").innerHTML = watch.length
-    ? `<div class="chip-row">` + watch.map((d) =>
-        `<span class="chip-x">${esc(d)}
+  $("#watch-list").innerHTML = watch.length ? `<div class="chip-row">` + watch.map((d) => `<span class="chip-x">${esc(d)}
            <button type="button" data-drop-watch="${esc(d)}" aria-label="Remove">&times;</button>
-         </span>`).join("") + `</div>`
-    : `<p class="hint" style="text-align:left">Nothing on the watchlist yet.</p>`;
+         </span>`).join("") + `</div>` : `<p class="hint" style="text-align:left">Nothing on the watchlist yet.</p>`;
 }
-
 async function publishRelayList() {
-  if (!session.signer) return;
+  if (!session.signer)
+    return;
   const urls = draft.relays ?? state.relays.map((r) => r.url);
   const hint = $("#relay-hint");
-
   if (urls.length === 0) {
     hint.className = "hint err";
     hint.textContent = "Add at least one relay, or there is nowhere to publish the list itself.";
     return;
   }
-
   try {
-    const event = await session.signer.signEvent(
-      buildRelayList({
-        pubkey: session.pubkey,
-        relays: urls.map((url) => ({ url, read: true, write: true })),
-        createdAt: now(),
-      }),
-    );
-    /* Published to the current relays as well as the new ones: a reader who
-       only knows the old set still has to be able to find the new list. */
+    const event = await session.signer.signEvent(buildRelayList({
+      pubkey: session.pubkey,
+      relays: urls.map((url) => ({ url, read: true, write: true })),
+      createdAt: now()
+    }));
     const results = await publishOutbox(directory, event, { extraRelays: DISCOVERY_RELAYS });
     const ok = results.filter((r) => r.ok);
-
     $("#relay-out").hidden = false;
-    $("#relay-out").innerHTML =
-      (ok.length
-        ? row("good", `<b>Published to ${ok.length} of ${results.length}.</b> Clients will now look
-             for your events on the relays you listed.`)
-        : row("bad", "<b>No relay accepted it.</b> Nothing changed.")) +
-      results.map((r) => row(r.ok ? "good" : "bad",
-        `<b>${esc(r.relay.replace(/^wss:\/\//, ""))}</b>: ${r.ok ? "accepted" : esc(r.message ?? "refused")}`)).join("");
-
+    $("#relay-out").innerHTML = (ok.length ? row("good", `<b>Published to ${ok.length} of ${results.length}.</b> Clients will now look
+             for your events on the relays you listed.`) : row("bad", "<b>No relay accepted it.</b> Nothing changed.")) + results.map((r) => row(r.ok ? "good" : "bad", `<b>${esc(r.relay.replace(/^wss:\/\//, ""))}</b>: ${r.ok ? "accepted" : esc(r.message ?? "refused")}`)).join("");
     if (ok.length) {
       state.relays = urls.map((url) => ({ url, read: true, write: true }));
       draft.relays = null;
@@ -410,21 +311,17 @@ async function publishRelayList() {
     hint.textContent = err.message;
   }
 }
-
 async function publishWatchlist() {
-  if (!session.signer) return;
+  if (!session.signer)
+    return;
   const domains = draft.watch ?? state.watch;
   const hint = $("#watch-hint");
   try {
-    const event = await session.signer.signEvent(
-      buildWatchlist({ pubkey: session.pubkey, domains, createdAt: now() }),
-    );
+    const event = await session.signer.signEvent(buildWatchlist({ pubkey: session.pubkey, domains, createdAt: now() }));
     const results = await publishOutbox(directory, event, { extraRelays: DISCOVERY_RELAYS });
     const ok = results.filter((r) => r.ok).length;
     hint.className = ok ? "hint ok" : "hint err";
-    hint.textContent = ok
-      ? `Published to ${ok} of ${results.length} relays.`
-      : "No relay accepted it.";
+    hint.textContent = ok ? `Published to ${ok} of ${results.length} relays.` : "No relay accepted it.";
     if (ok) {
       state.watch = domains;
       draft.watch = null;
@@ -435,20 +332,16 @@ async function publishWatchlist() {
     hint.textContent = err.message;
   }
 }
-
-/* Removing a domain republishes the portfolio without it. It is not a NIP-09
-   deletion: the proof event stays where it is, and older portfolio versions
-   may survive on relays that ignore replacement, so the confirm dialog does
-   not promise an erasure. */
 async function removeDomain(domain) {
-  if (!session.signer) return;
-  if (!confirm(`Remove ${domain} from your published portfolio?\n\nThe DNS record and the proof event stay where they are; this only republishes the list without it.`)) return;
+  if (!session.signer)
+    return;
+  if (!confirm(`Remove ${domain} from your published portfolio?
 
+The DNS record and the proof event stay where they are; this only republishes the list without it.`))
+    return;
   const entries = state.entries.filter((e) => e.domain !== domain);
   try {
-    const event = await session.signer.signEvent(
-      buildPortfolio({ pubkey: session.pubkey, entries, createdAt: now() }),
-    );
+    const event = await session.signer.signEvent(buildPortfolio({ pubkey: session.pubkey, entries, createdAt: now() }));
     const results = await publishOutbox(directory, event, { extraRelays: DISCOVERY_RELAYS });
     const ok = results.filter((r) => r.ok).length;
     if (ok === 0) {
@@ -463,29 +356,22 @@ async function removeDomain(domain) {
     toast(err.message);
   }
 }
-
-/* ----------------------------------------------------------- wiring up ---*/
-
 initTheme();
 initConnect();
-
 onSessionChange((pubkey) => {
   if (pubkey) {
     view(pubkey, { replaceUrl: true });
   } else {
-    // A portfolio is public; disconnecting is not navigating away.
     $("#who").textContent = state.viewing ? "Domains held by" : "A domain portfolio";
     render();
   }
 });
-
 $("#identity-open").addEventListener("click", () => {
   $("#identity").hidden = false;
   renderIdentity();
   $("#identity").scrollIntoView({ behavior: "smooth", block: "start" });
 });
-$("#identity-close").addEventListener("click", () => ($("#identity").hidden = true));
-
+$("#identity-close").addEventListener("click", () => $("#identity").hidden = true);
 $("#relay-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const url = normaliseRelayUrl($("#relay-url").value);
@@ -503,7 +389,6 @@ $("#relay-form").addEventListener("submit", (e) => {
   renderIdentity();
   probeRelays();
 });
-
 $("#watch-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const parsed = tryNormaliseDomain($("#watch-domain").value);
@@ -520,19 +405,16 @@ $("#watch-form").addEventListener("submit", (e) => {
   hint.textContent = "Not published yet.";
   renderIdentity();
 });
-
 $("#relay-publish").addEventListener("click", publishRelayList);
 $("#watch-publish").addEventListener("click", publishWatchlist);
-
 $("#recheck").addEventListener("click", () => {
   toast("Re-checking every domain against DNS…");
   recheckAll();
 });
-
 document.addEventListener("click", (event) => {
   const copy = event.target.closest("[data-copy]");
-  if (copy) return copyToClipboard($(`#${copy.dataset.copy}`).textContent);
-
+  if (copy)
+    return copyToClipboard($(`#${copy.dataset.copy}`).textContent);
   const recheck = event.target.closest("[data-recheck]");
   if (recheck) {
     checkDomainProof({ domain: recheck.dataset.recheck, pubkey: state.viewing }).then((report) => {
@@ -543,8 +425,8 @@ document.addEventListener("click", (event) => {
     return;
   }
   const remove = event.target.closest("[data-remove]");
-  if (remove) return removeDomain(remove.dataset.remove);
-
+  if (remove)
+    return removeDomain(remove.dataset.remove);
   const dropRelay = event.target.closest("[data-drop-relay]");
   if (dropRelay) {
     const current = draft.relays ?? state.relays.map((r) => r.url);
@@ -563,9 +445,8 @@ document.addEventListener("click", (event) => {
     renderIdentity();
   }
 });
-
-/* A flex page opened with an npub renders with no key connected, and that is
-   the default path. */
 const initial = pubkeyFromUrl();
-if (initial) view(initial);
-else render();
+if (initial)
+  view(initial);
+else
+  render();

@@ -18,13 +18,15 @@
     "skipLibCheck": true,
     "types": [
       "bun"
-    ]
+    ],
+    "allowJs": true
   },
   "include": [
     "core/**/*.ts",
     "net/**/*.ts",
     "client/**/*.ts",
     "services/**/*.ts",
-    "scripts/**/*.ts"
+    "scripts/**/*.ts",
+    "web/src/**/*.ts"
   ]
 }
