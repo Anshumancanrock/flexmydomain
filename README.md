@@ -1,4 +1,4 @@
-# flexmydomain
+#    ◇ FlexMyDomain ◇
 
 A marketplace for domain names, built on Nostr and Bitcoin. There is no
 backend and no account to create. Listings are Nostr events, ownership is
