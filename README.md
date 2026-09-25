@@ -18,7 +18,7 @@ which ties the domain to their Nostr key, and every visitor's browser checks
 that record before it shows the listing. A domain you don't control can't be
 listed.
 
-## Buying a domain through flexmydomain's escrow at 0 commission
+## Buying a domain through our escrow at 0 commission
 
 1. The seller lists the domain for free.
 2. A buyer opens an escrow from the listing and says where the domain should
