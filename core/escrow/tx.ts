@@ -1,12 +1,4 @@
-/**
- * Bitcoin tx serialisation and the BIP-341 signature message. Written over
- * @noble without @scure/btc-signer, so test/vectors/spend.test.ts compares two
- * independent implementations. test/regtest checks the same spends against Core.
- *
- * A txid is little-endian on the wire and big-endian when displayed. Amounts are
- * 8 bytes LE. Scripts get a CompactSize prefix, not a push opcode. Any of these
- * wrong still gives a well-formed tx that spends the wrong thing or nothing.
- */
+// Bitcoin tx serialisation and the BIP-341 signature message.
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes, hexToBytes, bytesToHex } from '@noble/hashes/utils.js'
@@ -15,20 +7,16 @@ import { compactSize, taggedHash } from './tagged.js'
 /** BIP-341 sighash epoch, prepended before tagging. */
 const SIGHASH_EPOCH = 0x00
 
-/** Signs everything, gives a 64-byte signature. */
 export const SIGHASH_DEFAULT = 0x00
 
-/** Script-path spends set ext_flag = 1, so spend_type = 2 with no annex. */
 const EXT_FLAG_SCRIPT_PATH = 1
 
 /** BIP-342 key version, the only one defined. */
 const KEY_VERSION = 0
 
-/** No escrow leaf contains OP_CODESEPARATOR. */
 const NO_CODESEP = 0xffffffff
 
 export interface TxInput {
-  /** Big-endian, as displayed. */
   txid: string
   vout: number
   /** Sats. Signed over by BIP-341. */
@@ -36,7 +24,6 @@ export interface TxInput {
   /** Signed over by BIP-341. */
   scriptPubKey: Uint8Array
   sequence: number
-  /** Set by the finaliser. */
   witness?: Uint8Array[]
 }
 
@@ -72,11 +59,6 @@ export function u64(n: bigint): Uint8Array {
   return out
 }
 
-/**
- * Outpoint with the txid reversed into wire order. Explorers and RPC show the
- * big-endian form. Mixing them up spends an output that doesn't exist, and the
- * node only says "missing inputs".
- */
 export function outpointBytes(txid: string, vout: number): Uint8Array {
   if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error(`outpoint: txid must be 64 lowercase hex characters, got ${txid}`)
   return concatBytes(hexToBytes(txid).reverse(), u32(vout))
@@ -86,11 +68,9 @@ function withLength(bytes: Uint8Array): Uint8Array {
   return concatBytes(compactSize(bytes.length), bytes)
 }
 
-/** Legacy (no-witness) serialisation, which is what a txid hashes. */
 export function serializeUnsigned(tx: Tx): Uint8Array {
   const parts: Uint8Array[] = [u32(tx.version), compactSize(tx.inputs.length)]
   for (const input of tx.inputs) {
-    // scriptSig is always empty for taproot, the witness carries it.
     parts.push(outpointBytes(input.txid, input.vout), compactSize(0), u32(input.sequence))
   }
   parts.push(compactSize(tx.outputs.length))
@@ -99,14 +79,10 @@ export function serializeUnsigned(tx: Tx): Uint8Array {
   return concatBytes(...parts)
 }
 
-/**
- * Full segwit serialisation with marker, flag and witnesses, the form that gets
- * broadcast. The txid ignores the witness, see {@link txid}.
- */
 export function serializeSigned(tx: Tx): Uint8Array {
   const parts: Uint8Array[] = [
     u32(tx.version),
-    Uint8Array.of(0x00, 0x01), // segwit marker + flag
+    Uint8Array.of(0x00, 0x01),
     compactSize(tx.inputs.length),
   ]
   for (const input of tx.inputs) {
@@ -124,19 +100,10 @@ export function serializeSigned(tx: Tx): Uint8Array {
   return concatBytes(...parts)
 }
 
-/** Double SHA-256 of the witness-free serialisation, reversed for display. */
 export function txid(tx: Tx): string {
   return bytesToHex(sha256(sha256(serializeUnsigned(tx))).reverse())
 }
 
-/**
- * The message a script-path spend signs.
- *
- * Commits to every input's amount and scriptPubKey, which is BIP-341's fix for
- * the segwit v0 hardware-wallet fee attack, so it needs the whole input set.
- * `leafHash` binds the signature to one leaf, so a cooperative-leaf signature
- * can't be replayed into a dispute leaf with the same key.
- */
 export function taprootSighash(params: {
   tx: Tx
   inputIndex: number
@@ -147,8 +114,6 @@ export function taprootSighash(params: {
   const hashType = params.hashType ?? SIGHASH_DEFAULT
 
   if (hashType !== SIGHASH_DEFAULT) {
-    // Escrow spends sign the whole tx. Any other type would leave part of it
-    // open to change by someone else.
     throw new Error(`taprootSighash: only SIGHASH_DEFAULT is supported, got ${hashType}`)
   }
   if (inputIndex < 0 || inputIndex >= tx.inputs.length) {
@@ -175,7 +140,6 @@ export function taprootSighash(params: {
     shaScriptPubKeys,
     shaSequences,
     shaOutputs,
-    // spend_type = (ext_flag << 1) | annex_present. Script path, no annex.
     Uint8Array.of(EXT_FLAG_SCRIPT_PATH << 1),
     u32(inputIndex),
     // Script-path extension, which makes the signature leaf-specific.
@@ -184,22 +148,14 @@ export function taprootSighash(params: {
     u32(NO_CODESEP),
   )
 
-  // Epoch byte goes inside the tagged hash, outside SigMsg. Anywhere else gives
-  // a valid-looking signature no node accepts.
   return taggedHash('TapSighash', Uint8Array.of(SIGHASH_EPOCH), sigMsg)
 }
 
-/** P2TR scriptPubKey for any 32-byte output key. */
 export function p2trScript(outputKey: Uint8Array): Uint8Array {
   if (outputKey.length !== 32) throw new Error('p2trScript: an output key is 32 bytes')
   return concatBytes(Uint8Array.of(0x51, 0x20), outputKey)
 }
 
-/**
- * vsize = ceil((base*3 + total) / 4), from the real serialisation so it tracks
- * each leaf's witness shape. Leaf D has one signature fewer than leaf A, with
- * the same control block size.
- */
 export function vsize(tx: Tx): number {
   const base = serializeUnsigned(tx).length
   const total = serializeSigned(tx).length

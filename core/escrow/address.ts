@@ -1,26 +1,9 @@
-/**
- * Payout address decoding. Every payout goes to an address someone pasted, so
- * the checksum is always verified and anything we can't vouch for is refused.
- *
- *   bech32   (BIP-173)  witness v0: P2WPKH `bc1q…` (20 bytes), P2WSH (32 bytes)
- *   bech32m  (BIP-350)  witness v1: P2TR `bc1p…` (32 bytes)
- *   base58check         P2PKH `1…` / `m…` `n…`, P2SH `3…` / `2…`
- *
- * v0 must be bech32 and v1 bech32m. A v1 program under bech32 reopens the
- * length-extension weakness BIP-350 closed. Versions 2 to 16 decode but are
- * refused, since anyone can spend them until a soft fork defines them.
- */
-
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bech32, bech32m, createBase58check } from '@scure/base'
 import { NETWORK_HRP, type NetworkName } from './tree.js'
 
 export type AddressType = 'p2pkh' | 'p2sh' | 'p2wpkh' | 'p2wsh' | 'p2tr'
 
-/**
- * `test` is testnet or signet (and regtest's base58 forms). They share the `tb`
- * prefix and base58 version bytes, so the string alone can't tell them apart.
- */
 export type AddressChain = 'mainnet' | 'test' | 'regtest'
 
 export interface DecodedAddress {
@@ -39,9 +22,12 @@ const BASE58_VERSIONS: Readonly<Record<number, { type: 'p2pkh' | 'p2sh'; chain: 
   0xc4: { type: 'p2sh', chain: 'test' },
 }
 
-const HRP_CHAIN: Readonly<Record<string, AddressChain>> = { bc: 'mainnet', tb: 'test', bcrt: 'regtest' }
+const HRP_CHAIN: ReadonlyMap<string, AddressChain> = new Map<string, AddressChain>([
+  ['bc', 'mainnet'],
+  ['tb', 'test'],
+  ['bcrt', 'regtest'],
+])
 
-/** Wallets copy either a `bitcoin:` URI or a bare address. Accept both. */
 function stripUri(input: string): string {
   let s = input.trim()
   if (/^bitcoin:/i.test(s)) s = s.slice('bitcoin:'.length)
@@ -56,7 +42,7 @@ function decodeSegwit(address: string): DecodedAddress | undefined {
   const decoded = asBech32 ?? asBech32m
   if (!decoded) return undefined
 
-  const chain = HRP_CHAIN[decoded.prefix]
+  const chain = HRP_CHAIN.get(decoded.prefix)
   if (!chain) throw new Error(`"${decoded.prefix}1…" is not a bitcoin address prefix; expected bc1, tb1 or bcrt1.`)
 
   const [version, ...rest] = decoded.words
@@ -100,10 +86,6 @@ function decodeBase58(address: string): DecodedAddress | undefined {
   return { type: kind.type, chain: kind.chain, scriptPubKey }
 }
 
-/**
- * Decode any standard address, checksum verified. Throws with a reason a
- * person can act on.
- */
 export function decodeAddress(input: string): DecodedAddress {
   const address = stripUri(String(input))
   if (!address) throw new Error('Enter an address.')
@@ -114,7 +96,6 @@ export function decodeAddress(input: string): DecodedAddress {
   const legacy = decodeBase58(address)
   if (legacy) return legacy
 
-  // Nothing decoded. Say whether it looked like bech32, so the fix is obvious.
   if (/^(bc|tb|bcrt)1/i.test(address)) {
     throw new Error('That address fails its checksum: a character is wrong or missing. Copy it again from your wallet.')
   }
@@ -125,11 +106,7 @@ export function chainOf(network: NetworkName): AddressChain {
   return network === 'mainnet' ? 'mainnet' : network === 'regtest' ? 'regtest' : 'test'
 }
 
-/**
- * scriptPubKey for an address that must be on `network`. A cross-network
- * address decodes fine and pays somewhere the person's wallet isn't looking,
- * so it's refused.
- */
+/** scriptPubKey for an address that must be on `network`. */
 export function addressToScript(input: string, network: NetworkName): Uint8Array {
   const decoded = decodeAddress(input)
   // Regtest base58 uses the test version bytes, so it can only decode as "test".

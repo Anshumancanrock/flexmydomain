@@ -1,13 +1,3 @@
-/**
- * Spending an escrow output: build, sign, finalise. web/recover.html uses it to
- * rebuild the tree, sign a leaf D sweep and print raw hex, offline.
- *
- * Witness is [...signatures, script, controlBlock], signatures in the order the
- * script consumes them. For `and_v(v:pk(A), pk(B))` that's B's at the bottom and
- * A's on top. buildTree records this in `leaf.signatureOrder` and we only read
- * it, so the two can't disagree.
- */
-
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import {
@@ -31,23 +21,17 @@ export interface EscrowOutpoint {
 }
 
 export interface SpendDestination {
-  /** Either a 32-byte taproot output key or a raw scriptPubKey. */
   outputKey?: Uint8Array
   scriptPubKey?: Uint8Array
   amountSats: bigint
 }
 
-/**
- * Build the unsigned settlement tx. One input only. Extra payments to the same
- * address aren't summed, since each input multiplies the signing work. The fee
- * is input minus outputs, and outputs above the input are refused before signing.
- */
+/** Build the unsigned settlement tx. One input only. */
 export function buildSpend(params: {
   tree: EscrowTree
   leaf: EscrowLeaf
   outpoint: EscrowOutpoint
   destinations: SpendDestination[]
-  /** Absolute locktime, always 0 here. */
   lockTime?: number
 }): Tx {
   const { tree, leaf, outpoint } = params
@@ -57,10 +41,16 @@ export function buildSpend(params: {
   const outputs: TxOutput[] = params.destinations.map((d) => {
     const scriptPubKey = d.scriptPubKey ?? (d.outputKey ? p2trScript(d.outputKey) : undefined)
     if (!scriptPubKey) throw new Error('buildSpend: every destination needs an output key or a scriptPubKey')
+    // Paying the escrow back to itself burns the fee and restarts the timelock.
+    if (bytesToHex(scriptPubKey) === bytesToHex(tree.scriptPubKey)) {
+      throw new Error('buildSpend: that is the escrow address itself; pay out to an address you control')
+    }
     if (d.amountSats <= 0n) throw new Error('buildSpend: a destination amount must be positive')
-    // Below dust the output is unspendable and most nodes won't relay the tx.
-    // 330 sats is the P2TR threshold.
-    if (d.amountSats < 330n) throw new Error(`buildSpend: ${d.amountSats} sats is below the P2TR dust limit of 330`)
+    // Below dust the output is unspendable and nodes won't relay the tx.
+    const dust = dustThreshold(scriptPubKey)
+    if (d.amountSats < dust) {
+      throw new Error(`buildSpend: ${d.amountSats} sats is below the dust limit of ${dust} for this kind of address`)
+    }
     return { amountSats: d.amountSats, scriptPubKey }
   })
 
@@ -74,18 +64,25 @@ export function buildSpend(params: {
     vout: outpoint.vout,
     amountSats: outpoint.amountSats,
     scriptPubKey: tree.scriptPubKey,
-    /* From the leaf. Leaf D's holds the CSV lock, the 2-of-2 leaves signal RBF. */
     sequence: leaf.sequence,
   }
 
   return { version: tree.txVersion, inputs: [input], outputs, lockTime: params.lockTime ?? 0 }
 }
 
-/**
- * Fee paid and sats per vbyte. An unsigned tx is sized with its leaf's witness,
- * so `leaf` is required until it's finalised. The internal key is NUMS, so every
- * spend is script-path: signatures, leaf script, control block.
- */
+export function dustThreshold(scriptPubKey: Uint8Array): bigint {
+  const length = scriptPubKey.length
+  const outputSize = 8 + (length < 0xfd ? 1 : 3) + length
+  const witnessProgram =
+    length >= 4 &&
+    length <= 42 &&
+    (scriptPubKey[0] === 0x00 || (scriptPubKey[0] >= 0x51 && scriptPubKey[0] <= 0x60)) &&
+    scriptPubKey[1] + 2 === length
+  const inputSize = witnessProgram ? 32 + 4 + 1 + Math.floor(107 / 4) + 4 : 32 + 4 + 1 + 107 + 4
+  return BigInt((outputSize + inputSize) * 3)
+}
+
+/** Fee paid and sats per vbyte. */
 export function feeOf(
   tx: Tx,
   finalised: boolean,
@@ -103,11 +100,7 @@ export function feeOf(
   return { sats, vbytes, satsPerVbyte: Number(sats) / vbytes }
 }
 
-/**
- * The leaf's witness with zeroed signatures, to size the fee before signing.
- * Exact, since SIGHASH_DEFAULT Schnorr signatures are always 64 bytes. A wrong
- * estimate means re-signing with every party.
- */
+/** The leaf's witness with zeroed signatures, to size the fee before signing. */
 function withPlaceholderWitness(tx: Tx, leaf: EscrowLeaf): Tx {
   const shaped = [...leaf.signatureOrder.map(() => new Uint8Array(64)), leaf.script, leaf.controlBlock]
   return {
@@ -116,20 +109,12 @@ function withPlaceholderWitness(tx: Tx, leaf: EscrowLeaf): Tx {
   }
 }
 
-/**
- * The message one party signs for this leaf. Separate because the parties sign
- * at different times on different machines. The buyer can sign and send back 64
- * bytes without the seller's key or the finished tx.
- */
+/** The message one party signs for this leaf. Separate because the parties sign at different times on different machines. */
 export function sighashFor(tx: Tx, leaf: EscrowLeaf, inputIndex = 0): Uint8Array {
   return taprootSighash({ tx, inputIndex, leafHash: leaf.hash, hashType: SIGHASH_DEFAULT })
 }
 
-/**
- * Sign for one party. `auxRand` is BIP-340 aux randomness. Pass 32 bytes for a
- * reproducible signature (the test vectors do), or omit it to let @noble use
- * the platform CSPRNG, the right default for real signatures.
- */
+/** Sign for one party. `auxRand` is BIP-340 aux randomness. */
 export function signSpend(params: {
   tx: Tx
   leaf: EscrowLeaf
@@ -143,21 +128,16 @@ export function signSpend(params: {
     : schnorr.sign(digest, params.secretKey)
 }
 
-/**
- * x-only pubkey for an escrow secret key. Nobody can derive the address alone,
- * so the parties swap these first.
- */
+/** x-only pubkey for an escrow secret key. Nobody can derive the address alone, so the parties swap these first. */
 export function escrowPublicKey(secretKey: Uint8Array): Uint8Array {
   if (secretKey.length !== 32) throw new Error('escrowPublicKey: a secret key is 32 bytes')
   return schnorr.getPublicKey(secretKey)
 }
 
-/** Lowercase hex, the form a user copies and pastes. */
 export function escrowPublicKeyHex(secretKey: Uint8Array): string {
   return bytesToHex(escrowPublicKey(secretKey))
 }
 
-/** Check one party's signature without assembling the witness. */
 export function verifySpendSignature(params: {
   tx: Tx
   leaf: EscrowLeaf
@@ -172,16 +152,10 @@ export function verifySpendSignature(params: {
   }
 }
 
-/**
- * Assemble the witness and return a broadcastable tx. Every signature is checked
- * against the key the script expects first. A bad one looks fine until a node
- * rejects it, and by then the parties may have stopped watching.
- */
 export function finaliseSpend(params: {
   tree: EscrowTree
   leaf: EscrowLeaf
   tx: Tx
-  /** One per party the leaf requires. */
   signatures: Partial<Record<PartyRole, Uint8Array>>
   inputIndex?: number
 }): { tx: Tx; hex: string; txid: string; vbytes: number } {
@@ -194,7 +168,6 @@ export function finaliseSpend(params: {
     arbiter: tree.params.arbiter,
   }
 
-  /* Bottom of stack first, the order the script consumes them. */
   const witness: Uint8Array[] = []
   for (const role of leaf.signatureOrder) {
     const signature = params.signatures[role]
@@ -232,11 +205,6 @@ export function finaliseSpend(params: {
   }
 }
 
-/**
- * Build, sign with every key given, finalise, all on one machine. For the
- * timeout sweep (one key) and tests. Cooperative spends are signed separately
- * by buyer and seller, who exchange 64-byte signatures.
- */
 export function spendWith(params: {
   tree: EscrowTree
   leaf: EscrowLeaf
