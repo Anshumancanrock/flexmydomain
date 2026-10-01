@@ -1,17 +1,3 @@
-/**
- * core/escrow: the taproot escrow tree and addresses, spending, the recovery
- * string, and the registrar-transfer checks that gate funding and release.
- *
- * Identical bytes under Bun and in a file:// page. Uint8Array in, Uint8Array
- * out. No Buffer, node:*, fetch, clock, randomness or config. Specifiers end in
- * .js so they stay valid if the sources are compiled to plain .js.
- *
- *   const tree = buildTree({ buyer, seller, arbiter, timeoutTo: 'buyer', timeoutBlocks: 4320 })
- *   tree.addresses.signet       // fund this
- *   tree.leaves.A.controlBlock  // spend with this
- *   tree.leaves.A.witnessStack  // in this order
- */
-
 export {
   TAG_TAPLEAF,
   TAG_TAPBRANCH,
@@ -42,7 +28,9 @@ export {
 } from './script.js'
 
 export {
+  bindingInternalKey,
   numsInternalKey,
+  BINDING_TAG,
   NUMS_INTERNAL_KEY_HEX,
   NETWORK_HRP,
   buildTree,
@@ -87,6 +75,7 @@ export type { Recovery } from './recovery.js'
 
 export {
   buildSpend,
+  dustThreshold,
   escrowPublicKey,
   escrowPublicKeyHex,
   feeOf,
@@ -99,25 +88,32 @@ export {
 export type { EscrowOutpoint, SpendDestination } from './spend.js'
 
 export {
-  MIN_POLL_GAP_SECONDS,
-  REQUIRED_AGREEING_POLLS,
-  buildCommitment,
-  deriveTransferState,
-  fundable,
-  registrantActed,
-  releasable,
-  transferAllowed,
-  usable,
-} from './transfer.js'
-export type { Observation, TransferCommitment, TransferState, TransferVerdict } from './transfer.js'
+  MAX_FEE_RATE,
+  PROPOSER,
+  SETTLEMENT_LEAVES,
+  collectSettlements,
+  completeSettlement,
+  leafOfWitness,
+  proposalOf,
+  roleOf,
+  settlementFee,
+  settlementKey,
+  settlementProblem,
+  settlementTx,
+  signSettlement,
+  signersOf,
+  verifySettlement,
+} from './settle.js'
+export type { BoardEntry, Settlement, SettlementKind, SettlementLeaf, SignedSettlement } from './settle.js'
+
+export { SPACESHIP_IANA_ID, TRANSFER_LOCK_DAYS, normaliseAccount, registrarFindings } from './registrar.js'
+
+export { MIN_ARBITER_BLOCKS, SITE_RULES, arbiterRule, deadlines, rulesProblem } from './trade.js'
+export type { Deadlines, RuleAction, RuleVerdict, Stage, TradeFacts, TradeRules } from './trade.js'
 
 import { bytesToHex } from '@noble/hashes/utils.js'
 import type { EscrowTree } from './tree.js'
 
-/**
- * Every derived value as hex, for the escrow page's derivation panel and for
- * anyone auditing an escrow. Display only, the bytes stay the source of truth.
- */
 export function describeTree(tree: EscrowTree): {
   shape: string
   internalKey: string
