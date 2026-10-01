@@ -1,5 +1,4 @@
 // Payout address decoding (core/escrow/address.ts), checked byte for byte against @scure/btc-signer.
-// Bad inputs are built in code. A hand-copied invalid vector with a typo would fail for the wrong reason.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -10,31 +9,30 @@ import { addressToScript, decodeAddress } from '../../core/escrow/address.js'
 
 const REGTEST = { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
 
-/** btc-signer's scriptPubKey for the address, as hex. */
 function reference(address: string, network: typeof btc.NETWORK): string {
   return bytesToHex(btc.OutScript.encode(btc.Address(network).decode(address)))
 }
 
 const program = (n: number, fill: number) => new Uint8Array(n).fill(fill)
-/** btc-signer refuses a taproot program that isn't a real x-only key. */
+// btc-signer refuses a taproot program that isn't a real x-only key.
 const xonly = (fill: number) => schnorr.getPublicKey(program(32, fill))
 const segwit = (coder: typeof bech32, hrp: string, version: number, bytes: Uint8Array) =>
   coder.encode(hrp, [version, ...coder.toWords(bytes)])
 
-/** Change one data character to another valid one. */
+// One data character changed to another valid one.
 function typo(address: string): string {
   const i = address.length - 10
   const swap = address[i] === 'q' ? 'p' : 'q'
   return address.slice(0, i) + swap + address.slice(i + 1)
 }
 
+// Built in code, not copied: a typo in a hand-copied vector would fail for the wrong reason.
 const P2WPKH_MAIN = segwit(bech32, 'bc', 0, program(20, 0x11))
 const P2WSH_TEST = segwit(bech32, 'tb', 0, program(32, 0x22))
 const P2TR_MAIN = segwit(bech32m, 'bc', 1, xonly(0x33))
 const P2TR_TEST = segwit(bech32m, 'tb', 1, xonly(0x44))
 const P2TR_REGTEST = segwit(bech32m, 'bcrt', 1, xonly(0x55))
 
-// Base58 addresses built from hashes, not copied from memory.
 const P2PKH_MAIN = btc.Address(btc.NETWORK).encode({ type: 'pkh', hash: program(20, 0x66) })
 const P2SH_MAIN = btc.Address(btc.NETWORK).encode({ type: 'sh', hash: program(20, 0x77) })
 const P2PKH_TEST = btc.Address(btc.TEST_NETWORK).encode({ type: 'pkh', hash: program(20, 0x88) })
@@ -131,4 +129,32 @@ describe('the network must match the escrow', () => {
     expect(addressToScript(P2PKH_TEST, 'regtest')).toBeInstanceOf(Uint8Array)
     expect(() => addressToScript(P2TR_TEST, 'regtest')).toThrow()
   })
+})
+
+test('a prefix every object inherits is still not a bitcoin prefix', () => {
+  for (const hrp of ['constructor', '__proto__', 'tostring']) {
+    const address = segwit(bech32m, hrp, 1, xonly(0x12))
+    expect(() => decodeAddress(address)).toThrow(/not a bitcoin address prefix/)
+  }
+})
+
+test('a recovery string with a flag this code does not know is refused, not half read', async () => {
+  const { encodeRecovery, decodeRecovery } = await import('../../core/escrow/recovery.js')
+  const { base64urlnopad } = await import('@scure/base')
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const sk = new Uint8Array(32).fill(3)
+  const good = encodeRecovery({
+    version: 1, secretKey: sk, buyer: xonly(0x31), seller: xonly(0x32), timeoutTo: 'buyer', timeoutBlocks: 144,
+  })
+  expect(decodeRecovery(good).ok).toBe(true)
+
+  // Bit 4 set, with a fresh checksum. Bits 0 to 3 are taken.
+  const prefix = good.slice(0, good.indexOf('1') + 1)
+  const bytes = base64urlnopad.decode(good.slice(prefix.length))
+  const payload = bytes.slice(0, bytes.length - 4)
+  payload[1] |= 0b1_0000
+  const tampered = prefix + base64urlnopad.encode(new Uint8Array([...payload, ...sha256(payload).slice(0, 4)]))
+  const r = decodeRecovery(tampered)
+  expect(r.ok).toBe(false)
+  if (!r.ok) expect(r.reason).toContain('newer format')
 })

@@ -1,5 +1,4 @@
-// core/escrow vectors. Two key sets, five variants each, every derived byte diffed against
-// @scure/btc-signer. core/escrow doesn't import that library, so the derivations are independent.
+// core/escrow vectors. Every derived byte is diffed against @scure/btc-signer, which core/escrow doesn't import.
 
 import { test, expect, describe } from 'bun:test'
 import { readFileSync } from 'node:fs'
@@ -49,26 +48,24 @@ function secretInt(n: number): Uint8Array {
   return b
 }
 
-/** Key set 1, private keys 1, 2, 3. buyer is the generator's x-coordinate. */
+// Private keys 1, 2, 3, so buyer is the generator's x-coordinate.
 const K1 = {
   buyer: schnorr.getPublicKey(secretInt(1)),
   seller: schnorr.getPublicKey(secretInt(2)),
   arbiter: schnorr.getPublicKey(secretInt(3)),
 }
 
-/** Key set 2, private keys 0x11.., 0x22.., 0x33.. */
 const K2 = {
   buyer: schnorr.getPublicKey(secret(0x11)),
   seller: schnorr.getPublicKey(secret(0x22)),
   arbiter: schnorr.getPublicKey(secret(0x33)),
 }
 
-/** @scure/btc-signer ships no regtest constant. BIP-350 gives the HRP. */
+// @scure/btc-signer ships no regtest network constant.
 const REGTEST = { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
 
 describe('BIP-341 tagged hashes', () => {
-  // Pinned because a wrong tag still hashes and encodes an address. It fails only at
-  // spend time, after coins are locked.
+  // Pinned: a wrong tag still gives an address, and fails only at spend time with coins locked.
   test('the three tag digests are pinned', () => {
     expect(hex(sha256(utf8ToBytes('TapLeaf')))).toBe(
       'aeea8fdc4208983105734b58081d1e2638d35f1cb54008d4d357ca03be78e9ee',
@@ -86,11 +83,9 @@ describe('BIP-341 tagged hashes', () => {
     expect(hex(taggedHash('TapLeaf', msg))).toBe(hex(schnorr.utils.taggedHash('TapLeaf', msg)))
     expect(hex(taggedHash('TapBranch', msg))).toBe(hex(schnorr.utils.taggedHash('TapBranch', msg)))
     expect(hex(taggedHash('TapTweak', msg))).toBe(hex(schnorr.utils.taggedHash('TapTweak', msg)))
-    // Varargs concatenate in order.
     const a = hexToBytes('0102')
     const b = hexToBytes('0304')
     expect(hex(taggedHash('TapBranch', a, b))).toBe(hex(taggedHash('TapBranch', concatBytes(a, b))))
-    // Single-prefixing gives a different digest, the bug this pins.
     const p = sha256(utf8ToBytes('TapLeaf'))
     expect(hex(taggedHash('TapLeaf', msg))).not.toBe(hex(sha256(concatBytes(p, msg))))
   })
@@ -128,7 +123,6 @@ describe('BIP-341 tagged hashes', () => {
     expect(() => tapLeafHash(s, 0xc1)).toThrow(/even/)
     expect(() => tapLeafHash(s, 0x50)).toThrow(/annex/)
 
-    // Same accept and reject rule as @scure/btc-signer.
     for (const v of [0x00, 0xc0, 0xfe]) {
       expect(`${v}:${hex(tapLeafHash(s, v))}`).toBe(`${v}:${hex(scureTapLeafHash(s, v))}`)
     }
@@ -171,8 +165,7 @@ describe('CScriptNum and minimal pushes', () => {
   })
 
   test('a magnitude with the top bit set gets a 0x00 sign byte', () => {
-    // Core reads an unpadded 0x80-topped payload as negative. CSV rejects that, locking
-    // the timeout path forever.
+    // Unpadded, Core reads it as negative and CSV fails, locking the timeout path forever.
     expect(hex(scriptNum(127))).toBe('7f')
     expect(hex(scriptNum(128))).toBe('8000')
     expect(hex(scriptNum(255))).toBe('ff00')
@@ -399,7 +392,6 @@ const VECTORS: Vector[] = [
     regtest: 'bcrt1psse6y7u4sf3fa54wdqygqzczz273czs9602auyrurw3vxm7y7r6qlnndm8',
     controlBlockLength: 65,
   },
-  // Key set 2, same four variants.
   {
     name: 'V6 keyset2 arbiter timeoutTo=buyer 1008',
     params: { ...K2, timeoutTo: 'buyer', timeoutBlocks: 1008 },
@@ -502,12 +494,8 @@ describe('reference vectors', () => {
   })
 })
 
-/**
- * The same tree via @scure/btc-signer, nested by hand. Its taprootListToTree is a Huffman
- * builder that returns leaves as C,D,A,B and skews any tree without four equal weights.
- * p2tr sends any array whose length isn't 2 through it, so a flat [A,B,C,D] won't do.
- * allowUnknownOutputs=true because p2tr reads the CSV leaf as 'unknown' and throws.
- */
+// Nested by hand: p2tr sends any array whose length isn't 2 through taprootListToTree, which
+// reorders the leaves. The last true is allowUnknownOutputs, since p2tr calls the CSV leaf unknown.
 function libraryTree(p: BuildTreeParams, network: typeof REGTEST) {
   const A = { script: cooperativeLeaf(p.buyer, p.seller) }
   const D = { script: timeoutLeaf(p.timeoutBlocks, p.timeoutTo === 'buyer' ? p.buyer : p.seller) }
@@ -538,7 +526,7 @@ describe('differential against @scure/btc-signer', () => {
         mine.addresses.testnet,
       )
 
-      // Match leaves by script bytes. The library orders them by its own tree walk.
+      // Matched by script bytes, since the library orders leaves by its own tree walk.
       expect(theirs.leaves!.length).toBe(mine.leafList.length)
       for (const leaf of mine.leafList) {
         const match = theirs.leaves!.filter((l) => hex(l.script) === hex(leaf.script))
@@ -578,7 +566,6 @@ describe('differential against @scure/btc-signer', () => {
     // Four equal weights give a balanced shape, and TapBranch sorts each pair.
     expect(listBuilt.address).toBe(mine.addresses.regtest)
     expect(hex(listBuilt.tweakedPubkey)).toBe(hex(mine.outputKey))
-    // But leaves[0] is not leaf A.
     const listOrder = listBuilt.leaves!.map((l) => hex(l.script))
     const myOrder = mine.leafList.map((l) => hex(l.script))
     expect(listOrder).not.toEqual(myOrder)
@@ -620,7 +607,6 @@ describe('control blocks', () => {
     })
     expect(two.leafList.map((l) => l.controlBlock.length)).toEqual([65, 65])
     expect(two.leafList.map((l) => l.merklePath.length)).toEqual([1, 1])
-    // 33 + 32*depth, both shapes.
     for (const t of [four, two]) {
       for (const l of t.leafList) {
         expect(l.controlBlock.length).toBe(33 + 32 * l.merklePath.length)
@@ -744,7 +730,6 @@ describe('witness stack order', () => {
       'control_block',
     ])
     expect(t.leaves.D!.witnessStack).toEqual(['sig_buyer', 'script_D', 'control_block'])
-    // signatureOrder is scriptKeyOrder reversed.
     expect(t.leaves.A!.scriptKeyOrder).toEqual(['buyer', 'seller'])
     expect(t.leaves.A!.signatureOrder).toEqual(['seller', 'buyer'])
   })
@@ -756,7 +741,6 @@ describe('witness stack order', () => {
     expect(toSeller.leaves.D!.witnessStack[0]).toBe('sig_seller')
     expect(hex(toBuyer.leaves.D!.script).includes(hex(K1.buyer))).toBe(true)
     expect(hex(toSeller.leaves.D!.script).includes(hex(K1.seller))).toBe(true)
-    // A/B/C are byte-identical across stages. Only D changes.
     for (const n of ['A', 'B', 'C'] as LeafName[]) {
       expect(hex(toBuyer.leaves[n]!.script)).toBe(hex(toSeller.leaves[n]!.script))
     }
@@ -768,8 +752,7 @@ describe('witness stack order', () => {
     expect(t.leaves.A!.sequence).toBe(RBF_SEQUENCE)
     expect(t.leaves.B!.sequence).toBe(RBF_SEQUENCE)
     expect(t.leaves.C!.sequence).toBe(RBF_SEQUENCE)
-    // nSequence is the lock itself. Bits 31 (disable) and 22 (512s units) must be clear,
-    // so 0xfffffffd is out on this input.
+    // Bits 31 (disable) and 22 (512s units) must be clear, so 0xfffffffd can't be used here.
     expect(t.leaves.D!.sequence).toBe(4320)
     expect(t.leaves.D!.sequence & 0x80000000).toBe(0)
     expect(t.leaves.D!.sequence & 0x00400000).toBe(0)
@@ -995,11 +978,9 @@ describe('input validation', () => {
   })
 
   test('a rejected timeoutBlocks is rendered so a string cannot pass for a number', () => {
-    // JSON paths can deliver "4320" as a string. Unquoted, the error would read
-    // "expected an integer, got 4320", which contradicts itself.
+    // JSON can deliver "4320" as a string. Unquoted, "expected an integer, got 4320" contradicts itself.
     expect(() => buildTree({ ...base, timeoutBlocks: '4320' as never })).toThrow(/got "4320"/)
     expect(() => buildTree({ ...base, timeoutBlocks: true as never })).toThrow(/got true/)
-    // Real numbers stay unquoted.
     expect(() => buildTree({ ...base, timeoutBlocks: 4320.5 })).toThrow(/got 4320\.5/)
     // Plain JSON.stringify gives `null` for NaN and Infinity and throws on BigInt.
     expect(() => buildTree({ ...base, timeoutBlocks: NaN })).toThrow(/got NaN/)
@@ -1062,7 +1043,6 @@ describe('tree shape', () => {
     expect(hex(again.tweak)).toBe(hex(t.tweak))
     expect(hex(again.outputKey)).toBe(hex(t.outputKey))
     expect(again.parity).toBe(t.parity)
-    // The library's tweak helper lives on btc.utils, not the package root.
     const [libKey, libParity] = btc.utils.taprootTweakPubkey(numsInternalKey(), t.merkleRoot)
     expect(hex(libKey)).toBe(hex(t.outputKey))
     expect(libParity).toBe(t.parity)

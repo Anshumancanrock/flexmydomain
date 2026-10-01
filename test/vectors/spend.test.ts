@@ -1,5 +1,4 @@
-// Escrow spends (serialisation, BIP-341 sighash, witness). Every byte is diffed against
-// @scure/btc-signer, which core/escrow doesn't import. test/regtest/e2e.test.ts checks against Core.
+// Escrow spends (serialisation, BIP-341 sighash, witness), diffed byte for byte against @scure/btc-signer.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
@@ -9,6 +8,7 @@ import * as btc from '@scure/btc-signer'
 import {
   buildSpend,
   buildTree,
+  dustThreshold,
   feeOf,
   finaliseSpend,
   p2trScript,
@@ -68,7 +68,6 @@ const spendFor = (tree: EscrowTree, name: 'A' | 'B' | 'C' | 'D'): { tx: Tx; leaf
 }
 
 describe('differential against @scure/btc-signer', () => {
-  /** The same spend, built with scure. */
   function scureTx(tree: EscrowTree, leafScript: Uint8Array, sequence: number) {
     const payment = btc.p2tr(
       undefined,
@@ -230,8 +229,8 @@ describe('serialisation', () => {
     expect(estimate.vbytes).toBeGreaterThan(0)
   })
 
-  /* No key path here. Sizing for a 64-byte key-path witness under-counts every spend (about a
-     third for the cooperative leaf), so the fee would pay less than the rate shown. */
+  // There is no key path. Sizing for a 64-byte key-path witness under-counts every spend (by about
+  // a third for leaf A), so the fee would pay less than the rate shown.
   test('the unsigned estimate equals the signed size exactly, for every leaf', () => {
     for (const name of ['A', 'B', 'C', 'D'] as const) {
       const leaf = TREE.leaves[name]
@@ -292,7 +291,6 @@ describe('witness assembly', () => {
 describe('what must not work', () => {
   test('the arbiter cannot spend alone through any leaf', () => {
     for (const leaf of TREE.leafList) {
-      // Every leaf that names the arbiter also names a party.
       if (leaf.signatureOrder.includes('arbiter')) {
         expect(leaf.signatureOrder.length).toBeGreaterThan(1)
       }
@@ -309,8 +307,7 @@ describe('what must not work', () => {
   })
 
   test('a signature for one leaf does not work on another', () => {
-    // A and B both hold the seller's key. Without the leaf hash in the sighash a signature
-    // would replay between them.
+    // A and B both hold the seller's key, so only the leaf hash in the sighash stops a replay.
     const leafA = TREE.leaves.A
     const leafB = TREE.leaves.B as NonNullable<typeof TREE.leaves.B>
     const tx = buildSpend({ tree: TREE, leaf: leafA, outpoint: OUTPOINT, destinations: DESTINATIONS })
@@ -369,6 +366,35 @@ describe('what must not work', () => {
         destinations: [{ outputKey: PAYOUT_KEY, amountSats: 300n }],
       }),
     ).toThrow(/dust/)
+  })
+
+  test("the dust limit is Bitcoin Core's for each kind of output", () => {
+    const hash20 = new Uint8Array(20).fill(7)
+    const hash32 = new Uint8Array(32).fill(7)
+    const scripts: [string, Uint8Array, bigint][] = [
+      ['p2pkh', new Uint8Array([0x76, 0xa9, 0x14, ...hash20, 0x88, 0xac]), 546n],
+      ['p2sh', new Uint8Array([0xa9, 0x14, ...hash20, 0x87]), 540n],
+      ['p2wpkh', new Uint8Array([0x00, 0x14, ...hash20]), 294n],
+      ['p2wsh', new Uint8Array([0x00, 0x20, ...hash32]), 330n],
+      ['p2tr', new Uint8Array([0x51, 0x20, ...hash32]), 330n],
+    ]
+    for (const [, script, limit] of scripts) expect(dustThreshold(script)).toBe(limit)
+
+    // 400 sats is fine for taproot and dust for a legacy address, which no node would relay.
+    const legacy = scripts[0][1]
+    expect(() =>
+      buildSpend({ tree: TREE, leaf: TREE.leaves.A, outpoint: OUTPOINT, destinations: [{ scriptPubKey: legacy, amountSats: 400n }] }),
+    ).toThrow(/dust limit of 546/)
+    expect(() =>
+      buildSpend({ tree: TREE, leaf: TREE.leaves.A, outpoint: OUTPOINT, destinations: [{ outputKey: PAYOUT_KEY, amountSats: 400n }] }),
+    ).not.toThrow()
+  })
+
+  test('paying the escrow back to itself is refused', () => {
+    // It would burn the fee and restart the timelock, with the other leaves live again meanwhile.
+    expect(() =>
+      buildSpend({ tree: TREE, leaf: TREE.leaves.D, outpoint: OUTPOINT, destinations: [{ scriptPubKey: TREE.scriptPubKey, amountSats: 2_499_000n }] }),
+    ).toThrow(/escrow address itself/)
   })
 
   test('a missing signature names the party that owes one', () => {
