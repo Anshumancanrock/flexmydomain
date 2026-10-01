@@ -23,7 +23,6 @@ export interface RegtestNode {
 const USER = 'fmd'
 const PASS = 'fmd-regtest-throwaway'
 
-/** Start a node and wait until it answers. */
 export async function startRegtest(port = 18999): Promise<RegtestNode> {
   const datadir = mkdtempSync(join(tmpdir(), 'fmd-regtest-'))
   mkdirSync(join(datadir, 'regtest'), { recursive: true })
@@ -61,7 +60,6 @@ export async function startRegtest(port = 18999): Promise<RegtestNode> {
     return body.result as T
   }
 
-  // Cold start takes a second or two.
   const deadline = Date.now() + 30_000
   for (;;) {
     try {
@@ -94,7 +92,6 @@ export async function startRegtest(port = 18999): Promise<RegtestNode> {
   }
 }
 
-/** Wallet with spendable coins. */
 export async function fundedWallet(node: RegtestNode, name = 'fmd', port = 18999): Promise<{
   address: string
   send(to: string, btc: number): Promise<string>

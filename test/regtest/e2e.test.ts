@@ -1,5 +1,4 @@
-// Every escrow leaf, spent on regtest so Bitcoin Core's consensus rules judge the witness.
-// Parity with @scure/btc-signer lives in test/vectors/spend.test.ts. Slow: `bun run test:regtest`.
+// Every escrow leaf spent on regtest, so Bitcoin Core's consensus rules judge the witness.
 
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -25,7 +24,7 @@ const SELLER = secret(0x22)
 const ARBITER = secret(0x33)
 const KEYS = { buyer: BUYER, seller: SELLER, arbiter: ARBITER }
 
-/** Quick to mine through, still a real timelock. */
+// Quick to mine through, still a real timelock.
 const TIMEOUT_BLOCKS = 20
 const FUND_BTC = 0.01
 const FUND_SATS = 1_000_000n
@@ -49,7 +48,6 @@ afterAll(async () => {
   await node?.stop()
 })
 
-/** Fund the escrow address and return the outpoint. */
 async function fund(tree: EscrowTree): Promise<{ txid: string; vout: number; amountSats: bigint }> {
   const address = tree.addresses.regtest
 
@@ -106,13 +104,13 @@ describe.skipIf(!haveBitcoind)('the four-leaf tree, against consensus', () => {
     expect(result.accepted).toBe(true)
   }, 60_000)
 
-  test('leaf B (dispute resolved for the seller): arbiter and seller', async () => {
+  test('leaf B (the arbiter pays the seller): arbiter and seller', async () => {
     const outpoint = await fund(tree)
     const result = await broadcast(spend(tree, tree.leaves.B as EscrowLeaf, outpoint).hex)
     expect(result.reason ?? 'accepted').toBe('accepted')
   }, 60_000)
 
-  test('leaf C (dispute resolved for the buyer): arbiter and buyer', async () => {
+  test('leaf C (the arbiter refunds the buyer): arbiter and buyer', async () => {
     const outpoint = await fund(tree)
     const result = await broadcast(spend(tree, tree.leaves.C as EscrowLeaf, outpoint).hex)
     expect(result.reason ?? 'accepted').toBe('accepted')
@@ -122,7 +120,6 @@ describe.skipIf(!haveBitcoind)('the four-leaf tree, against consensus', () => {
     const outpoint = await fund(tree)
     const sweep = spend(tree, tree.leaves.D, outpoint)
 
-    // The same tx Core refuses now must pass unchanged after the timelock.
     const early = await broadcast(sweep.hex)
     expect(early.accepted).toBe(false)
     expect(early.reason).toMatch(/non-BIP68|Locktime|final/i)
@@ -145,7 +142,6 @@ describe.skipIf(!haveBitcoind)('the four-leaf tree, against consensus', () => {
         destinations: [{ scriptPubKey: payoutScript, amountSats: outpoint.amountSats - FEE_SATS }],
       })
 
-      // finaliseSpend knows which signatures the leaf needs.
       expect(() =>
         finaliseSpend({
           tree,

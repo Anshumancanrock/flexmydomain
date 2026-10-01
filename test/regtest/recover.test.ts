@@ -1,5 +1,4 @@
-// recover.html end to end. Fund a regtest escrow, pass its timelock, run the page in headless
-// Chrome and broadcast what it prints. Proves users can sweep with our server off.
+// recover.html end to end: sweep a timed-out regtest escrow through the page in headless Chrome.
 
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -17,6 +16,9 @@ const xonly = (sk: Uint8Array) => schnorr.getPublicKey(sk)
 
 const BUYER = secret(0xa1)
 const SELLER = secret(0xa2)
+const ARBITER = secret(0xa3)
+// Stands in for the escrow id the pages bind each address to.
+const BINDING = secret(0xb7)
 const TIMEOUT_BLOCKS = 12
 const PORT = 18997
 
@@ -43,12 +45,15 @@ describe('recover.html', () => {
     expect(html).not.toMatch(/https?:\/\/[a-z]/i)
   })
 
-  async function sweepViaPage(withFunding: boolean) {
+  async function sweepViaPage(withFunding: boolean, bound = false) {
+    // Bound: the four-leaf tree the pages open, its internal key committing to the id.
+    const extra = bound ? { arbiter: xonly(ARBITER), binding: BINDING } : {}
     const tree = buildTree({
       buyer: xonly(BUYER),
       seller: xonly(SELLER),
       timeoutTo: 'buyer',
       timeoutBlocks: TIMEOUT_BLOCKS,
+      ...extra,
     })
 
     const fundingTxid = await wallet.send(tree.addresses.regtest, 0.01)
@@ -61,7 +66,6 @@ describe('recover.html', () => {
     const vout = raw.vout.find((o) => o.scriptPubKey.hex === bytesToHex(tree.scriptPubKey))
     expect(vout).toBeTruthy()
 
-    // The string the user writes down.
     const recovery = encodeRecovery({
       version: 1,
       secretKey: BUYER,
@@ -69,12 +73,12 @@ describe('recover.html', () => {
       seller: xonly(SELLER),
       timeoutTo: 'buyer',
       timeoutBlocks: TIMEOUT_BLOCKS,
+      ...extra,
       ...(withFunding
         ? { funding: { txid: fundingTxid, vout: (vout as { n: number }).n, amountSats: 1_000_000n } }
         : {}),
     })
 
-    // Before the timelock the sweep is valid but can't be mined.
     await wallet.mine(TIMEOUT_BLOCKS)
 
     const destination = await wallet.address
@@ -159,8 +163,11 @@ f.onload = () => setTimeout(() => {
   }, 180_000)
 
   test.skipIf(!haveBitcoind)('sweeps a real escrow from the string users save, issued before funding', async () => {
-    // Issued at creation, before funding, so it has no outpoint. The user types
-    // it in from an explorer.
+    // The string has no outpoint, so the user types it in from an explorer.
     await sweepViaPage(false)
+  }, 180_000)
+
+  test.skipIf(!haveBitcoind)('sweeps an escrow whose address is bound to its id', async () => {
+    await sweepViaPage(false, true)
   }, 180_000)
 })
