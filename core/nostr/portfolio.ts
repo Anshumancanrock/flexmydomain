@@ -1,9 +1,6 @@
-// Portfolio, NIP-78 kind 30078 with d = "fmd:portfolio". One replaceable event holds
-// every proven domain with its proof, so a flex page renders from one fetch.
-// Entries verify offline against the event pubkey. DNS says if the zone still agrees.
-// Keep those two answers apart, or a stale claim shows as verified.
+// Portfolio, NIP-78 kind 30078 with d = "fmd:portfolio".
 
-import { proofDigest, PROOF_VERSION, type ProofRecord } from '../oracle/proof.js'
+import { isValidIat, proofDigest, PROOF_VERSION, type ProofRecord } from '../oracle/proof.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
 import {
   isHex32,
@@ -18,10 +15,10 @@ export const PORTFOLIO_KIND = 30078
 export const PORTFOLIO_D = 'fmd:portfolio'
 export const PORTFOLIO_TOPIC = 'flexmydomain'
 
-/** Bump when the JSON shape changes. */
 export const PORTFOLIO_VERSION = 1
 
-/** Oracle used when the entry was added. spec/PROOF.md section 7. */
+const FIRST_REGISTRATION = 479_692_800
+
 export type ProofSource = 'dns' | 'nip05'
 
 export interface PortfolioEntry {
@@ -31,7 +28,6 @@ export interface PortfolioEntry {
   /** 64-byte BIP-340 signature, hex. Absent for NIP-05 entries. */
   sig?: string
   source: ProofSource
-  /** First proved, by the holder's own clock. */
   firstSeen: number
   tagline?: string
   /** Rendering hint only. The listing event is the truth. */
@@ -95,10 +91,6 @@ export function buildPortfolio(params: {
   }
 }
 
-/**
- * Tolerates unknown fields and a newer `v`, so old code still renders what it knows.
- * Malformed entries are dropped with a reason.
- */
 export function parsePortfolio(
   event: NostrEvent,
 ): { ok: true; portfolio: Portfolio; dropped: { entry: unknown; reason: string }[] } | { ok: false; reason: string } {
@@ -119,9 +111,10 @@ export function parsePortfolio(
   const list = Array.isArray(body.domains) ? body.domains : []
   const entries: PortfolioEntry[] = []
   const dropped: { entry: unknown; reason: string }[] = []
+  if (!Array.isArray(body.domains)) dropped.push({ entry: body.domains ?? null, reason: 'no domains list' })
 
   for (const raw of list) {
-    const entry = readEntry(raw)
+    const entry = readEntry(raw, event.created_at)
     if ('reason' in entry) dropped.push({ entry: raw, reason: entry.reason })
     else entries.push(entry.entry)
   }
@@ -138,21 +131,28 @@ export function parsePortfolio(
   }
 }
 
-function readEntry(raw: unknown): { entry: PortfolioEntry } | { reason: string } {
+function readEntry(raw: unknown, createdAt: number): { entry: PortfolioEntry } | { reason: string } {
   if (typeof raw !== 'object' || raw === null) return { reason: 'not an object' }
   const e = raw as Record<string, unknown>
 
   const domain = tryNormaliseDomain(e.domain)
   if (!domain.ok) return { reason: `domain: ${domain.reason}` }
 
+  // No source means DNS, the original kind. Another one is a proof this code can't check.
+  if (e.source !== undefined && e.source !== 'dns' && e.source !== 'nip05') {
+    return { reason: `unknown proof source ${String(JSON.stringify(e.source)).slice(0, 40)}` }
+  }
   const source: ProofSource = e.source === 'nip05' ? 'nip05' : 'dns'
-  const iat = typeof e.iat === 'number' && Number.isSafeInteger(e.iat) ? e.iat : undefined
+  if (e.iat !== undefined && !isValidIat(e.iat)) return { reason: 'iat is not a timestamp a proof record can carry' }
+  const iat = isValidIat(e.iat) ? e.iat : undefined
   const sig = isHex64(e.sig) ? (e.sig as string) : undefined
   if (source === 'dns' && (iat === undefined || sig === undefined)) {
     return { reason: 'a DNS entry with no proof attached' }
   }
 
-  const firstSeen = typeof e.first_seen === 'number' && Number.isSafeInteger(e.first_seen) ? e.first_seen : iat ?? 0
+  const plausible = (t: unknown): t is number =>
+    Number.isSafeInteger(t) && (t as number) >= FIRST_REGISTRATION && (t as number) <= createdAt
+  const firstSeen = [e.first_seen, iat].find(plausible) ?? createdAt
 
   return {
     entry: {
@@ -170,17 +170,11 @@ function readEntry(raw: unknown): { entry: PortfolioEntry } | { reason: string }
 /** `proven` is offline only. The zone is checked live. */
 export interface EntryVerification {
   domain: string
-  /** The entry's signature verifies under this pubkey. */
   proven: boolean
   reason?: string
   record?: ProofRecord
 }
 
-/**
- * Offline, against the portfolio's own pubkey. Proves this key claimed these domains
- * at these times, nothing about the zones today. Re-resolve, and show a vanished
- * record as stale instead of hiding it.
- */
 export function verifyPortfolio(portfolio: Portfolio): EntryVerification[] {
   return portfolio.entries.map((entry) => {
     if (entry.source === 'nip05') {
@@ -206,7 +200,6 @@ export function verifyPortfolio(portfolio: Portfolio): EntryVerification[] {
   })
 }
 
-/** Keeps the earliest `firstSeen`, the one number on a flex page nobody can fake on the spot. */
 export function upsertEntry(entries: readonly PortfolioEntry[], entry: PortfolioEntry): PortfolioEntry[] {
   const domain = normaliseDomain(entry.domain)
   const existing = entries.find((e) => e.domain === domain)
@@ -220,7 +213,6 @@ export function upsertEntry(entries: readonly PortfolioEntry[], entry: Portfolio
   )
 }
 
-/** Not a deletion request. */
 export function removeEntry(entries: readonly PortfolioEntry[], domain: string): PortfolioEntry[] {
   const d = normaliseDomain(domain)
   return entries.filter((e) => e.domain !== d)

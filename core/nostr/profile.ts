@@ -21,7 +21,6 @@ export interface Profile {
   picture?: string
   /** Evidence of a domain only once verified. */
   nip05?: string
-  /** Lightning address, for zaps. */
   lud16?: string
   website?: string
   identities: ExternalIdentity[]
@@ -31,14 +30,10 @@ export interface Profile {
 export interface ExternalIdentity {
   platform: string
   identity: string
-  /** Gist id, tweet id or URL, by platform. */
   proof?: string
 }
 
-/**
- * Checks nothing, it is all self-attested. `nip05` and NIP-39 identities are claims
- * until their proofs are fetched. Never render them as verified before that.
- */
+/** Checks nothing, it is all self-attested. `nip05` and NIP-39 identities are claims until their proofs are fetched. */
 export function parseProfile(event: NostrEvent): Profile | undefined {
   if (event.kind !== PROFILE_KIND) return undefined
 
@@ -70,10 +65,7 @@ export function parseProfile(event: NostrEvent): Profile | undefined {
   }
 }
 
-/**
- * A URL for a person to open. Most platforms send no CORS headers, so the browser
- * can't check. Label the claim unverified.
- */
+/** A URL for a person to open. Most platforms send no CORS headers, so the browser can't check. */
 export function identityProofUrl(identity: ExternalIdentity): string | undefined {
   if (!identity.proof) return undefined
   switch (identity.platform) {
@@ -110,10 +102,7 @@ export function buildHandlerAdvertisement(params: {
   }
 }
 
-/**
- * An empty list means "no arbiter", unlike no list. Never substitute a default in
- * either case. The parties choose the arbiter, not the site.
- */
+/** An empty list accepts no arbiter, so that side can open no escrow, since every escrow needs one. */
 export function buildArbiterSet(params: {
   pubkey: string
   arbiters: readonly string[]
@@ -129,32 +118,23 @@ export function buildArbiterSet(params: {
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: FOLLOW_SET_KIND, tags, content: '' }
 }
 
-/** Undefined when this key has published none. */
 export function parseArbiterSet(event: NostrEvent): string[] | undefined {
   if (event.kind !== FOLLOW_SET_KIND) return undefined
   if (tagValue(event, 'd') !== ARBITER_SET_D) return undefined
   return event.tags.filter((t) => t[0] === 'p' && isHex32(t[1])).map((t) => t[1])
 }
 
-/**
- * Empty intersection means no trade. Say so, never fall back to a default.
- * A party with no list has no constraint, so the other list stands.
- */
+/** Arbiters both sides accept. Empty means no escrow between them: say so, never fall back to anyone else. */
 export function arbiterIntersection(
   buyer: readonly string[] | undefined,
   seller: readonly string[] | undefined,
-): { arbiters: string[]; noArbiterPossible: boolean } {
-  if (buyer === undefined && seller === undefined) return { arbiters: [], noArbiterPossible: true }
-  if (buyer === undefined) return { arbiters: [...(seller ?? [])], noArbiterPossible: (seller ?? []).length === 0 }
-  if (seller === undefined) return { arbiters: [...buyer], noArbiterPossible: buyer.length === 0 }
-
-  const sellerSet = new Set(seller)
-  const arbiters = buyer.filter((a) => sellerSet.has(a))
-  // Both published empty, so they agree on no arbiter.
-  return { arbiters, noArbiterPossible: buyer.length === 0 && seller.length === 0 }
+  defaults: readonly string[] = [],
+  parties: readonly string[] = [],
+): { arbiters: string[] } {
+  const sellerSet = new Set(seller ?? defaults)
+  return { arbiters: [...new Set(buyer ?? defaults)].filter((a) => sellerSet.has(a) && !parties.includes(a)) }
 }
 
-/** Plain `t` tags, so any client can read it. */
 export function buildWatchlist(params: {
   pubkey: string
   domains: readonly string[]

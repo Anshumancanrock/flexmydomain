@@ -1,13 +1,8 @@
-/**
- * Trade receipts: NIP-32 labels, kind 1985. On settlement each party labels the other.
- * Two keys of one person can fake volume for mining fees. A registry transfer can't be
- * faked cheaply, so countsTowardReputation requires one. No score is published.
- */
+// Trade receipts: NIP-32 labels, kind 1985. On settlement each party labels the other.
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
 
-/** Regular, not replaceable, so nobody can quietly delete a receipt written about them. */
 export const RECEIPT_KIND = 1985
 
 /** NIP-32 `L` namespace. */
@@ -22,15 +17,11 @@ export interface ReceiptParams {
   counterparty: string
   outcome: TradeOutcome
   domain: string
-  /** Coordinate `30402:<seller>:fmd:listing:<domain>`. */
   listing?: string
   escrowId: string
-  /** `<txid>:<vout>` of the escrow funding output. */
   funding: string
-  /** Txid that spent the funding output. */
   settlement: string
   amountSats: number
-  /** sha256 of the RDAP snapshot showing the transfer. */
   transferSnapshot?: string
   createdAt: number
   comment?: string
@@ -156,7 +147,6 @@ export interface Trade {
   funding: string
   buyer?: string
   seller?: string
-  /** Both receipts present and agreeing. */
   mutual: boolean
   conflicts: string[]
   hasTransfer: boolean
@@ -164,10 +154,7 @@ export interface Trade {
   receipts: Receipt[]
 }
 
-/**
- * Anyone can label anyone, so only a pair where each side names the other is evidence.
- * Disagreements are recorded, not resolved.
- */
+/** Anyone can label anyone, so only a pair where each side names the other is evidence. */
 export function pairReceipts(receipts: readonly Receipt[]): Trade[] {
   const byEscrow = new Map<string, Receipt[]>()
   for (const receipt of receipts) {
@@ -221,11 +208,7 @@ export function pairReceipts(receipts: readonly Receipt[]): Trade[] {
   return trades.sort((a, b) => b.at - a.at)
 }
 
-/**
- * Mutual, settled and backed by an observed registry transfer. Wash volume costs about
- * 2,000 sats in fees. A transfer costs about $10 and locks the name 60 days.
- * Failing trades still show at zero weight, so wash trading stays visible.
- */
+/** Mutual, settled and backed by an observed registry transfer. Wash volume costs about 2,000 sats in fees. */
 export function countsTowardReputation(trade: Trade): boolean {
   return trade.mutual && trade.receipts[0]?.outcome === 'settled' && trade.hasTransfer
 }
@@ -236,16 +219,10 @@ export interface TradeRecord {
   counterparties: number
   satsSettled: number
   firstTradeAt?: number
-  /** Shown at zero weight, failing countsTowardReputation. */
   unweighted: number
-  /** Receipts disagree. Show them anyway. */
   conflicted: number
 }
 
-/**
- * Counts distinct counterparties too, since ten trades with one partner is one relationship.
- * Partners come back so a profile can show the graph instead of a score.
- */
 export function summariseTrades(trades: readonly Trade[], pubkey: string): TradeRecord & { partners: string[] } {
   const partners = new Set<string>()
   let verified = 0

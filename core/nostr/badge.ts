@@ -1,6 +1,4 @@
 // NIP-58 badges, so settled trades show in clients like Damus that don't run our checks.
-// A badge is only its issuer's opinion. The trade receipts (receipt.ts) are the evidence.
-// It shows only once the recipient adds it to their own kind 30008 list.
 
 import { addressOf, isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 
@@ -39,7 +37,6 @@ export function buildBadgeDefinition(params: {
 /** Kind 8 is regular, so no withdrawal by replacement. Revoking takes a NIP-09 deletion, which relays may ignore. */
 export function buildBadgeAward(params: {
   pubkey: string
-  /** Coordinate `30009:<issuer>:<slug>`. */
   definition: string
   recipients: readonly string[]
   createdAt: number
@@ -58,10 +55,7 @@ export function buildBadgeAward(params: {
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: BADGE_AWARD_KIND, tags, content: '' }
 }
 
-/**
- * NIP-58 wants each definition `a` directly followed by its award `e`. Clients read
- * them by position, so any other order shows the wrong art.
- */
+/** NIP-58 wants each definition `a` directly followed by its award `e`. */
 export function buildProfileBadges(params: {
   pubkey: string
   badges: readonly { definition: string; awardId: string }[]
@@ -104,7 +98,6 @@ export function parseBadgeAward(event: NostrEvent): { definition: string; issuer
   }
 }
 
-/** Drops half-pairs. They name a badge with no evidence it was ever awarded. */
 export function parseProfileBadges(event: NostrEvent): { definition: string; awardId: string }[] {
   if (event.kind !== PROFILE_BADGES_KIND) return []
   if (tagValue(event, 'd') !== PROFILE_BADGES_D) return []
@@ -120,7 +113,6 @@ export function parseProfileBadges(event: NostrEvent): { definition: string; awa
   return pairs
 }
 
-/** Displayed badges backed by an award to this key. A 30008 is self-published, so it proves nothing alone. */
 export function verifiedBadges(params: {
   pubkey: string
   profile: NostrEvent
@@ -144,7 +136,6 @@ export function verifiedBadges(params: {
   return out
 }
 
-/** Slugs are stable, the art is not. */
 export const FMD_BADGES = {
   verifiedSale: {
     slug: 'fmd-verified-sale',

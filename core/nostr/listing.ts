@@ -1,7 +1,4 @@
-/**
- * NIP-99 classified listing, kind 30402. Format in spec/PROTOCOL.md. Pure, the caller resolves DNS.
- * Each listing carries its own domain proof, so any client can check it with one TXT lookup.
- */
+// NIP-99 classified listing, kind 30402. Format in spec/PROTOCOL.md.
 
 import {
   normaliseDomain,
@@ -19,10 +16,8 @@ import { naddrEncode } from './nip19.js'
 
 export const LISTING_KIND = 30402
 
-/** One listing per domain per seller. */
 export const LISTING_D_PREFIX = 'fmd:listing:'
 
-/** `t` tag indexers and clients filter on. */
 export const LISTING_TOPIC = 'flexmydomain'
 
 /** The only currency written or accepted. USD is display only, so nobody disputes the rate later. */
@@ -35,18 +30,14 @@ export interface ListingParams {
   pubkey: string
   domain: string
   priceSats: number
-  /** One line. The long description goes in `content`. */
   summary?: string
   description?: string
   status?: ListingStatus
   /** Unix seconds. Also the event's created_at unless `createdAt` is given. */
   publishedAt: number
   createdAt?: number
-  /** See spec/PROOF.md. */
   proof: ProofRecord
-  /** `hash` is sha256 of the RDAP snapshot. */
   rdapSnapshot?: { hash: string; observedAt: number }
-  /** Domain registration date. */
   registeredAt?: number
   /** x-only keys the seller accepts as arbiter. */
   arbiters?: string[]
@@ -77,7 +68,6 @@ export function buildListing(params: ListingParams): UnsignedEvent {
     throw new Error(`buildListing: priceSats must be a positive integer, got ${JSON.stringify(params.priceSats)}`)
   }
   if (params.proof.pubkey !== params.pubkey) {
-    // Readers would refuse to show it.
     throw new Error('buildListing: the proof is for a different key than the one publishing this listing')
   }
   if (params.proof.version !== PROOF_VERSION) {
@@ -161,7 +151,7 @@ export function parseListing(event: NostrEvent): { ok: true; listing: Listing } 
       summary: tagValue(event, 'summary') ?? '',
       description: event.content,
       status,
-      publishedAt: Number(tagValue(event, 'published_at') ?? event.created_at),
+      publishedAt: numberTag(event, 'published_at') ?? event.created_at,
       // Always the event's pubkey, so a proof is only checked under the publisher's key.
       proof: { version: PROOF_VERSION, iat: Number(proofTag[1]), pubkey: event.pubkey, sig: proofTag[2] },
       rdapSnapshot:
@@ -183,22 +173,10 @@ function numberTag(event: NostrEvent, name: string): number | undefined {
   return Number.isSafeInteger(n) ? n : undefined
 }
 
-/**
- * What indexers and clients both check before showing a listing. Anyone can publish
- * a 30402 claiming `apple.com`, so all three must hold:
- *
- *   1. the event sig verifies            (the caller does this, relays lie)
- *   2. the embedded proof verifies for this domain and pubkey
- *   3. the domain's DNS agrees           (`dnsProof`, resolved elsewhere)
- *
- * A missing DNS result means unverified, never verified. Unverified listings stay on
- * relays but are never shown as real.
- */
 export interface ListingCheck {
   ok: boolean
   reason?: string
   listing?: Listing
-  /** Embedded proof sig is valid. */
   selfConsistent: boolean
   /** Only when a supplied DNS (or NIP-05) check passed. */
   zoneConfirmed: boolean
@@ -247,7 +225,6 @@ export function checkListing(params: {
   return { ok: true, listing, selfConsistent: true, zoneConfirmed: true, expired: false }
 }
 
-/** checkListing against a freshly resolved TXT RRset, in one call for page code. */
 export function checkListingAgainstZone(params: {
   event: NostrEvent
   txtRecords: readonly string[]
@@ -267,7 +244,6 @@ export function checkListingAgainstZone(params: {
   })
 }
 
-/** Shareable naddr, not a URL on any host. */
 export function listingAddress(listing: Pick<Listing, 'domain'> & { event: Pick<NostrEvent, 'pubkey'> }, relays?: string[]): string {
   return naddrEncode({
     identifier: LISTING_D_PREFIX + listing.domain,

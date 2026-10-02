@@ -1,14 +1,10 @@
-// Domain attestations as NIP-90 jobs, published by services/verifier. Readers
-// require k of n independent verifiers, so no one resolver (ours included) is the oracle.
-// They add to the client's own DNS lookup, never replace it.
-// Kinds 5970/6970 are our pick in NIP-90's custom range, unregistered.
+// Domain attestations as NIP-90 jobs, published by services/verifier.
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
 
 export const VERIFY_REQUEST_KIND = 5970
 
-/** The attestation itself. */
 export const VERIFY_RESULT_KIND = 6970
 
 export const JOB_FEEDBACK_KIND = 7000
@@ -19,7 +15,6 @@ export type AttestationVerdict = 'proven' | 'absent' | 'unreachable'
 export function buildVerifyRequest(params: {
   pubkey: string
   domain: string
-  /** The key claiming the domain. */
   claimant: string
   createdAt: number
 }): UnsignedEvent {
@@ -42,21 +37,16 @@ export function buildVerifyRequest(params: {
 }
 
 export interface AttestationParams {
-  /** The verifier's own key. */
   pubkey: string
   domain: string
   claimant: string
   verdict: AttestationVerdict
   source?: 'dns' | 'nip05'
-  /** `iat` of the record that verified, if any. */
   iat?: number
-  /** Every answering resolver reported a validated DNSSEC chain. */
   dnssec?: boolean
   resolvers?: readonly string[]
-  /** When the verifier looked, not when it published. */
   observedAt: number
   createdAt: number
-  /** The kind 5970 this answers, if any. */
   requestId?: string
   requester?: string
 }
@@ -108,7 +98,6 @@ export interface Attestation {
   event: NostrEvent
 }
 
-/** Read an attestation, checking the tags and the body agree. */
 export function parseAttestation(event: NostrEvent): { ok: true; attestation: Attestation } | { ok: false; reason: string } {
   if (event.kind !== VERIFY_RESULT_KIND) return { ok: false, reason: `kind ${event.kind} is not ${VERIFY_RESULT_KIND}` }
 
@@ -122,8 +111,6 @@ export function parseAttestation(event: NostrEvent): { ok: true; attestation: At
   const domain = tryNormaliseDomain(body.domain)
   if (!domain.ok) return { ok: false, reason: `domain: ${domain.reason}` }
 
-  // Relays index the tags. If tags and body disagree, a fetch for one claim
-  // returns a verdict on another.
   if (tagValue(event, 'fmd_domain') !== domain.domain) {
     return { ok: false, reason: 'the fmd_domain tag disagrees with the body' }
   }
@@ -158,11 +145,7 @@ export function parseAttestation(event: NostrEvent): { ok: true; attestation: At
   }
 }
 
-/**
- * k-of-n. Counts distinct verifiers by their newest observation, or one daemon
- * could meet any threshold alone. Keys outside `trusted` are ignored.
- * `unreachable` never counts against the claimant.
- */
+/** k-of-n. Counts distinct verifiers by their newest observation, or one daemon could meet any threshold alone. */
 export function tally(params: {
   attestations: readonly Attestation[]
   domain: string

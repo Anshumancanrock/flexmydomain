@@ -1,9 +1,4 @@
-/**
- * NIP-57 zaps for the featured and flex boards. Pure, net/lnurl.ts does the fetching.
- * The site holds no funds. Receipts are public, so anyone can recompute a ranking.
- * A kind 9735 receipt is only the provider's word. It counts only under the zapper key
- * the recipient published in LNURL metadata.
- */
+// NIP-57 zaps for the featured and flex boards. Pure, net/lnurl.ts does the fetching.
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 import { checkEvent } from './event.js'
@@ -12,27 +7,19 @@ import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
 export const ZAP_REQUEST_KIND = 9734
 export const ZAP_RECEIPT_KIND = 9735
 
-/** `t` tag on flex-board zaps. */
 export const FLEX_TOPIC = 'flexmydomain'
 
 export const MSATS_PER_SAT = 1000
 
-/**
- * Kind 9734 zap request. Never published to relays. It goes in the LNURL-pay
- * callback's `nostr` param and the provider embeds it in the receipt.
- */
+/** Kind 9734 zap request. Never published to relays. */
 export function buildZapRequest(params: {
   pubkey: string
   recipient: string
   /** Must equal the invoice amount or the receipt is invalid. */
   amountMsats: number
   relays: readonly string[]
-  /** Listing coordinate, for a featured spot. */
   address?: string
-  /**
-   * Bare domain for the flex board. Needs no proof, so an entry never means ownership.
-   * No coordinate for an `a` tag, so it rides in the request, which the receipt embeds.
-   */
+  /** Bare domain for the flex board. Needs no proof, so an entry never means ownership. */
   flexDomain?: string
   eventId?: string
   lnurl?: string
@@ -45,7 +32,6 @@ export function buildZapRequest(params: {
     throw new Error(`buildZapRequest: amountMsats must be a positive integer, got ${params.amountMsats}`)
   }
   if (params.relays.length === 0) {
-    // The provider publishes the receipt here. With none, the zap is paid but invisible.
     throw new Error('buildZapRequest: at least one relay is required, or the receipt reaches nobody')
   }
 
@@ -58,7 +44,6 @@ export function buildZapRequest(params: {
   if (params.address) tags.push(['a', params.address])
   if (params.eventId) tags.push(['e', params.eventId])
   if (params.flexDomain) {
-    // Normalise so `Example.COM` and `example.com` are one board entry.
     tags.push(['fmd_flex', normaliseDomain(params.flexDomain)])
     tags.push(['t', FLEX_TOPIC])
   }
@@ -72,11 +57,9 @@ export function buildZapRequest(params: {
   }
 }
 
-/** A verified zap. amountSats is rounded down. */
 export interface Zap {
   receipt: NostrEvent
   request: NostrEvent
-  /** The request's signer. */
   sender: string
   recipient: string
   amountSats: number
@@ -85,27 +68,12 @@ export interface Zap {
   eventId?: string
   flexDomain?: string
   comment: string
-  /** Receipt created_at. */
   at: number
 }
 
-/**
- * Verify a zap receipt. Skip any check and a ranking inflates for free:
- *
- *   1. receipt sig verifies                   (or anyone can write one)
- *   2. embedded request parses and verifies   (or the sender is invented)
- *   3. request names this recipient           (or a zap to someone else counts here)
- *   4. invoice amount matches the request's
- *      `amount` tag, when it has one         (or claim a million, pay one)
- *   5. receipt author is `expectedProvider`,
- *      the recipient's published zapper key   (or it is a stranger's word)
- *
- * Step 5 needs the recipient's LNURL-pay metadata, so the caller must supply it.
- */
 export function verifyZapReceipt(params: {
   receipt: NostrEvent
   recipient: string
-  /** `nostrPubkey` from the recipient's LNURL-pay metadata. */
   expectedProvider: string
 }): { ok: true; zap: Zap } | { ok: false; reason: string } {
   const { receipt } = params
@@ -161,8 +129,7 @@ export function verifyZapReceipt(params: {
       amountSats: Math.floor(invoiceMsats / MSATS_PER_SAT),
       address: tagValue(request, 'a') ?? tagValue(receipt, 'a'),
       eventId: tagValue(request, 'e') ?? tagValue(receipt, 'e'),
-      // Payer-signed request only. Providers don't copy custom tags, and a
-      // receipt tag is not the payer's word.
+      // Payer-signed request only. Providers don't copy custom tags, and a receipt tag is not the payer's word.
       flexDomain: flexDomainOf(request),
       comment: request.content,
       at: receipt.created_at,
@@ -170,11 +137,7 @@ export function verifyZapReceipt(params: {
   }
 }
 
-/**
- * BOLT-11 invoice amount in msats. Reads only the human-readable prefix, no full decoder in core/.
- * Multipliers are fractions of 1 BTC (m 10^-3, u 10^-6, n 10^-9, p 10^-12), not sat multiples.
- * Reading them backwards is a common 1000x bug. No amount returns undefined, so it can't count.
- */
+/** BOLT-11 invoice amount in msats. Reads only the human-readable prefix, no full decoder in core/. */
 export function bolt11AmountMsats(invoice: string): number | undefined {
   const match = /^ln(bcrt|bc|tb|tbs|sb)(\d+)?([munp])?1/i.exec(invoice.trim().toLowerCase())
   if (!match) return undefined
@@ -190,7 +153,7 @@ export function bolt11AmountMsats(invoice: string): number | undefined {
     case 'u': return Math.round((value * MSATS_PER_BTC) / 1e6)
     case 'n': return Math.round((value * MSATS_PER_BTC) / 1e9)
     case 'p': return Math.round((value * MSATS_PER_BTC) / 1e12)
-    case undefined: return value * MSATS_PER_BTC // Bare amount is whole BTC.
+    case undefined: return value * MSATS_PER_BTC
     default: return undefined
   }
 }
@@ -203,11 +166,7 @@ function flexDomainOf(request: NostrEvent): string | undefined {
   return domain.ok ? domain.domain : undefined
 }
 
-/**
- * Flex board: sats per domain in a rolling window. A rank only says who paid most.
- * Never render it as ownership.
- * Receipts dedupe by id, since relays return the same one from several sources.
- */
+/** Flex board: sats per domain in a rolling window. A rank only says who paid most. */
 export function rankFlexDomains(
   zaps: readonly Zap[],
   options: { now: number; windowSeconds?: number },
@@ -247,7 +206,6 @@ export function rankFlexDomains(
     .sort((a, b) => b.sats - a.sats || a.first - b.first)
 }
 
-/** Flex board receipts. Flex zaps have no `#a` coordinate, but all tag one `#p` recipient. */
 export function flexZapFilter(recipient: string, since?: number): Record<string, unknown> {
   const filter: Record<string, unknown> = { kinds: [ZAP_RECEIPT_KIND], '#p': [recipient] }
   if (since !== undefined) filter.since = since
