@@ -1,124 +1,174 @@
-/**
- * Escrow views: NIP-78 kind 30078, `d = "fmd:escrow:<id>"`. Each party signs its own view
- * with its key from the tree. None is authoritative, and disagreements stay public.
- * parseEscrowEvent re-derives the taproot address from the view's params and refuses a
- * mismatch. That stops a plausible escrow that pays an address only its author controls.
- */
+// Escrow views: NIP-78 kind 30078, `d = "fmd:escrow:<id>"`.
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, utf8ToBytes, concatBytes } from '@noble/hashes/utils.js'
-import { buildTree, type NetworkName, type TimeoutTo } from '../escrow/tree.js'
+import { buildTree, type NetworkName } from '../escrow/tree.js'
+import { settlementProblem, signersOf, type SignedSettlement } from '../escrow/settle.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 
 export const ESCROW_KIND = 30078
 export const ESCROW_D_PREFIX = 'fmd:escrow:'
+export const RULING_D_PREFIX = 'fmd:ruling:'
 export const ESCROW_TOPIC = 'flexmydomain'
-export const ESCROW_VERSION = 1
+export const ESCROW_VERSION = 5
 
-/** Derived, never asserted by one party alone. */
-export type EscrowState =
-  | 'open'        // Published, not yet funded.
-  | 'funded'      // A confirmed output pays the address.
-  | 'transferring'// The registry shows a transfer underway.
-  | 'settled'     // The output has been spent.
-  | 'expired'     // Never funded, past its deadline.
+/** Two proposals, a co-signature, and room to sign again at another fee. */
+const MAX_SIGS = 8
+const MAX_CLAIM_TIME = 0xffffffff
+const MAX_REASON = 2000
 
 export interface EscrowParams {
   /** 32 random bytes, hex. Keeps the id unguessable and the coordinate unique. */
   salt: string
   buyer: Uint8Array
   seller: Uint8Array
-  arbiter?: Uint8Array
-  timeoutTo: TimeoutTo
+  arbiter: Uint8Array
+  /** Relative timelock on the buyer's refund, in blocks after funding. */
   timeoutBlocks: number
+  /** Blocks after funding the seller has to transfer the domain to the buyer. */
+  deliverBlocks: number
   network: NetworkName
   amountSats: number
   domain: string
-  /** naddr of the listing, if the trade has one. */
   listing?: string
-  /** Where the buyer commits to receiving the domain. */
-  commitment?: { registrarIanaId?: string; nameservers?: string[] }
-  deadlines?: { fundBy?: number; transferBy?: number; respondBy?: number }
+  deadlines?: { fundBy?: number }
 }
+
+export interface EscrowClaims {
+  sent?: { at: number }
+  cancelled?: { at: number; reason: string }
+  received?: { at: number }
+  disputed?: { at: number; reason: string }
+}
+
+export type ViewRole = 'buyer' | 'seller' | 'arbiter'
 
 export interface EscrowView {
   version: number
   id: string
   author: string
+  role?: ViewRole
   salt: string
   buyer: string
   seller: string
-  arbiter?: string
-  timeoutTo: TimeoutTo
+  arbiter: string
+  timeoutTo: 'buyer'
   timeoutBlocks: number
+  deliverBlocks: number
   network: NetworkName
-  /** As stated, and already checked against the params by parseEscrowEvent. */
   address: string
   amountSats: number
   domain: string
   listing?: string
-  funding?: { txid: string; vout: number; amountSats: number }
-  commitment?: { registrarIanaId?: string; nameservers: string[] }
-  deadlines: { fundBy?: number; transferBy?: number; respondBy?: number }
-  rdapSnapshots: string[]
-  settlementTxid?: string
+  deadlines: { fundBy?: number }
+  claims: EscrowClaims
+  sigs: SignedSettlement[]
   publishedAt: number
   event: NostrEvent
 }
 
-/**
- * sha256 over the output-defining params. Derived, not random, so every party lands on
- * the same `fmd:escrow:<id>` with no id message to tamper with.
- * The salt keeps otherwise identical escrows apart.
- */
 export function deriveEscrowId(params: EscrowParams): string {
+  if (!/^[0-9a-f]{64}$/.test(params.salt)) throw new Error('deriveEscrowId: salt must be 64 lowercase hex characters')
   const preimage = concatBytes(
-    utf8ToBytes('fmd:escrow:v1'),
+    utf8ToBytes('fmd:escrow:v5'),
     hexToBytes(params.salt),
     params.buyer,
     params.seller,
-    params.arbiter ?? new Uint8Array(32),
+    params.arbiter,
     utf8ToBytes(
-      `${params.timeoutTo}:${params.timeoutBlocks}:${params.network}:${params.amountSats}:${normaliseDomain(params.domain)}`,
+      `buyer:${params.timeoutBlocks}:${params.deliverBlocks}:${params.network}:` +
+        `${params.amountSats}:${normaliseDomain(params.domain)}:`,
     ),
   )
-  // 16 bytes is enough. The id only names a coordinate. The address is the commitment.
-  return bytesToHex(sha256(preimage)).slice(0, 32)
+  // All 32 bytes.
+  return bytesToHex(sha256(preimage))
 }
 
-/** Taproot address these params produce. */
-export function escrowAddress(params: Pick<EscrowParams, 'buyer' | 'seller' | 'arbiter' | 'timeoutTo' | 'timeoutBlocks' | 'network'>): string {
-  const tree = buildTree({
+export function escrowAddress(params: EscrowParams): string {
+  return escrowTree(params).addresses[params.network]
+}
+
+export function escrowTree(params: EscrowParams): ReturnType<typeof buildTree> {
+  return buildTree({
     buyer: params.buyer,
     seller: params.seller,
     arbiter: params.arbiter,
-    timeoutTo: params.timeoutTo,
+    timeoutTo: 'buyer',
     timeoutBlocks: params.timeoutBlocks,
+    binding: hexToBytes(deriveEscrowId(params)),
   })
-  return tree.addresses[params.network]
 }
 
-/** One party's view, for that party to sign. */
-export function buildEscrowEvent(params: EscrowParams & { pubkey: string; createdAt: number; funding?: { txid: string; vout: number; amountSats: number }; settlementTxid?: string; rdapSnapshots?: string[] }): UnsignedEvent {
+function roleIn(pubkey: string, keys: { buyer: string; seller: string; arbiter: string }): ViewRole | undefined {
+  return pubkey === keys.buyer ? 'buyer' : pubkey === keys.seller ? 'seller' : pubkey === keys.arbiter ? 'arbiter' : undefined
+}
+
+function checkProgress(
+  role: ViewRole | undefined,
+  claims: EscrowClaims,
+  sigs: readonly unknown[],
+): string | undefined {
+  const stated = (Object.keys(claims) as (keyof EscrowClaims)[]).filter((k) => claims[k] !== undefined)
+  if (role !== 'buyer' && role !== 'seller') {
+    if (stated.length || sigs.length) return 'only the buyer and the seller state progress in a view'
+    return undefined
+  }
+  const allowed: (keyof EscrowClaims)[] = role === 'seller' ? ['sent', 'cancelled', 'disputed'] : ['received', 'disputed']
+  const wrong = stated.find((k) => !allowed.includes(k))
+  if (wrong) return `the ${role} can't claim "${wrong}"`
+  for (const claim of stated.map((k) => claims[k]) as { at?: unknown; reason?: unknown }[]) {
+    // Unix seconds a date can show. A larger one would only break whoever displays it.
+    if (!Number.isSafeInteger(claim.at) || (claim.at as number) < 0) return 'a claim has no time'
+    if ((claim.at as number) > MAX_CLAIM_TIME) return "a claim's time is out of range"
+    if ('reason' in claim && (typeof claim.reason !== 'string' || claim.reason.length > MAX_REASON)) {
+      return `a reason is text of at most ${MAX_REASON} characters`
+    }
+  }
+  if (sigs.length > MAX_SIGS) return `a view carries at most ${MAX_SIGS} signatures`
+  for (const sig of sigs) {
+    const problem = settlementProblem(sig)
+    if (problem) return `signature: ${problem}`
+    if (!signersOf((sig as SignedSettlement).leaf).includes(role)) {
+      return `the ${role} can't sign leaf ${(sig as SignedSettlement).leaf}`
+    }
+  }
+  return undefined
+}
+
+export function buildEscrowEvent(
+  params: EscrowParams & {
+    pubkey: string
+    createdAt: number
+    claims?: EscrowClaims
+    sigs?: SignedSettlement[]
+  },
+): UnsignedEvent {
   if (!isHex32(params.pubkey)) throw new Error('buildEscrowEvent: pubkey must be 64 lowercase hex characters')
-  if (!/^[0-9a-f]{64}$/.test(params.salt)) throw new Error('buildEscrowEvent: salt must be 64 lowercase hex characters')
   if (!Number.isSafeInteger(params.amountSats) || params.amountSats <= 0) {
     throw new Error('buildEscrowEvent: amountSats must be a positive integer')
+  }
+  if (!Number.isInteger(params.deliverBlocks) || params.deliverBlocks < 1 || params.deliverBlocks > 65535) {
+    throw new Error('buildEscrowEvent: deliverBlocks must be 1..65535')
   }
   const domain = normaliseDomain(params.domain)
   const id = deriveEscrowId(params)
   const address = escrowAddress(params)
+  const keys = { buyer: bytesToHex(params.buyer), seller: bytesToHex(params.seller), arbiter: bytesToHex(params.arbiter) }
+  const role = roleIn(params.pubkey, keys)
+  const claims = params.claims ?? {}
+  const sigs = params.sigs ?? []
+  const problem = checkProgress(role, claims, sigs)
+  if (problem) throw new Error(`buildEscrowEvent: ${problem}`)
 
   const tags: NostrTag[] = [
     ['d', ESCROW_D_PREFIX + id],
     ['t', ESCROW_TOPIC],
     ['fmd_domain', domain],
-    // p-tag every party so one `#p` filter finds all views.
-    ['p', bytesToHex(params.buyer)],
-    ['p', bytesToHex(params.seller)],
+    ['p', keys.buyer],
+    ['p', keys.seller],
+    ['p', keys.arbiter],
   ]
-  if (params.arbiter) tags.push(['p', bytesToHex(params.arbiter)])
   if (params.listing) tags.push(['a', params.listing])
 
   return {
@@ -130,21 +180,23 @@ export function buildEscrowEvent(params: EscrowParams & { pubkey: string; create
       v: ESCROW_VERSION,
       id,
       salt: params.salt,
-      buyer_x: bytesToHex(params.buyer),
-      seller_x: bytesToHex(params.seller),
-      arbiter_x: params.arbiter ? bytesToHex(params.arbiter) : null,
-      timeout_to: params.timeoutTo,
+      buyer_x: keys.buyer,
+      seller_x: keys.seller,
+      arbiter_x: keys.arbiter,
+      timeout_to: 'buyer',
       timeout_blocks: params.timeoutBlocks,
+      deliver_blocks: params.deliverBlocks,
       network: params.network,
       address,
       amount_sats: params.amountSats,
       domain,
       ...(params.listing ? { listing: params.listing } : {}),
-      ...(params.funding ? { funding: params.funding } : {}),
-      ...(params.commitment ? { commitment: params.commitment } : {}),
-      ...(params.deadlines ? { deadlines: params.deadlines } : {}),
-      ...(params.rdapSnapshots?.length ? { rdap_snapshots: params.rdapSnapshots } : {}),
-      ...(params.settlementTxid ? { settlement_txid: params.settlementTxid } : {}),
+      ...(params.deadlines?.fundBy !== undefined ? { deadlines: { fund_by: params.deadlines.fundBy } } : {}),
+      ...(claims.sent ? { sent: { at: claims.sent.at } } : {}),
+      ...(claims.cancelled ? { cancelled: { at: claims.cancelled.at, reason: claims.cancelled.reason } } : {}),
+      ...(claims.received ? { received: { at: claims.received.at } } : {}),
+      ...(claims.disputed ? { disputed: { at: claims.disputed.at, reason: claims.disputed.reason } } : {}),
+      ...(sigs.length ? { sigs: sigs.map(({ kind, leaf, outpoint, dest, fee, sig }) => ({ kind, leaf, outpoint, dest, fee, sig })) } : {}),
     }),
   }
 }
@@ -153,6 +205,7 @@ export function buildEscrowEvent(params: EscrowParams & { pubkey: string; create
 export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowView } | { ok: false; reason: string } {
   if (event.kind !== ESCROW_KIND) return { ok: false, reason: `kind ${event.kind} is not ${ESCROW_KIND}` }
 
+  if (event.tags.filter((t) => t[0] === 'd').length !== 1) return { ok: false, reason: 'a view must have exactly one d tag' }
   const d = tagValue(event, 'd')
   if (!d || !d.startsWith(ESCROW_D_PREFIX)) {
     return { ok: false, reason: `d tag ${JSON.stringify(d ?? null)} is not a ${ESCROW_D_PREFIX}* identifier` }
@@ -164,17 +217,31 @@ export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowVie
   } catch (err) {
     return { ok: false, reason: `content is not JSON: ${(err as Error).message}` }
   }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return { ok: false, reason: 'content is not an object' }
+  if (body.v === 1 || body.v === 2 || body.v === 3 || body.v === 4) {
+    return {
+      ok: false,
+      reason: body.v === 4
+        ? 'this escrow was opened with the earlier flow, where the arbiter held the domain, and this page no longer runs it'
+        : `this view uses the version ${body.v} format, from an earlier version of the escrow; open a new escrow`,
+    }
+  }
+  if (body.v !== ESCROW_VERSION) return { ok: false, reason: `unsupported view version ${JSON.stringify(body.v ?? null)}` }
 
   const str = (k: string): string | undefined => (typeof body[k] === 'string' ? (body[k] as string) : undefined)
   const num = (k: string): number | undefined =>
     typeof body[k] === 'number' && Number.isSafeInteger(body[k]) ? (body[k] as number) : undefined
+  const blocks = (k: string): number | undefined => {
+    const n = num(k)
+    return n !== undefined && n >= 1 && n <= 65535 ? n : undefined
+  }
 
   const salt = str('salt')
   const buyer = str('buyer_x')
   const seller = str('seller_x')
-  const arbiter = str('arbiter_x') ?? undefined
-  const timeoutTo = body.timeout_to === 'seller' ? 'seller' : body.timeout_to === 'buyer' ? 'buyer' : undefined
-  const timeoutBlocks = num('timeout_blocks')
+  const arbiter = str('arbiter_x')
+  const timeoutBlocks = blocks('timeout_blocks')
+  const deliverBlocks = blocks('deliver_blocks')
   const network = str('network') as NetworkName | undefined
   const address = str('address')
   const amountSats = num('amount_sats')
@@ -182,29 +249,37 @@ export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowVie
 
   if (!salt || !/^[0-9a-f]{64}$/.test(salt)) return { ok: false, reason: 'no salt' }
   if (!isHex32(buyer) || !isHex32(seller)) return { ok: false, reason: 'buyer or seller key is malformed' }
-  if (arbiter !== undefined && !isHex32(arbiter)) return { ok: false, reason: 'arbiter key is malformed' }
-  if (!timeoutTo) return { ok: false, reason: 'no timeout polarity' }
-  if (timeoutBlocks === undefined || timeoutBlocks < 1 || timeoutBlocks > 65535) {
-    return { ok: false, reason: 'timeout_blocks is out of range' }
-  }
+  if (!isHex32(arbiter)) return { ok: false, reason: 'no arbiter key, and this escrow needs one' }
+  if (body.timeout_to !== 'buyer') return { ok: false, reason: 'the timeout must refund the buyer' }
+  if (timeoutBlocks === undefined) return { ok: false, reason: 'timeout_blocks is out of range' }
+  if (deliverBlocks === undefined) return { ok: false, reason: 'the transfer window is out of range' }
   if (!network || !['mainnet', 'testnet', 'signet', 'regtest'].includes(network)) {
     return { ok: false, reason: `unknown network ${JSON.stringify(network ?? null)}` }
   }
   if (!address) return { ok: false, reason: 'no address' }
   if (amountSats === undefined || amountSats <= 0) return { ok: false, reason: 'no amount' }
   if (!domain.ok) return { ok: false, reason: `domain: ${domain.reason}` }
+  // A field this version doesn't define is refused, not ignored: it would be a term nobody agreed to.
+  for (const gone of ['registrar', 'custody_account', 'deliver_to', 'return_to', 'deliver_to_enc', 'return_to_enc', 'forward_blocks']) {
+    if (body[gone] !== undefined) return { ok: false, reason: `"${gone}" is not part of a version ${ESCROW_VERSION} escrow` }
+  }
 
   // Explicit type. Some narrowings above don't survive into an inferred literal.
   const params: EscrowParams = {
     salt,
     buyer: hexToBytes(buyer),
     seller: hexToBytes(seller),
-    ...(arbiter ? { arbiter: hexToBytes(arbiter) } : {}),
-    timeoutTo,
+    arbiter: hexToBytes(arbiter),
     timeoutBlocks,
+    deliverBlocks,
     network,
     amountSats,
     domain: domain.domain,
+  }
+
+  const id = deriveEscrowId(params)
+  if (d !== ESCROW_D_PREFIX + id) {
+    return { ok: false, reason: `the d tag does not match the id these parameters derive (${id})` }
   }
 
   let derived: string
@@ -214,61 +289,60 @@ export function parseEscrowEvent(event: NostrEvent): { ok: true; view: EscrowVie
     return { ok: false, reason: `the parameters do not produce a valid output: ${(err as Error).message}` }
   }
   if (derived !== address) {
+    const unbound = buildTree({
+      buyer: params.buyer, seller: params.seller, arbiter: params.arbiter, timeoutTo: 'buyer', timeoutBlocks,
+    }).addresses[network]
     return {
       ok: false,
-      reason: `the stated address is not the one these keys produce (derived ${derived}); do not fund it`,
+      reason: unbound === address
+        ? 'this escrow was opened by an older version of the page, before addresses were bound to the escrow id, ' +
+          'and this page no longer reads it; do not fund it. If it is funded, the buyer takes the timeout refund with recover.html'
+        : `the stated address is not the one these terms produce (derived ${derived}); do not fund it`,
     }
   }
 
-  const id = deriveEscrowId(params)
-  if (d !== ESCROW_D_PREFIX + id) {
-    return { ok: false, reason: `the d tag does not match the id these parameters derive (${id})` }
+  const role = roleIn(event.pubkey, { buyer, seller, arbiter })
+  const claims: EscrowClaims = {}
+  for (const name of ['sent', 'cancelled', 'received', 'disputed'] as const) {
+    const value = body[name]
+    if (value === undefined) continue
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return { ok: false, reason: `${name} is not an object` }
+    const { at, reason } = value as { at?: unknown; reason?: unknown }
+    claims[name] = (name === 'cancelled' || name === 'disputed' ? { at, reason: reason ?? '' } : { at }) as never
   }
+  for (const old of ['pushed', 'dispute']) {
+    if (body[old] !== undefined) return { ok: false, reason: `"${old}" is not a claim in this version` }
+  }
+  const sigs = body.sigs === undefined ? [] : body.sigs
+  if (!Array.isArray(sigs)) return { ok: false, reason: 'sigs is not a list' }
+  const problem = checkProgress(role, claims, sigs)
+  if (problem) return { ok: false, reason: problem }
 
-  const funding = body.funding as { txid?: string; vout?: number; amount_sats?: number; amountSats?: number } | undefined
-  const commitment = body.commitment as { registrarIanaId?: string; registrar_iana_id?: string; nameservers?: string[] } | undefined
-  const deadlines = (body.deadlines ?? {}) as { fundBy?: number; fund_by?: number; transferBy?: number; transfer_by?: number; respondBy?: number; respond_by?: number }
+  const deadlines = (body.deadlines ?? {}) as { fund_by?: unknown }
+  const fundBy = Number.isSafeInteger(deadlines.fund_by) ? (deadlines.fund_by as number) : undefined
 
   return {
     ok: true,
     view: {
-      version: typeof body.v === 'number' ? body.v : 0,
+      version: ESCROW_VERSION,
       id,
       author: event.pubkey,
+      role,
       salt,
       buyer,
       seller,
       arbiter,
-      timeoutTo,
+      timeoutTo: 'buyer',
       timeoutBlocks,
+      deliverBlocks,
       network,
       address,
       amountSats,
       domain: domain.domain,
       listing: str('listing'),
-      funding:
-        funding && typeof funding.txid === 'string' && /^[0-9a-f]{64}$/.test(funding.txid)
-          ? {
-              txid: funding.txid,
-              vout: Number(funding.vout ?? 0),
-              amountSats: Number(funding.amount_sats ?? funding.amountSats ?? 0),
-            }
-          : undefined,
-      commitment: commitment
-        ? {
-            registrarIanaId: commitment.registrarIanaId ?? commitment.registrar_iana_id,
-            nameservers: Array.isArray(commitment.nameservers) ? commitment.nameservers : [],
-          }
-        : undefined,
-      deadlines: {
-        fundBy: deadlines.fundBy ?? deadlines.fund_by,
-        transferBy: deadlines.transferBy ?? deadlines.transfer_by,
-        respondBy: deadlines.respondBy ?? deadlines.respond_by,
-      },
-      rdapSnapshots: Array.isArray(body.rdap_snapshots)
-        ? (body.rdap_snapshots as unknown[]).filter((h): h is string => typeof h === 'string')
-        : [],
-      settlementTxid: str('settlement_txid'),
+      deadlines: { fundBy },
+      claims,
+      sigs: (sigs as SignedSettlement[]).map(({ kind, leaf, outpoint, dest, fee, sig }) => ({ kind, leaf, outpoint, dest, fee, sig })),
       publishedAt: event.created_at,
       event,
     },
@@ -280,45 +354,42 @@ export interface Disagreement {
   values: { author: string; value: string }[]
 }
 
-/**
- * Compare views of one escrow. Disagreements are returned, not resolved.
- * Only participants' views count, since anyone can publish with this `d` tag.
- * Strangers' views come back separately for the UI to flag.
- */
-export function compareViews(views: readonly EscrowView[]): {
+export function compareViews(views: readonly EscrowView[], id: string): {
   agreed: boolean
   disagreements: Disagreement[]
   participants: EscrowView[]
   strangers: EscrowView[]
-  newest?: EscrowView
+  buyerView?: EscrowView
+  sellerView?: EscrowView
 } {
-  if (views.length === 0) return { agreed: true, disagreements: [], participants: [], strangers: [] }
+  const participants = views.filter((v) => v.id === id && (v.role === 'buyer' || v.role === 'seller'))
+  const strangers = views.filter((v) => !participants.includes(v))
 
-  const first = views[0]
-  const members = new Set([first.buyer, first.seller, ...(first.arbiter ? [first.arbiter] : [])])
-  const participants = views.filter((v) => members.has(v.author))
-  const strangers = views.filter((v) => !members.has(v.author))
-
-  // Newest view per author.
+  // Newest view per author. A tie keeps the lower event id, as NIP-01 replaces.
   const latest = new Map<string, EscrowView>()
   for (const view of participants) {
     const current = latest.get(view.author)
-    if (!current || view.publishedAt > current.publishedAt) latest.set(view.author, view)
+    if (
+      !current ||
+      view.publishedAt > current.publishedAt ||
+      (view.publishedAt === current.publishedAt && view.event.id < current.event.id)
+    ) {
+      latest.set(view.author, view)
+    }
   }
   const current = [...latest.values()]
 
+  // The id covers every one of these, so views of one id can't differ on them.
   const fields: [string, (v: EscrowView) => string][] = [
     ['address', (v) => v.address],
     ['amount', (v) => String(v.amountSats)],
     ['domain', (v) => v.domain],
     ['buyer key', (v) => v.buyer],
     ['seller key', (v) => v.seller],
-    ['arbiter key', (v) => v.arbiter ?? 'none'],
-    ['timeout polarity', (v) => v.timeoutTo],
+    ['arbiter key', (v) => v.arbiter],
     ['timelock', (v) => String(v.timeoutBlocks)],
+    ['transfer window', (v) => String(v.deliverBlocks)],
     ['network', (v) => v.network],
-    ['funding outpoint', (v) => (v.funding ? `${v.funding.txid}:${v.funding.vout}` : 'none')],
-    ['settlement txid', (v) => v.settlementTxid ?? 'none'],
   ]
 
   const disagreements: Disagreement[] = []
@@ -343,43 +414,115 @@ export function compareViews(views: readonly EscrowView[]): {
     disagreements,
     participants: current,
     strangers,
-    newest: current.sort((a, b) => b.publishedAt - a.publishedAt)[0],
+    buyerView: current.find((v) => v.role === 'buyer'),
+    sellerView: current.find((v) => v.role === 'seller'),
   }
 }
 
-/** A view's `settlement_txid` is only a claim. Only a spend seen on chain means `settled`. */
-export function deriveEscrowState(params: {
-  view: EscrowView
-  /** Chain: a confirmed output pays the address. */
-  funded?: boolean
-  /** Chain: that output is spent. */
-  spent?: boolean
-  /** From RDAP, via core/escrow/transfer.ts. */
-  transferPending?: boolean
-  now?: number
-}): { state: EscrowState; reason: string } {
-  if (params.spent) {
-    return { state: 'settled', reason: 'the escrow output has been spent, so the trade is over one way or another' }
-  }
-  if (params.funded) {
-    if (params.transferPending) {
-      return { state: 'transferring', reason: 'the registry shows a transfer underway on this domain' }
-    }
-    return { state: 'funded', reason: 'a confirmed payment is sitting in the escrow output' }
-  }
-
-  const fundBy = params.view.deadlines.fundBy
-  if (fundBy !== undefined && params.now !== undefined && params.now > fundBy) {
-    return { state: 'expired', reason: 'the funding deadline passed and nothing was paid' }
-  }
-  return { state: 'open', reason: 'published, and waiting to be funded' }
+export interface Ruling {
+  id: string
+  author: string
+  decision: 'release' | 'refund'
+  reason: string
+  settlement?: SignedSettlement
+  txid?: string
+  publishedAt: number
+  event: NostrEvent
 }
 
-export function escrowFilter(id: string): Record<string, unknown> {
-  return { kinds: [ESCROW_KIND], '#d': [ESCROW_D_PREFIX + id] }
+export function buildRuling(params: {
+  id: string
+  decision: 'release' | 'refund'
+  reason: string
+  settlement?: SignedSettlement
+  txid?: string
+  parties: readonly string[]
+  pubkey: string
+  createdAt: number
+}): UnsignedEvent {
+  if (!isHex32(params.pubkey)) throw new Error('buildRuling: pubkey must be 64 lowercase hex characters')
+  const problem = rulingProblem(params)
+  if (problem) throw new Error(`buildRuling: ${problem}`)
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: ESCROW_KIND,
+    tags: [
+      ['d', RULING_D_PREFIX + params.id],
+      ['t', ESCROW_TOPIC],
+      ['fmd_escrow', params.id],
+      ...params.parties.filter(isHex32).map((p) => ['p', p]),
+    ],
+    content: JSON.stringify({
+      v: 1,
+      escrow: params.id,
+      decision: params.decision,
+      reason: params.reason,
+      ...(params.settlement ? { settlement: params.settlement } : {}),
+      ...(params.txid ? { txid: params.txid } : {}),
+    }),
+  }
 }
 
-/** Every escrow these keys are party to. */
+function rulingProblem(r: { id?: unknown; decision?: unknown; reason?: unknown; settlement?: unknown; txid?: unknown }): string | undefined {
+  if (!isHex32(r.id)) return 'the escrow id is malformed'
+  if (r.decision !== 'release' && r.decision !== 'refund') return 'the decision is neither release nor refund'
+  if (typeof r.reason !== 'string' || r.reason.trim() === '' || r.reason.length > MAX_REASON) {
+    return `a ruling gives its reason, in at most ${MAX_REASON} characters`
+  }
+  if (r.settlement !== undefined) {
+    const problem = settlementProblem(r.settlement)
+    if (problem) return `settlement: ${problem}`
+    const s = r.settlement as SignedSettlement
+    const leaf = r.decision === 'release' ? 'B' : 'C'
+    if (s.kind !== r.decision || s.leaf !== leaf) return `a ${r.decision} ruling co-signs leaf ${leaf}`
+  }
+  if (r.txid !== undefined && !isHex32(r.txid)) return 'the txid is malformed'
+  return undefined
+}
+
+export function parseRuling(event: NostrEvent): { ok: true; ruling: Ruling } | { ok: false; reason: string } {
+  if (event.kind !== ESCROW_KIND) return { ok: false, reason: `kind ${event.kind} is not ${ESCROW_KIND}` }
+  if (event.tags.filter((t) => t[0] === 'd').length !== 1) return { ok: false, reason: 'a ruling must have exactly one d tag' }
+  const d = tagValue(event, 'd')
+  if (!d?.startsWith(RULING_D_PREFIX)) return { ok: false, reason: 'not a ruling' }
+  let body: Record<string, unknown>
+  try {
+    body = JSON.parse(event.content) as Record<string, unknown>
+  } catch {
+    return { ok: false, reason: 'content is not JSON' }
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return { ok: false, reason: 'content is not an object' }
+  if (body.v !== 1) return { ok: false, reason: `unsupported ruling version ${JSON.stringify(body.v ?? null)}` }
+  const ruling = { id: body.escrow, decision: body.decision, reason: body.reason, settlement: body.settlement, txid: body.txid }
+  const problem = rulingProblem(ruling)
+  if (problem) return { ok: false, reason: problem }
+  if (d !== RULING_D_PREFIX + ruling.id) return { ok: false, reason: 'the d tag names another escrow' }
+  const s = ruling.settlement as SignedSettlement | undefined
+  return {
+    ok: true,
+    ruling: {
+      id: ruling.id as string,
+      author: event.pubkey,
+      decision: ruling.decision as 'release' | 'refund',
+      reason: ruling.reason as string,
+      ...(s ? { settlement: { kind: s.kind, leaf: s.leaf, outpoint: s.outpoint, dest: s.dest, fee: s.fee, sig: s.sig } } : {}),
+      ...(ruling.txid ? { txid: ruling.txid as string } : {}),
+      publishedAt: event.created_at,
+      event,
+    },
+  }
+}
+
+export function escrowFilters(id: string, authors: readonly string[] = []): Record<string, unknown>[] {
+  const base = {
+    kinds: [ESCROW_KIND],
+    '#d': [ESCROW_D_PREFIX + id, RULING_D_PREFIX + id],
+  }
+  const known = authors.filter(isHex32)
+  return known.length ? [base, { ...base, authors: [...new Set(known)] }] : [base]
+}
+
 export function escrowsForFilter(pubkeys: readonly string[]): Record<string, unknown> {
   return { kinds: [ESCROW_KIND], '#p': [...pubkeys] }
 }
