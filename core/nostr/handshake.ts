@@ -1,25 +1,19 @@
-// Escrow invite and reply. Address and id need both escrow keys, a salt and the terms.
-//   invite  initiator -> joiner   salt, terms, initiator's escrow key
-//   reply   joiner -> initiator   joiner's escrow key
-// The salt is part of the id, so only the invite mints it. Two salts means two
-// coordinates that never see each other. The buyer's transfer commitment rides in
-// the buyer's message, since only the buyer knows where the domain goes.
-// Nothing here is secret (pubkeys go on chain, salt and terms in the escrow event),
-// so paste it anywhere. Private keys never leave their page.
-
 import { base64urlnopad } from '@scure/base'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
-import type { NetworkName, TimeoutTo } from '../escrow/tree.js'
+import { rulesProblem, type TradeRules } from '../escrow/trade.js'
+import type { NetworkName } from '../escrow/tree.js'
+import { checkEvent, isHex32, type NostrEvent, type UnsignedEvent } from './event.js'
 
-export const INVITE_PREFIX = 'fmdinv1'
-export const REPLY_PREFIX = 'fmdrep1'
+/** Ephemeral range, so a relay that gets one by mistake doesn't keep it. */
+export const HANDSHAKE_KIND = 20078
+export const INVITE_PREFIX = 'fmdinv5'
+export const REPLY_PREFIX = 'fmdrep5'
+
+const INVITE_TOPIC = 'fmd-invite'
+const REPLY_TOPIC = 'fmd-reply'
+const VERSION = 5
 
 type Role = 'buyer' | 'seller'
-
-export interface Commitment {
-  registrarIanaId?: string
-  nameservers: string[]
-}
 
 export interface Invite {
   salt: string
@@ -27,205 +21,241 @@ export interface Invite {
   amountSats: number
   network: NetworkName
   timeoutBlocks: number
-  timeoutTo: TimeoutTo
-  /** x-only hex. Omit for the 2-leaf tree. */
-  arbiter?: string
-  /** The joiner takes the other side. */
+  deliverBlocks: number
+  /** x-only hex. Every escrow has one: it decides a dispute, and never holds the domain. */
+  arbiter: string
   initiatorRole: Role
   /** Escrow pubkey, x-only hex. */
   initiatorKey: string
-  /** Present when the initiator is the buyer. */
-  commitment?: Commitment
+  to: string
 }
 
 export interface Reply {
   /** Escrow pubkey, x-only hex. */
   joinerKey: string
-  /** Present when the joiner is the buyer. */
-  commitment?: Commitment
-  /** Echoed from the invite, so a reply pasted into the wrong escrow fails instead of making a third address. */
-  salt: string
+}
+
+export interface SignedInvite {
+  invite: Invite
+  from: string
+  id: string
 }
 
 const HEX32 = /^[0-9a-f]{64}$/
 const NETWORKS: readonly NetworkName[] = ['mainnet', 'testnet', 'signet', 'regtest']
 
-function encode(prefix: string, value: unknown): string {
-  return prefix + base64urlnopad.encode(new TextEncoder().encode(JSON.stringify(value)))
+function encode(prefix: string, topic: string, event: NostrEvent): string {
+  if (event.kind !== HANDSHAKE_KIND || !event.tags.some((t) => t[0] === 't' && t[1] === topic)) {
+    throw new Error(`encode: that is not a signed ${topic}`)
+  }
+  return prefix + base64urlnopad.encode(new TextEncoder().encode(JSON.stringify(event)))
 }
 
-function decode(prefix: string, text: unknown): { ok: true; value: Record<string, unknown> } | { ok: false; reason: string } {
+function decode(
+  prefix: string,
+  topic: string,
+  text: unknown,
+): { ok: true; event: NostrEvent; body: Record<string, unknown> } | { ok: false; reason: string } {
   if (typeof text !== 'string') return { ok: false, reason: 'not a string' }
   const trimmed = text.trim().replace(/\s+/g, '')
+  if (/^fmd(inv|rep)[1234]/.test(trimmed)) {
+    return { ok: false, reason: 'this comes from an older version of the escrow; ask for a new invite' }
+  }
   if (!trimmed.startsWith(prefix)) {
     return { ok: false, reason: `this should start with "${prefix}"` }
   }
+
+  let value: unknown
   try {
-    const json = new TextDecoder().decode(base64urlnopad.decode(trimmed.slice(prefix.length)))
-    const value = JSON.parse(json)
-    if (typeof value !== 'object' || value === null) return { ok: false, reason: 'not an object' }
-    return { ok: true, value: value as Record<string, unknown> }
+    value = JSON.parse(new TextDecoder().decode(base64urlnopad.decode(trimmed.slice(prefix.length))))
   } catch {
     return { ok: false, reason: 'it did not decode: a character is missing or wrong' }
   }
+  const checked = checkEvent(value)
+  if (!checked.ok) return { ok: false, reason: `its signature does not check out (${checked.reason})` }
+  const event = checked.event
+  if (event.kind !== HANDSHAKE_KIND || !event.tags.some((t) => t[0] === 't' && t[1] === topic)) {
+    return { ok: false, reason: `this is not an escrow ${topic === INVITE_TOPIC ? 'invite' : 'reply'}` }
+  }
+
+  let body: unknown
+  try {
+    body = JSON.parse(event.content)
+  } catch {
+    return { ok: false, reason: 'its content is not JSON' }
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return { ok: false, reason: 'not an object' }
+  return { ok: true, event, body: body as Record<string, unknown> }
 }
 
-function readCommitment(raw: unknown): Commitment | undefined {
-  if (typeof raw !== 'object' || raw === null) return undefined
-  const c = raw as { registrarIanaId?: unknown; nameservers?: unknown }
-  const nameservers = Array.isArray(c.nameservers)
-    ? c.nameservers.filter((n): n is string => typeof n === 'string').map((n) => n.trim().toLowerCase())
-    : []
-  const registrarIanaId = typeof c.registrarIanaId === 'string' && c.registrarIanaId.trim() !== ''
-    ? c.registrarIanaId.trim()
-    : undefined
-  if (!registrarIanaId && nameservers.length === 0) return undefined
-  return { registrarIanaId, nameservers }
-}
-
-/** Validates everything, so a bad invite fails on the sender's page. */
-export function encodeInvite(invite: Invite): string {
-  if (!HEX32.test(invite.salt)) throw new Error('encodeInvite: salt must be 64 lowercase hex characters')
-  if (!HEX32.test(invite.initiatorKey)) throw new Error('encodeInvite: initiatorKey must be x-only hex')
-  if (invite.arbiter !== undefined && !HEX32.test(invite.arbiter)) {
-    throw new Error('encodeInvite: arbiter must be x-only hex')
-  }
-  if (!Number.isSafeInteger(invite.amountSats) || invite.amountSats <= 0) {
-    throw new Error('encodeInvite: amountSats must be a positive integer')
-  }
-  if (invite.initiatorRole === 'buyer' && !invite.commitment) {
-    // Without it the escrow's release condition could never be shown met.
-    throw new Error('encodeInvite: a buyer must commit to where they will receive the domain')
-  }
-  return encode(INVITE_PREFIX, {
-    v: 1,
-    salt: invite.salt,
-    domain: normaliseDomain(invite.domain),
-    amountSats: invite.amountSats,
-    network: invite.network,
-    timeoutBlocks: invite.timeoutBlocks,
-    timeoutTo: invite.timeoutTo,
-    ...(invite.arbiter ? { arbiter: invite.arbiter } : {}),
-    initiatorRole: invite.initiatorRole,
-    initiatorKey: invite.initiatorKey,
-    ...(invite.commitment ? { commitment: invite.commitment } : {}),
-  })
-}
-
-export function decodeInvite(text: unknown): { ok: true; invite: Invite } | { ok: false; reason: string } {
-  const parsed = decode(INVITE_PREFIX, text)
-  if (!parsed.ok) return parsed
-  const v = parsed.value
-
-  if (v.v !== 1) return { ok: false, reason: `unsupported invite version ${String(v.v)}` }
-  if (typeof v.salt !== 'string' || !HEX32.test(v.salt)) return { ok: false, reason: 'the invite has no valid salt' }
-  if (typeof v.initiatorKey !== 'string' || !HEX32.test(v.initiatorKey)) {
-    return { ok: false, reason: "the invite has no valid escrow key" }
-  }
-  if (v.arbiter !== undefined && (typeof v.arbiter !== 'string' || !HEX32.test(v.arbiter))) {
-    return { ok: false, reason: 'the arbiter key is malformed' }
-  }
+function inviteProblem(v: Record<string, unknown>, sender: string): string | undefined {
+  if (typeof v.salt !== 'string' || !HEX32.test(v.salt)) return 'the invite has no valid salt'
+  if (typeof v.initiatorKey !== 'string' || !HEX32.test(v.initiatorKey)) return 'the invite has no valid escrow key'
+  if (typeof v.arbiter !== 'string' || !HEX32.test(v.arbiter)) return 'the invite names no valid arbiter key'
+  if (v.arbiter === v.initiatorKey) return "the invite's own escrow key is also its arbiter"
+  if (typeof v.to !== 'string' || !HEX32.test(v.to)) return 'the invite does not say who it is for'
+  if (v.to === sender) return 'the invite is addressed to its own sender'
   const domain = tryNormaliseDomain(v.domain)
-  if (!domain.ok) return { ok: false, reason: `domain: ${domain.reason}` }
-  const amountSats = Number(v.amountSats)
-  if (!Number.isSafeInteger(amountSats) || amountSats <= 0) return { ok: false, reason: 'the amount is invalid' }
-  if (!NETWORKS.includes(v.network as NetworkName)) return { ok: false, reason: 'unknown network' }
-  const timeoutBlocks = Number(v.timeoutBlocks)
-  if (!Number.isInteger(timeoutBlocks) || timeoutBlocks < 1 || timeoutBlocks > 65535) {
-    return { ok: false, reason: 'the timelock is out of range' }
-  }
-  if (v.timeoutTo !== 'buyer' && v.timeoutTo !== 'seller') return { ok: false, reason: 'no timeout polarity' }
-  if (v.initiatorRole !== 'buyer' && v.initiatorRole !== 'seller') return { ok: false, reason: 'no role' }
+  if (!domain.ok) return `domain: ${domain.reason}`
+  if (!Number.isSafeInteger(v.amountSats) || (v.amountSats as number) <= 0) return 'the amount is not a positive whole number of sats'
+  if (!NETWORKS.includes(v.network as NetworkName)) return 'unknown network'
+  const rules = rulesProblem({ timeoutBlocks: v.timeoutBlocks as number, deliverBlocks: v.deliverBlocks as number })
+  if (rules) return rules
+  if (v.initiatorRole !== 'buyer' && v.initiatorRole !== 'seller') return 'no role'
+  return undefined
+}
 
-  const commitment = readCommitment(v.commitment)
-  if (v.initiatorRole === 'buyer' && !commitment) {
-    return { ok: false, reason: 'the buyer did not say where they will receive the domain' }
+export function buildInvite(invite: Invite, params: { pubkey: string; createdAt: number }): UnsignedEvent {
+  if (!isHex32(params.pubkey)) throw new Error('buildInvite: pubkey must be 64 lowercase hex characters')
+  const problem = inviteProblem(invite as unknown as Record<string, unknown>, params.pubkey)
+  if (problem) throw new Error(`buildInvite: ${problem}`)
+
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: HANDSHAKE_KIND,
+    tags: [
+      ['t', INVITE_TOPIC],
+      ['p', invite.to],
+    ],
+    content: JSON.stringify({
+      v: VERSION,
+      salt: invite.salt,
+      domain: normaliseDomain(invite.domain),
+      amountSats: invite.amountSats,
+      network: invite.network,
+      timeoutBlocks: invite.timeoutBlocks,
+      deliverBlocks: invite.deliverBlocks,
+      arbiter: invite.arbiter,
+      initiatorRole: invite.initiatorRole,
+      initiatorKey: invite.initiatorKey,
+      to: invite.to,
+    }),
   }
+}
+
+export function encodeInvite(event: NostrEvent): string {
+  return encode(INVITE_PREFIX, INVITE_TOPIC, event)
+}
+
+export function decodeInvite(text: unknown): ({ ok: true } & SignedInvite) | { ok: false; reason: string } {
+  const parsed = decode(INVITE_PREFIX, INVITE_TOPIC, text)
+  if (!parsed.ok) return parsed
+  const v = parsed.body
+
+  if (v.v !== VERSION) return { ok: false, reason: `unsupported invite version ${String(v.v)}` }
+  const problem = inviteProblem(v, parsed.event.pubkey)
+  if (problem) return { ok: false, reason: problem }
 
   return {
     ok: true,
+    from: parsed.event.pubkey,
+    id: parsed.event.id,
     invite: {
-      salt: v.salt,
-      domain: domain.domain,
-      amountSats,
+      salt: v.salt as string,
+      domain: normaliseDomain(v.domain as string),
+      amountSats: v.amountSats as number,
       network: v.network as NetworkName,
-      timeoutBlocks,
-      timeoutTo: v.timeoutTo,
-      arbiter: typeof v.arbiter === 'string' ? v.arbiter : undefined,
-      initiatorRole: v.initiatorRole,
-      initiatorKey: v.initiatorKey,
-      commitment,
+      timeoutBlocks: v.timeoutBlocks as number,
+      deliverBlocks: v.deliverBlocks as number,
+      arbiter: v.arbiter as string,
+      initiatorRole: v.initiatorRole as Role,
+      initiatorKey: v.initiatorKey as string,
+      to: v.to as string,
     },
   }
 }
 
-export function encodeReply(reply: Reply): string {
-  if (!HEX32.test(reply.joinerKey)) throw new Error('encodeReply: joinerKey must be x-only hex')
-  if (!HEX32.test(reply.salt)) throw new Error('encodeReply: salt must be 64 lowercase hex characters')
-  return encode(REPLY_PREFIX, {
-    v: 1,
-    salt: reply.salt,
-    joinerKey: reply.joinerKey,
-    ...(reply.commitment ? { commitment: reply.commitment } : {}),
-  })
+export function buildReply(reply: Reply, params: { pubkey: string; createdAt: number; invite: SignedInvite }): UnsignedEvent {
+  const { invite } = params.invite
+  if (params.pubkey !== invite.to) throw new Error('buildReply: this invite is for a different key')
+  const problem = replyProblem(reply, invite)
+  if (problem) throw new Error(`buildReply: ${problem}`)
+
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: HANDSHAKE_KIND,
+    tags: [
+      ['t', REPLY_TOPIC],
+      ['e', params.invite.id],
+      ['p', params.invite.from],
+    ],
+    content: JSON.stringify({
+      v: VERSION,
+      invite: params.invite.id,
+      joinerKey: reply.joinerKey,
+    }),
+  }
 }
 
-/** A reply means nothing alone. The salt check stops one escrow's reply landing in another. */
-export function decodeReply(text: unknown, invite: Invite): { ok: true; reply: Reply } | { ok: false; reason: string } {
-  const parsed = decode(REPLY_PREFIX, text)
+export function encodeReply(event: NostrEvent): string {
+  return encode(REPLY_PREFIX, REPLY_TOPIC, event)
+}
+
+function replyProblem(reply: Reply, invite: Invite): string | undefined {
+  if (typeof reply.joinerKey !== 'string' || !HEX32.test(reply.joinerKey)) return 'the reply has no valid escrow key'
+  if (reply.joinerKey === invite.initiatorKey) return 'the reply carries your own key back; ask them to join from the invite'
+  if (reply.joinerKey === invite.arbiter) return 'the reply carries the arbiter key, and each party needs its own'
+  return undefined
+}
+
+/** A reply counts only from the key the invite was addressed to, and only for that exact invite. */
+export function decodeReply(text: unknown, signed: SignedInvite): { ok: true; reply: Reply; from: string } | { ok: false; reason: string } {
+  const parsed = decode(REPLY_PREFIX, REPLY_TOPIC, text)
   if (!parsed.ok) return parsed
-  const v = parsed.value
+  const v = parsed.body
 
-  if (v.v !== 1) return { ok: false, reason: `unsupported reply version ${String(v.v)}` }
-  if (typeof v.joinerKey !== 'string' || !HEX32.test(v.joinerKey)) {
-    return { ok: false, reason: 'the reply has no valid escrow key' }
+  if (v.v !== VERSION) return { ok: false, reason: `unsupported reply version ${String(v.v)}` }
+  if (v.invite !== signed.id) {
+    return { ok: false, reason: 'this reply answers a different invite; send them the current link' }
   }
-  if (v.salt !== invite.salt) {
-    return { ok: false, reason: 'this reply answers a different escrow: the salts do not match' }
-  }
-  if (v.joinerKey === invite.initiatorKey) {
-    return { ok: false, reason: 'the reply carries your own key back; ask them to join from the invite' }
-  }
-  if (invite.arbiter && v.joinerKey === invite.arbiter) {
-    return { ok: false, reason: 'the reply carries the arbiter key, and each party needs its own' }
+  if (parsed.event.pubkey !== signed.invite.to) {
+    return { ok: false, reason: 'this reply is signed by someone other than the person the invite is for' }
   }
 
-  const commitment = readCommitment(v.commitment)
-  const joinerIsBuyer = invite.initiatorRole === 'seller'
-  if (joinerIsBuyer && !commitment) {
-    return { ok: false, reason: 'the buyer did not say where they will receive the domain' }
-  }
-
-  return { ok: true, reply: { joinerKey: v.joinerKey, salt: v.salt as string, commitment } }
+  const reply: Reply = { joinerKey: typeof v.joinerKey === 'string' ? v.joinerKey : '' }
+  const problem = replyProblem(reply, signed.invite)
+  if (problem) return { ok: false, reason: problem }
+  return { ok: true, reply, from: parsed.event.pubkey }
 }
 
-/** Same invite and reply on both sides give identical inputs, so tree, address and id match. */
 export function resolveHandshake(invite: Invite, reply: Reply): {
   salt: string
   domain: string
   amountSats: number
   network: NetworkName
   timeoutBlocks: number
-  timeoutTo: TimeoutTo
-  arbiter?: string
+  deliverBlocks: number
+  arbiter: string
   buyerKey: string
   sellerKey: string
-  commitment: Commitment
 } {
   const buyerKey = invite.initiatorRole === 'buyer' ? invite.initiatorKey : reply.joinerKey
   const sellerKey = invite.initiatorRole === 'seller' ? invite.initiatorKey : reply.joinerKey
-  const commitment = invite.initiatorRole === 'buyer' ? invite.commitment : reply.commitment
-  if (!commitment) throw new Error('resolveHandshake: no transfer commitment from the buyer')
   return {
     salt: invite.salt,
     domain: invite.domain,
     amountSats: invite.amountSats,
     network: invite.network,
     timeoutBlocks: invite.timeoutBlocks,
-    timeoutTo: invite.timeoutTo,
+    deliverBlocks: invite.deliverBlocks,
     arbiter: invite.arbiter,
     buyerKey,
     sellerKey,
-    commitment,
   }
+}
+
+export function termsProblem(
+  terms: { arbiter?: unknown; timeoutBlocks: number; deliverBlocks: number },
+  rules: TradeRules,
+): string | undefined {
+  if (!isHex32(terms.arbiter)) return 'every escrow here has an arbiter, and these terms name none'
+  if (terms.timeoutBlocks !== rules.timeoutBlocks) {
+    return `the timelock is ${terms.timeoutBlocks} blocks, and this site uses ${rules.timeoutBlocks}`
+  }
+  if (terms.deliverBlocks !== rules.deliverBlocks) {
+    return `the transfer window is ${terms.deliverBlocks} blocks, and this site uses ${rules.deliverBlocks}`
+  }
+  return undefined
 }
