@@ -1,6 +1,4 @@
 // NIP-44 v2 payloads. Pure, the caller passes the nonce.
-// Carries the auth code to the buyer inside a NIP-17 gift wrap. The site never sees it.
-// No NIP-04, it is unauthenticated AES-CBC. Checked against nostr-tools in test/vectors/nip17.test.ts.
 
 import { chacha20 } from '@noble/ciphers/chacha.js'
 import { hmac } from '@noble/hashes/hmac.js'
@@ -12,17 +10,11 @@ import { base64 } from '@scure/base'
 
 export const NIP44_VERSION = 2
 
-/** HKDF salt, fixed by the spec. */
 const SALT = utf8ToBytes('nip44-v2')
 
-/** Spec bounds. */
 export const MIN_PLAINTEXT_BYTES = 1
 export const MAX_PLAINTEXT_BYTES = 65535
 
-/**
- * Per-pair key: ECDH X coordinate, then HKDF-extract. Symmetric and fixed, so compute it once per conversation.
- * Key material. Never log it, store it or put it in an error.
- */
 export function conversationKey(secretKey: Uint8Array, peerPublicKeyHex: string): Uint8Array {
   // `02` because BIP-340 x-only keys are the even-Y point.
   const shared = secp256k1.getSharedSecret(secretKey, hexToBytes(`02${peerPublicKeyHex}`))
@@ -56,7 +48,6 @@ export function paddedLength(length: number): number {
   return chunk * (Math.floor((length - 1) / chunk) + 1)
 }
 
-/** u16be(length) || plaintext || zeros. */
 function pad(plaintext: string): Uint8Array {
   const bytes = utf8ToBytes(plaintext)
   if (bytes.length < MIN_PLAINTEXT_BYTES || bytes.length > MAX_PLAINTEXT_BYTES) {
@@ -70,12 +61,10 @@ function pad(plaintext: string): Uint8Array {
   return out
 }
 
-/** Inverse of pad. */
 function unpad(padded: Uint8Array): string {
   if (padded.length < 2) throw new Error('nip44: padded plaintext is too short')
   const length = (padded[0] << 8) | padded[1]
   const bytes = padded.subarray(2, 2 + length)
-  // Check both. A tampered declared length tries to read past the plaintext.
   if (length < MIN_PLAINTEXT_BYTES || bytes.length !== length) {
     throw new Error('nip44: declared plaintext length does not match the payload')
   }
@@ -85,11 +74,7 @@ function unpad(padded: Uint8Array): string {
   return new TextDecoder().decode(bytes)
 }
 
-/**
- * `nonce` is 32 bytes, fresh per message under one conversation key. Reuse leaks the XOR
- * of two plaintexts, close to leaking both for a short auth code. core/ draws no randomness,
- * which keeps tests deterministic.
- */
+/** `nonce` is 32 bytes, fresh per message under one conversation key. */
 export function encrypt(plaintext: string, conversation: Uint8Array, nonce: Uint8Array): string {
   const { chachaKey, chachaNonce, hmacKey } = messageKeys(conversation, nonce)
   const ciphertext = chacha20(chachaKey, chachaNonce, pad(plaintext))
@@ -98,7 +83,6 @@ export function encrypt(plaintext: string, conversation: Uint8Array, nonce: Uint
   return base64.encode(concatBytes(Uint8Array.of(NIP44_VERSION), nonce, ciphertext, mac))
 }
 
-/** Decrypt or throw. MAC first, decrypt after. The other order is a padding oracle. */
 export function decrypt(payload: string, conversation: Uint8Array): string {
   if (payload.length === 0) throw new Error('nip44: empty payload')
   if (payload[0] === '#') throw new Error('nip44: this payload declares an unsupported version')
@@ -126,7 +110,6 @@ export function decrypt(payload: string, conversation: Uint8Array): string {
   return unpad(chacha20(chachaKey, chachaNonce, ciphertext))
 }
 
-/** Constant time. An early-exit compare on a MAC is a forgery oracle. */
 function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false
   let diff = 0
