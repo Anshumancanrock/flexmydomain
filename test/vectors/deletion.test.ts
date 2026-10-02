@@ -1,5 +1,4 @@
-// NIP-09 vectors for core/nostr/deletion.ts. A request applies only to its author's own
-// events. Without that check any competitor could delist anyone with a kind 5.
+// NIP-09 deletion requests (core/nostr/deletion.ts).
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'

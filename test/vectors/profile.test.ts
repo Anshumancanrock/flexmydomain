@@ -1,5 +1,4 @@
-// NIP-39 identities, NIP-89 handlers and NIP-51 lists. An empty arbiter intersection means
-// "no trade". A client that substitutes a default picks the arbiter for both parties.
+// NIP-39 identities, NIP-89 handlers and NIP-51 lists.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -102,7 +101,6 @@ describe('NIP-51 arbiter sets', () => {
   })
 
   test('an empty published list differs from no list', () => {
-    // Empty means "I will trade with no arbiter at all".
     expect(parseArbiterSet(setOf([]))).toEqual([])
     expect(parseArbiterSet(signEvent({ ...setOf([]), kind: 1 }, ALICE.sk, AUX))).toBeUndefined()
   })
@@ -116,19 +114,27 @@ describe('NIP-51 arbiter sets', () => {
   })
 
   test('no overlap means no trade, never a default', () => {
-    const result = arbiterIntersection([A1], [A2])
-    expect(result.arbiters).toEqual([])
-    expect(result.noArbiterPossible).toBe(false) // Both wanted one and disagreed.
+    expect(arbiterIntersection([A1], [A2]).arbiters).toEqual([])
   })
 
-  test('both publishing empty lists means they agree on no arbiter', () => {
-    expect(arbiterIntersection([], [])).toEqual({ arbiters: [], noArbiterPossible: true })
+  test('both publishing empty lists means no arbiter, so no escrow, not the site default', () => {
+    expect(arbiterIntersection([], [], [A3])).toEqual({ arbiters: [] })
   })
 
-  test('a party who published no list has expressed no constraint', () => {
-    expect(arbiterIntersection(undefined, [A1, A2]).arbiters).toEqual([A1, A2])
-    expect(arbiterIntersection([A1], undefined).arbiters).toEqual([A1])
-    expect(arbiterIntersection(undefined, undefined).noArbiterPossible).toBe(true)
+  test('a party with no list accepts only the site\'s arbiters, never the other side\'s pick', () => {
+    // A seller listing their own second key must not get it offered as "accepted by both".
+    expect(arbiterIntersection(undefined, [A1, A2]).arbiters).toEqual([])
+    expect(arbiterIntersection([A1], undefined).arbiters).toEqual([])
+    expect(arbiterIntersection(undefined, [A1, A2], [A2]).arbiters).toEqual([A2])
+    expect(arbiterIntersection(undefined, [A1], [A2]).arbiters).toEqual([])
+    expect(arbiterIntersection(undefined, undefined, [A3]).arbiters).toEqual([A3])
+    expect(arbiterIntersection(undefined, undefined).arbiters).toEqual([])
+  })
+
+  test("a party's own key is never the arbiter, even when both lists name it", () => {
+    // The site's arbiter selling a domain would otherwise hold the seller key and the arbiter key.
+    expect(arbiterIntersection(undefined, undefined, [A1], [A1, A2]).arbiters).toEqual([])
+    expect(arbiterIntersection([A1, A3], [A1, A3], [], [A1]).arbiters).toEqual([A3])
   })
 })
 

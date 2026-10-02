@@ -1,5 +1,4 @@
-// core/oracle vectors (spec/PROOF.md section 8). Ports must match exactly, and the spec settles any
-// disagreement. The normalised domain is signed, so a one-character mismatch fails with no diagnostic.
+// core/oracle vectors (spec/PROOF.md section 8). Other implementations must match them exactly.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
@@ -12,8 +11,6 @@ import {
   decodeLabel,
   encodeLabel,
   encodeProofRecord,
-  fingerprintMatches,
-  fingerprintOf,
   foldStatus,
   isNormalisedDomain,
   namesForPubkey,
@@ -47,7 +44,7 @@ import {
 
 import { checkEvent, eventId, signEvent, type NostrEvent } from '../../core/nostr/event.ts'
 
-/** Zero aux randomness, so signatures are reproducible. */
+// Zero aux randomness, so signatures are reproducible.
 const AUX = new Uint8Array(32)
 
 function key(fill: number) {
@@ -58,7 +55,7 @@ function key(fill: number) {
 const SELLER = key(0x11)
 const STRANGER = key(0x22)
 
-/** 2026-09-15T00:00:00Z. */
+// 2026-09-15T00:00:00Z
 const IAT = 1789430400
 const NOW = IAT + 3600
 
@@ -112,8 +109,7 @@ describe('punycode', () => {
   })
 
   test('an A-label that decodes to pure ASCII is rejected', () => {
-    // `xn--a-` decodes to "a". Two spellings of one domain would mean two signed messages
-    // for one claim.
+    // `xn--a-` decodes to "a", and two spellings of one domain would sign two messages for one claim.
     expect(() => toASCII('xn--a-.com')).toThrow()
     expect(toASCII('a.com')).toBe('a.com')
   })
@@ -200,6 +196,18 @@ describe('normaliseDomain', () => {
     const long = `b.${ok}`
     expect(long.length).toBeGreaterThan(253)
     expect(() => normaliseDomain(long)).toThrow()
+  })
+
+  test('a huge non-ASCII input is refused before it is encoded', () => {
+    const huge = Array.from({ length: 20000 }, (_, i) => String.fromCodePoint(0x4e00 + i)).join('') + '.com'
+    const started = performance.now()
+    const r = tryNormaliseDomain(huge)
+    expect(performance.now() - started).toBeLessThan(100)
+    expect(r.ok).toBe(false)
+    const label = tryNormaliseDomain(`${'ü'.repeat(64)}.com`)
+    expect(label.ok).toBe(false)
+    if (!label.ok) expect(label.reason).toContain('exceeds 63')
+    expect(normaliseDomain('münchen.de')).toBe('xn--mnchen-3ya.de')
   })
 
   test('tldOf and splitDomain read the last label', () => {
@@ -416,11 +424,18 @@ describe('NIP-05', () => {
     relays: { [SELLER.pk]: ['wss://relay.damus.io', 'http://not-a-relay'] },
   }
 
-  test('any name mapping to the key proves control', () => {
+  test('the root name mapping to the key proves control', () => {
     const v = verifyNip05({ domain: DOMAIN, pubkey: SELLER.pk, document: doc })
     expect(v.ok).toBe(true)
     expect(v.names).toEqual(['_', 'alice'])
     expect(v.identifier).toBe(DOMAIN) // `_` renders as the bare domain.
+  })
+
+  test('any other name proves nothing: hosted NIP-05 lists many users on one domain', () => {
+    const v = verifyNip05({ domain: DOMAIN, pubkey: STRANGER.pk, document: doc })
+    expect(v.ok).toBe(false)
+    expect(v.reason).toContain(`bob@${DOMAIN}`)
+    expect(v.reason).toContain(`only _@${DOMAIN}`)
   })
 
   test('a document that never mentions the key proves nothing', () => {
@@ -513,6 +528,13 @@ describe('RDAP bootstrap', () => {
   test('an unlisted TLD has no service, which is an answer and not an error', () => {
     expect(rdapBaseUrls(BOOTSTRAP, 'something.ai')).toEqual([])
     expect(tldHasRdap(BOOTSTRAP, 'something.ai')).toBe(false)
+  })
+
+  test('a plain-HTTP service is dropped, since anyone on the path could answer for it', () => {
+    const mixed = { services: [[['kg'], ['http://rdap.cctld.kg/']], [['mg'], ['http://rdap.nic.mg/', 'https://rdap.nic.mg/']]] }
+    expect(rdapBaseUrls(mixed, 'name.kg')).toEqual([])
+    expect(tldHasRdap(mixed, 'name.kg')).toBe(false)
+    expect(rdapBaseUrls(mixed, 'name.mg')).toEqual(['https://rdap.nic.mg/'])
   })
 
   test('a malformed bootstrap file yields nothing rather than throwing', () => {
@@ -645,43 +667,9 @@ describe('eligibility', () => {
   })
 })
 
-describe('the release fingerprint', () => {
-  const before = fingerprintOf(parseRdapDomain(rdapResponse()))
-
-  test('a registrar change is a match', () => {
-    const after = fingerprintOf(
-      parseRdapDomain(
-        rdapResponse({
-          entities: [
-            { roles: ['registrar'], publicIds: [{ type: 'IANA Registrar ID', identifier: '292' }] },
-          ],
-        }),
-      ),
-    )
-    expect(fingerprintMatches(after, { registrarIanaId: '292', nameservers: [] })).toBe(true)
-    expect(fingerprintMatches(before, { registrarIanaId: '292', nameservers: [] })).toBe(false)
-  })
-
-  test('a same-registrar push is caught by the nameservers instead', () => {
-    const after = fingerprintOf(
-      parseRdapDomain(rdapResponse({ nameservers: [{ ldhName: 'ns1.buyer.example' }, { ldhName: 'ns2.buyer.example' }] })),
-    )
-    // Registrar id unchanged, only the nameservers moved.
-    expect(after.registrarIanaId).toBe(before.registrarIanaId)
-    expect(fingerprintMatches(after, { registrarIanaId: undefined, nameservers: ['ns1.buyer.example'] })).toBe(true)
-    expect(fingerprintMatches(before, { registrarIanaId: undefined, nameservers: ['ns1.buyer.example'] })).toBe(false)
-  })
-
-  test('an empty commitment never matches', () => {
-    expect(fingerprintMatches(before, { registrarIanaId: undefined, nameservers: [] })).toBe(false)
-  })
-})
-
 describe('the verifier in spec/PROOF.md', () => {
-  /**
-   * The verifier printed in spec/PROOF.md, minus comments. People will implement against it,
-   * so we run it. Uses only @noble and nothing from this repo, so it's a second implementation.
-   */
+  // The verifier printed in spec/PROOF.md, minus comments. People implement against it, and it
+  // uses only @noble, so it doubles as a second implementation.
   function specVerify(value: string, domain: string): boolean {
     const [version, iat, pubkey, sig] = value.split('.')
     if (version !== 'fmd1') return false

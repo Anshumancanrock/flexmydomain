@@ -1,5 +1,4 @@
-// Zaps, trade receipts and badges, the parts that can be gamed for money. Many tests are one
-// attack each. Skip any of these checks and the ranking costs nothing to climb.
+// Zaps, trade receipts and badges: the parts that can be gamed for money.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -300,12 +299,12 @@ describe('trade receipts', () => {
       receiptOf(ALICE, 'buyer', BOB.pk, { transferSnapshot: undefined }),
       receiptOf(BOB, 'seller', ALICE.pk, { transferSnapshot: undefined }),
     ])
-    expect(trades[0].mutual).toBe(true) // Real, agreeing pair.
-    expect(countsTowardReputation(trades[0])).toBe(false) // Still counts for nothing.
+    expect(trades[0].mutual).toBe(true)
+    expect(countsTowardReputation(trades[0])).toBe(false)
 
     const summary = summariseTrades(trades, ALICE.pk)
     expect(summary.verified).toBe(0)
-    expect(summary.unweighted).toBe(1) // Shown, never hidden.
+    expect(summary.unweighted).toBe(1)
   })
 
   test('ten trades with one partner is one relationship', () => {
@@ -374,8 +373,8 @@ describe('badges', () => {
       MALLORY.sk,
       AUX,
     )
-    expect(parseProfileBadges(profile)).toHaveLength(1) // Claims one.
-    expect(verifiedBadges({ pubkey: MALLORY.pk, profile, awards: [award] })).toEqual([]) // Backs none.
+    expect(parseProfileBadges(profile)).toHaveLength(1)
+    expect(verifiedBadges({ pubkey: MALLORY.pk, profile, awards: [award] })).toEqual([])
   })
 
   test("an award of somebody else's badge does not verify", () => {
@@ -416,10 +415,8 @@ describe('badges', () => {
 })
 
 describe('a market "Feature" payment reaches the flex board', () => {
-  /*
-   * The flex board drops zaps with no `fmd_flex` tag, so a feature zap with only the listing's
-   * `a` coordinate would be paid for and never appear. The market page must pass flexDomain too.
-   */
+  // The flex board drops zaps without an fmd_flex tag, so the market page must pass flexDomain
+  // as well as the listing's a coordinate, or a paid feature never shows.
   const receiptFor = (withFlex: boolean) => {
     const request = signEvent(
       buildZapRequest({
@@ -460,4 +457,26 @@ describe('a market "Feature" payment reaches the flex board', () => {
     expect(ranked[0].domain).toBe('lumenary.com')
     expect(ranked[0].sats).toBe(100)
   })
+})
+
+test('a zap provider that fails once is asked again, not blanked for the session', async () => {
+  const { clearZapperKeyCache, zapperKeyFor } = await import('../../net/lnurl.ts')
+  const realFetch = globalThis.fetch
+  const zapper = bytesToHex(schnorr.getPublicKey(new Uint8Array(32).fill(0x61)))
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    if (calls === 1) return new Response('busy', { status: 503 })
+    return Response.json({ callback: 'https://pay.example/cb', minSendable: 1000, maxSendable: 1e9, allowsNostr: true, nostrPubkey: zapper })
+  }) as unknown as typeof fetch
+  try {
+    clearZapperKeyCache()
+    expect(await zapperKeyFor('flex@pay.example')).toBeUndefined()
+    expect(await zapperKeyFor('flex@pay.example')).toBe(zapper)
+    expect(await zapperKeyFor('flex@pay.example')).toBe(zapper) // Now it is cached.
+    expect(calls).toBe(2)
+  } finally {
+    globalThis.fetch = realFetch
+    clearZapperKeyCache()
+  }
 })
