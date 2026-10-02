@@ -1,8 +1,4 @@
-/**
- * NIP-05 as an alternative domain proof (spec/PROOF.md section 7). Parsing only,
- * `fetchNip05` in net/dns.ts fetches. It proves web server control, which a CDN or
- * host can grant without DNS access. Label it, never pass it off as a TXT proof.
- */
+// NIP-05 as an alternative domain proof (spec/PROOF.md section 7). Parsing only, `fetchNip05` in net/dns.ts fetches.
 
 import { isHex32 } from '../nostr/event.js'
 import { normaliseDomain, tryNormaliseDomain } from './domain.js'
@@ -10,21 +6,15 @@ import { normaliseDomain, tryNormaliseDomain } from './domain.js'
 /** NIP-05 root name. `_@example.com` shows as bare `example.com`. */
 export const ROOT_NAME = '_'
 
-/** Other JSON fields are ignored. */
 export interface Nip05Document {
   names?: Record<string, string>
   relays?: Record<string, string[]>
 }
 
-/**
- * Fetch without credentials. NIP-05 requires `Access-Control-Allow-Origin: *`,
- * and a domain that doesn't send it isn't offering this proof.
- */
 export function nip05DocumentUrl(domain: string, name: string = ROOT_NAME): string {
   return `https://${normaliseDomain(domain)}/.well-known/nostr.json?name=${encodeURIComponent(name)}`
 }
 
-/** Takes `name@example.com` or a bare `example.com`. */
 export function parseNip05Identifier(
   raw: unknown,
 ): { ok: true; name: string; domain: string; identifier: string } | { ok: false; reason: string } {
@@ -46,10 +36,6 @@ export function parseNip05Identifier(
   return { ok: true, name, domain: domain.domain, identifier: `${name}@${domain.domain}` }
 }
 
-/**
- * Every name mapping to `pubkey`, so the UI can show which one backed the proof.
- * Only the hex pubkey matches case-insensitively. NIP-05 names are case-sensitive.
- */
 export function namesForPubkey(document: unknown, pubkey: string): string[] {
   if (!isHex32(pubkey)) return []
   if (typeof document !== 'object' || document === null) return []
@@ -63,43 +49,37 @@ export function namesForPubkey(document: unknown, pubkey: string): string[] {
   return matches
 }
 
-/** Same shape as the TXT verdict. */
 export interface Nip05Verification {
   ok: boolean
   reason?: string
-  /** `_` first when present. */
   names?: string[]
-  /** For display. The root name renders as the bare domain. */
   identifier?: string
 }
 
-/**
- * No timestamp is possible, the document only speaks for the moment it was fetched.
- * Re-poll it, and label listings backed only by NIP-05.
- */
+/** Only the root name `_` speaks for the domain. */
 export function verifyNip05(params: { domain: string; pubkey: string; document: unknown }): Nip05Verification {
   const domain = tryNormaliseDomain(params.domain)
   if (!domain.ok) return { ok: false, reason: `domain: ${domain.reason}` }
   if (!isHex32(params.pubkey)) return { ok: false, reason: 'pubkey is not 64 lowercase hex characters' }
 
   const names = namesForPubkey(params.document, params.pubkey)
-  if (names.length === 0) {
-    return { ok: false, reason: 'no name in this document maps to that pubkey' }
+  if (!names.includes(ROOT_NAME)) {
+    return {
+      ok: false,
+      reason: names.length === 0
+        ? 'no name in this document maps to that pubkey'
+        : `the document maps ${names.map((n) => `${n}@${domain.domain}`).join(', ')} to that pubkey, but only _@${domain.domain} speaks for the domain`,
+    }
   }
 
-  const ordered = names.includes(ROOT_NAME) ? [ROOT_NAME, ...names.filter((n) => n !== ROOT_NAME)] : names
-  const best = ordered[0]
   return {
     ok: true,
-    names: ordered,
-    identifier: best === ROOT_NAME ? domain.domain : `${best}@${domain.domain}`,
+    names: [ROOT_NAME, ...names.filter((n) => n !== ROOT_NAME)],
+    identifier: domain.domain,
   }
 }
 
-/**
- * NIP-05 relay hints for a key. Useful even if the proof fails, as an outbox seed
- * before any NIP-65 list turns up. Hints only, never authority.
- */
+/** NIP-05 relay hints for a key. Useful even if the proof fails, as an outbox seed before any NIP-65 list turns up. */
 export function relayHints(document: unknown, pubkey: string): string[] {
   if (!isHex32(pubkey)) return []
   if (typeof document !== 'object' || document === null) return []

@@ -1,10 +1,3 @@
-/**
- * Domain proof. spec/PROOF.md is normative, the spec wins if they disagree.
- * The key signs the id of a canonical NIP-01 event naming the domain, since NIP-07
- * only exposes `signEvent`. The TXT record alone rebuilds that event, and the same
- * event and signature can be published to relays. No network here, net/ resolves.
- */
-
 import { bytesToHex } from '@noble/hashes/utils.js'
 import {
   eventDigest,
@@ -18,10 +11,8 @@ import {
 } from '../nostr/event.js'
 import { normaliseDomain, tryNormaliseDomain } from './domain.js'
 
-/** TXT record version. Anything else is rejected. */
 export const PROOF_VERSION = 'fmd1'
 
-/** Signed message version. Bump with the format. */
 export const PROOF_MESSAGE_PREFIX = 'flexmydomain:v1'
 
 /** NIP-78 app data. Addressable, so a relay keeps one current proof per domain per key. */
@@ -29,10 +20,8 @@ export const PROOF_KIND = 30078
 
 export const PROOF_D_PREFIX = 'fmd:proof:'
 
-/** Clock-skew guard, not an expiry (spec section 3, "Freshness"). */
 export const MAX_CLOCK_SKEW_SECONDS = 300
 
-/** Fields already shape-checked. */
 export interface ProofRecord {
   version: string
   iat: number
@@ -44,10 +33,6 @@ export function proofDTag(domain: string): string {
   return PROOF_D_PREFIX + normaliseDomain(domain)
 }
 
-/**
- * Signed message (spec section 2). Binds the domain, so a copied record fails, and
- * the time, for freshness. No nonce from us, or only we could check the claim.
- */
 export function proofMessage(domain: string, iat: number): string {
   assertIat(iat)
   return `${PROOF_MESSAGE_PREFIX}:${normaliseDomain(domain)}:${iat}`
@@ -74,12 +59,10 @@ export function proofDigest(params: { domain: string; pubkey: string; iat: numbe
   return eventDigest(proofEvent(params))
 }
 
-/** Equals the event `id` once published. */
 export function proofDigestHex(params: { domain: string; pubkey: string; iat: number }): string {
   return bytesToHex(proofDigest(params))
 }
 
-/** TXT value for a registrar panel. One `.`-joined token, 209 characters (spec section 1). */
 export function encodeProofRecord(record: ProofRecord): string {
   if (record.version !== PROOF_VERSION) {
     throw new Error(`encodeProofRecord: refusing to emit version ${JSON.stringify(record.version)}`)
@@ -90,15 +73,9 @@ export function encodeProofRecord(record: ProofRecord): string {
   return `${record.version}.${record.iat}.${record.pubkey}.${record.sig}`
 }
 
-/**
- * Liberal on input (spec section 1). Registrar panels and resolver JSON add quotes,
- * split strings, swap dots for spaces or upper-case it, and none of that changes
- * the claim. Version, field count and field shapes stay strict.
- */
 export function parseProofRecord(raw: unknown): { ok: true; record: ProofRecord } | { ok: false; reason: string } {
   if (typeof raw !== 'string') return { ok: false, reason: 'not a string' }
 
-  // Multi-string RDATA arrives as `"a" "b"`, `a b` or already concatenated.
   const cleaned = raw.trim().replace(/"/g, '').trim()
   if (cleaned === '') return { ok: false, reason: 'empty' }
 
@@ -130,11 +107,7 @@ export interface ProofVerification {
   ageSeconds?: number
 }
 
-/**
- * `now` only enables the clock-skew guard (spec section 3). Future-dated records
- * fail. Old ones pass, since a record still in the zone still proves control.
- * Age is reported for the reader to judge.
- */
+/** `now` only enables the clock-skew guard (spec section 3). Future-dated records fail. */
 export function verifyProofRecord(params: {
   domain: string
   pubkey: string
@@ -155,8 +128,6 @@ export function verifyProofRecord(params: {
   }
 
   if (record.pubkey !== params.pubkey) {
-    // Not a zone failure. A domain can hold proofs for several keys during a
-    // handover (spec section 3, step 3.3).
     return { ok: false, reason: 'record is for a different pubkey', record }
   }
 
@@ -178,11 +149,6 @@ export function verifyProofRecord(params: {
   return { ok: true, record, ageSeconds }
 }
 
-/**
- * Verify a whole RRset (spec section 3, step 4). One good record proves the domain.
- * Junk and stale proofs from past owners are skipped. The newest valid record wins,
- * so the reported age is the best evidence.
- */
 export function verifyProofRecords(params: {
   domain: string
   pubkey: string
@@ -208,11 +174,7 @@ export function verifyProofRecords(params: {
   }
 }
 
-/**
- * Verify a proof published as a Nostr event. It must match the canonical proof event
- * exactly before any field is trusted. This only shows the key signed a claim, and
- * the caller still needs the TXT record for the zone's side.
- */
+/** Verify a proof published as a Nostr event. It must match the canonical proof event exactly before any field is trusted. */
 export function proofFromEvent(event: NostrEvent): { ok: true; domain: string; record: ProofRecord } | { ok: false; reason: string } {
   if (event.kind !== PROOF_KIND) return { ok: false, reason: `kind ${event.kind} is not ${PROOF_KIND}` }
 
@@ -244,10 +206,7 @@ export function proofFromEvent(event: NostrEvent): { ok: true; domain: string; r
   }
 }
 
-/**
- * The only way the UI should make a proof. Works with a NIP-07 {@link Signer}.
- * The TXT value and the signed event share one signature and verify alike.
- */
+/** The only way the UI should make a proof. Works with a NIP-07 {@link Signer}. */
 export async function createProof(params: {
   domain: string
   iat: number
@@ -259,12 +218,16 @@ export async function createProof(params: {
   const event = await params.signer.signEvent(unsigned)
 
   // Extensions may sign with another pubkey than reported, or change created_at.
-  // Catch it here, not days later when a buyer flags the listing as unproven.
   const check = proofFromEvent(event)
   if (!check.ok) throw new Error(`createProof: the signer returned an event that does not verify: ${check.reason}`)
   if (check.domain !== domain) throw new Error('createProof: the signer changed the domain')
 
   return { domain, record: check.record, txt: encodeProofRecord(check.record), event }
+}
+
+/** What a record's `iat` can carry: non-negative unix seconds, at most 10 digits. */
+export function isValidIat(iat: unknown): iat is number {
+  return Number.isSafeInteger(iat) && (iat as number) >= 0 && (iat as number) <= 9999999999
 }
 
 function assertIat(iat: number): void {
