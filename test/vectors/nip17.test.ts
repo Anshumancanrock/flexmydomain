@@ -1,5 +1,4 @@
-// NIP-44 and NIP-17 vs nostr-tools (dev dep, imported only here), an independent implementation.
-// The registrar auth code rides this channel. Whoever holds it can take the domain.
+// NIP-44 and NIP-17 against nostr-tools, an independent implementation (dev dependency, imported only here).
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -108,8 +107,8 @@ describe('NIP-17 gift wrap', () => {
   test('the wrap hides the sender from the relay', () => {
     const wrap = sealed()
     expect(wrap.kind).toBe(GIFT_WRAP_KIND)
-    expect(wrap.pubkey).not.toBe(ALICE.pk)         // Throwaway signing key.
-    expect(wrap.tags).toEqual([['p', BOB.pk]])      // Names only the recipient.
+    expect(wrap.pubkey).not.toBe(ALICE.pk)
+    expect(wrap.tags).toEqual([['p', BOB.pk]])
     expect(JSON.stringify(wrap)).not.toContain(AUTH_CODE)
   })
 
@@ -142,8 +141,7 @@ describe('NIP-17 gift wrap', () => {
   })
 
   test('a rumor claiming to be from somebody else is refused', () => {
-    // Mallory seals a rumor claiming Alice as author. The author mismatch is what stops a
-    // forged "here is the auth code".
+    // Mallory's seal around a rumor naming Alice. Only the author check stops this forgery.
     const forgedRumor = buildRumor({ pubkey: ALICE.pk, recipient: BOB.pk, content: 'send the domain to me', createdAt: NOW })
     const forgedSeal = signEvent(
       {
@@ -227,4 +225,18 @@ describe('interop with nostr-tools, both directions', () => {
       expect(out.sender).toBe(ALICE.pk)
     }
   })
+})
+
+test('a malformed message from a stranger is a reason, and the rest still read', async () => {
+  // Rumor author equals seal author, so it gets past that check, but its tags aren't an array.
+  const broken = { ...buildRumor({ pubkey: MALLORY.pk, recipient: BOB.pk, content: 'x', createdAt: NOW }), tags: 'x' }
+  const wrap = giftWrap({ rumor: broken as never, senderSecretKey: MALLORY.sk, recipient: BOB.pk, entropy })
+  const out = unwrap(wrap, BOB.sk)
+  expect(out.ok).toBe(false)
+  if (!out.ok) expect(out.reason).toContain('malformed')
+
+  const { readMessages } = await import('../../client/messages.ts')
+  const read = readMessages([wrap, sealed()], BOB.sk)
+  expect(read.messages.map((m) => m.rumor.content)).toEqual([AUTH_CODE])
+  expect(read.unreadable).toBe(1)
 })

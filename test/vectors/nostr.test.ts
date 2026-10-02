@@ -1,5 +1,4 @@
-// core/nostr vectors. Serialisation and NIP-19 cases follow the NIP texts (npub is NIP-19's own
-// vector). The rest: an id must cover its content, and a listing must prove its domain under its own key.
+// core/nostr vectors. Serialisation and NIP-19 cases follow the NIP texts.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -234,6 +233,19 @@ describe('the listing, kind 30402', () => {
     }
   })
 
+  test('a published_at that is not a number falls back to created_at', () => {
+    // The indexer stores published_at in a NOT NULL column.
+    const unsigned = buildListing(params)
+    const e = signEvent(
+      { ...unsigned, tags: unsigned.tags.map((t) => (t[0] === 'published_at' ? ['published_at', 'soon'] : t)) },
+      SELLER.sk,
+      AUX,
+    )
+    const r = parseListing(e)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.listing.publishedAt).toBe(e.created_at)
+  })
+
   test('a listing carries its own proof, so no server is needed to check it', () => {
     const r = checkListingAgainstZone({ event: signed(), txtRecords: txt, now: NOW })
     expect(r.ok).toBe(true)
@@ -253,8 +265,6 @@ describe('the listing, kind 30402', () => {
   })
 
   test("a proof lifted from another key does not become this seller's", () => {
-    // STRANGER's real proof in SELLER's listing. buildListing refuses it, and a hand-forged
-    // one fails the check.
     expect(() => buildListing({ ...params, proof: proofFor(DOMAIN, STRANGER) })).toThrow(/different key/)
 
     const forged = signEvent(
@@ -365,7 +375,6 @@ describe('the portfolio, kind 30078', () => {
   })
 
   test("a stolen entry does not verify in somebody else's portfolio", () => {
-    // SELLER's proof, republished inside STRANGER's portfolio.
     const forged: NostrEvent = signEvent(
       {
         pubkey: STRANGER.pk,
@@ -412,6 +421,42 @@ describe('the portfolio, kind 30078', () => {
     }
   })
 
+  test('content with no domains list reads as empty but is flagged, so nothing republishes over it', () => {
+    for (const content of [{ v: 2, entries: [{ domain: DOMAIN }] }, { v: 1, domains: 'lumenary.com' }]) {
+      const e = signEvent(
+        { pubkey: SELLER.pk, created_at: NOW, kind: 30078, tags: [['d', PORTFOLIO_D]], content: JSON.stringify(content) },
+        SELLER.sk,
+        AUX,
+      )
+      const r = parsePortfolio(e)
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.portfolio.entries).toEqual([])
+        expect(r.dropped.map((d) => d.reason)).toEqual(['no domains list'])
+      }
+    }
+  })
+
+  test('an entry with a proof source this code does not know is dropped and named, never read as DNS', () => {
+    const e = signEvent(
+      {
+        pubkey: SELLER.pk,
+        created_at: NOW,
+        kind: 30078,
+        tags: [['d', PORTFOLIO_D]],
+        content: JSON.stringify({ v: 1, domains: [{ domain: DOMAIN, source: 'ens', iat: IAT, sig: proofFor().sig, first_seen: IAT }] }),
+      },
+      SELLER.sk,
+      AUX,
+    )
+    const r = parsePortfolio(e)
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.portfolio.entries).toEqual([])
+      expect(r.dropped.map((d) => d.reason)).toEqual(['unknown proof source "ens"'])
+    }
+  })
+
   test('content that is not JSON returns a reason instead of throwing', () => {
     const e = signEvent(
       { pubkey: SELLER.pk, created_at: NOW, kind: 30078, tags: [['d', PORTFOLIO_D]], content: 'not json' },
@@ -452,6 +497,36 @@ describe('the portfolio, kind 30078', () => {
 
   test('the fetch filter is one query for one event', () => {
     expect(portfolioFilter(SELLER.pk)).toEqual({ kinds: [30078], authors: [SELLER.pk], '#d': [PORTFOLIO_D], limit: 1 })
+  })
+
+  // Skips buildPortfolio's checks, as anyone publishing by hand could.
+  const raw = (domains: unknown[]): NostrEvent => signEvent(
+    { ...build(), content: JSON.stringify({ v: 1, domains }) },
+    SELLER.sk,
+    AUX,
+  )
+
+  test('an entry with an iat no proof record can carry is dropped, not a crash', () => {
+    // verifyPortfolio would throw on these, taking the flex and market pages down with it.
+    for (const iat of [-1, 10_000_000_000, 1.5]) {
+      const r = parsePortfolio(raw([{ domain: DOMAIN, source: 'dns', iat, sig: proofFor().sig, first_seen: IAT }]))
+      expect(r.ok).toBe(true)
+      if (!r.ok) continue
+      expect(r.portfolio.entries).toEqual([])
+      expect(r.dropped).toHaveLength(1)
+      expect(() => verifyPortfolio(r.portfolio)).not.toThrow()
+    }
+  })
+
+  test('first_seen is the holder\'s word, clamped to what could be true', () => {
+    const seen = (first_seen: unknown) => {
+      const r = parsePortfolio(raw([{ domain: DOMAIN, source: 'dns', iat: IAT, sig: proofFor().sig, first_seen }]))
+      return r.ok ? r.portfolio.entries[0].firstSeen : undefined
+    }
+    expect(seen(IAT - 5000)).toBe(IAT - 5000)
+    expect(seen(0)).toBe(IAT) // Before any domain existed.
+    expect(seen(NOW + 86400)).toBe(IAT) // After the event claiming it.
+    expect(seen('long ago')).toBe(IAT)
   })
 })
 
