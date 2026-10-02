@@ -1,16 +1,10 @@
-// NIP-09 deletion requests. A kind 5 is only a request that relays may ignore,
-// so never tell a seller their listing is "deleted".
-// For listings the real signal is a republish with `status: sold`. The kind 5 goes too.
+// NIP-09 deletion requests.
 
 import { isHex32, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 import { addressOf } from './event.js'
 
 export const DELETION_KIND = 5
 
-/**
- * Addressable events go by `a`, since an edited listing has an id per version.
- * NIP-09 asks for `k` so a relay can act without fetching the target.
- */
 export function buildDeletion(params: {
   pubkey: string
   events: readonly NostrEvent[]
@@ -52,10 +46,6 @@ export function parseDeletion(event: NostrEvent): { ids: string[]; addresses: st
   }
 }
 
-/**
- * Client-side, so deletion works whatever the relay did. A request only covers its
- * own author's events, or anyone could hide anyone's listing.
- */
 export function applyDeletions(events: readonly NostrEvent[], deletions: readonly NostrEvent[]): NostrEvent[] {
   const byAuthorIds = new Map<string, Set<string>>()
   const byAuthorAddresses = new Map<string, Map<string, number>>()

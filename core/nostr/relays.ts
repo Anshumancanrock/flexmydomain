@@ -1,11 +1,4 @@
-/**
- * NIP-65 relay lists and the outbox model. Pure, net/outbox.ts does the fetching.
- * Sellers say where their events live, so the market doesn't hang on relays the site picked.
- *
- *   publishing mine   -> my write relays
- *   reading theirs    -> their write relays   (not mine, not the defaults)
- *   mentioning them   -> their read relays    (how a reply reaches someone)
- */
+// NIP-65 relay lists and the outbox model. Pure, net/outbox.ts does the fetching.
 
 import { isHex32, tagValue, type NostrEvent, type NostrTag, type UnsignedEvent } from './event.js'
 
@@ -19,11 +12,6 @@ export interface RelayEntry {
   write: boolean
 }
 
-/**
- * Canonical relay URL, so dedupe and acceptance counts see one relay per endpoint.
- * Lowercases scheme and host, drops a default port, trailing slash and fragment.
- * Path case is kept. Some relays route on it.
- */
 export function normaliseRelayUrl(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
@@ -48,7 +36,6 @@ export function normaliseRelayUrl(raw: unknown): string | undefined {
   return `${protocol}//${url.host.toLowerCase()}${path}${url.search}`
 }
 
-/** Kind 10002. An entry that is both read and write gets no marker. */
 export function buildRelayList(params: {
   pubkey: string
   relays: readonly RelayEntry[]
@@ -72,7 +59,6 @@ export function buildRelayList(params: {
   return { pubkey: params.pubkey, created_at: params.createdAt, kind: RELAY_LIST_KIND, tags, content: '' }
 }
 
-/** An unknown marker counts as no marker: read and write. */
 export function parseRelayList(event: NostrEvent): RelayEntry[] {
   if (event.kind !== RELAY_LIST_KIND) return []
   const byUrl = new Map<string, RelayEntry>()
@@ -88,23 +74,15 @@ export function parseRelayList(event: NostrEvent): RelayEntry[] {
       write: marker !== 'read',
     }
     const existing = byUrl.get(url)
-    // One relay listed once as read and once as write means both.
     byUrl.set(url, existing ? { url, read: existing.read || entry.read, write: existing.write || entry.write } : entry)
   }
   return [...byUrl.values()]
 }
 
-/**
- * Read 4: survives a dead relay without a page of thirty listings opening two hundred sockets.
- * Write 5: durability matters more than latency.
- */
 export const READ_FANOUT = 4
 export const WRITE_FANOUT = 5
 
-/**
- * A user's list replaces the fallback, never gets it appended. Otherwise someone on a
- * paid or private relay still gets pushed to public relays they didn't pick.
- */
+/** A user's list replaces the fallback, never gets it appended. */
 function preferOwn(own: readonly string[], fallback: readonly string[], max: number): string[] {
   const mine = dedupe(own.map(normaliseRelayUrl).filter(isUrl))
   if (mine.length > 0) return mine.slice(0, max)
@@ -115,10 +93,6 @@ export function writeRelaysFor(list: readonly RelayEntry[], fallback: readonly s
   return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max)
 }
 
-/**
- * Where to read an author's events: their write relays, not their read relays or yours.
- * Easy to get backwards, and then only sellers on the reader's relays show up.
- */
 export function readRelaysFor(list: readonly RelayEntry[], fallback: readonly string[], max = READ_FANOUT): string[] {
   return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max)
 }
@@ -127,10 +101,6 @@ export function inboxRelaysFor(list: readonly RelayEntry[], fallback: readonly s
   return preferOwn(list.filter((r) => r.read).map((r) => r.url), fallback, max)
 }
 
-/**
- * Group authors by relay, relay -> authors to ask it about. One filter per relay
- * beats per-author queries that keep hitting the same popular relays.
- */
 export function planAuthorQuery(
   lists: ReadonlyMap<string, readonly RelayEntry[]>,
   authors: readonly string[],

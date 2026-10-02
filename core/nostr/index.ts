@@ -1,6 +1,3 @@
-// Builders and parsers for every event we publish. Pure, no I/O and no clock.
-// Checks any relay's event with no call to a server of ours.
-
 export {
   addressOf,
   checkEvent,
@@ -12,6 +9,8 @@ export {
   isHex32,
   isHex64,
   isReplaceable,
+  matchFilter,
+  matchFilters,
   serializeEvent,
   signEvent,
   tagValue,
@@ -142,44 +141,87 @@ export {
 
 export {
   CHAT_KIND,
+  DM_RELAY_LIST_KIND,
   GIFT_WRAP_KIND,
   MAX_TIMESTAMP_JITTER,
   SEAL_KIND,
   buildRumor,
+  dmRelayListFilter,
+  dmRelaysOf,
   giftWrap,
   giftWrapFilter,
+  giftWrapWith,
   unwrap,
+  unwrapWith,
 } from './nip17.js'
 export type { Rumor, WrapEntropy } from './nip17.js'
+
+export { AUTH_KIND, buildAuthEvent } from './nip42.js'
+
+export {
+  CHAT_CARD_TAG,
+  ESCROW_CHAT_TAG,
+  MAX_CHAT_LENGTH,
+  buildEscrowMessage,
+  cardProblem,
+  chatPartners,
+  chatRoleOf,
+  escrowChats,
+  keyOfRole,
+  latestCard,
+} from './escrow-chat.js'
+export type { ChatCard, ChatMessage, ChatRole, EscrowParties } from './escrow-chat.js'
 
 export {
   ESCROW_D_PREFIX,
   ESCROW_KIND,
   ESCROW_TOPIC,
   ESCROW_VERSION,
+  RULING_D_PREFIX,
   buildEscrowEvent,
+  buildRuling,
   compareViews,
   deriveEscrowId,
-  deriveEscrowState,
   escrowAddress,
-  escrowFilter,
+  escrowFilters,
+  escrowTree,
   escrowsForFilter,
   parseEscrowEvent,
+  parseRuling,
 } from './escrow.js'
-export type { Disagreement, EscrowParams, EscrowState, EscrowView } from './escrow.js'
+export type { Disagreement, EscrowClaims, EscrowParams, EscrowView, Ruling, ViewRole } from './escrow.js'
 
 export {
+  HANDSHAKE_KIND,
   INVITE_PREFIX,
   REPLY_PREFIX,
+  buildInvite,
+  buildReply,
   decodeInvite,
   decodeReply,
   encodeInvite,
   encodeReply,
   resolveHandshake,
+  termsProblem,
 } from './handshake.js'
-export type { Commitment, Invite, Reply } from './handshake.js'
+export type { Invite, Reply, SignedInvite } from './handshake.js'
 
 export { DELETION_KIND, applyDeletions, buildDeletion, deletionFilter, parseDeletion } from './deletion.js'
+
+export {
+  KEY_BACKUP_D_PREFIX,
+  KEY_BACKUP_KIND,
+  KEY_BACKUP_VERSION,
+  buildKeyBackup,
+  draftBackupPlaintext,
+  isKeyBackup,
+  keyBackupFilter,
+  keyBackupPlaintext,
+  keyBackupSlot,
+  parseDraftBackup,
+  parseKeyBackup,
+} from './keybackup.js'
+export type { DraftBackup, KeyBackup } from './keybackup.js'
 
 export {
   READ_FANOUT,
@@ -220,9 +262,3 @@ export const DEFAULT_RELAYS = [
   'wss://nostr.mom',
 ] as const
 
-/*
- * Each relay was vetted: a query returns events, and its NIP-11 document declares
- * no restricted writes, auth or payment.
- * relay.nostr.band is out. It's a search aggregator with no NIP-11, and a kind 1
- * query returned nothing in nine seconds.
- */

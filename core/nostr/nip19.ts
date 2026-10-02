@@ -1,12 +1,10 @@
-// NIP-19 bech32 entities. Listings are shared as an naddr, which opens in any
-// client from any relay, with or without this site.
+// NIP-19 bech32 entities.
 
 import { bech32 } from '@scure/base'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { isHex32 } from './event.js'
 
-// BIP-173's 90-char cap is for Bitcoin addresses. NIP-19 entities with relay
-// hints run past it, and every Nostr implementation raises it.
+// BIP-173's 90-char cap is for Bitcoin addresses.
 const BECH32_LIMIT = 5000
 
 /** NIP-19 TLV types. `special` is whatever the entity is mainly about. */
@@ -59,10 +57,7 @@ export function noteEncode(idHex: string): string {
   return encodeBytes('note', hexToBytes(idHex))
 }
 
-/**
- * Only for the generated-key fallback, which must show the user something to write down.
- * Nothing else may call it. Never log, store or transmit its output.
- */
+/** Only for the generated-key fallback, which must show the user something to write down. Nothing else may call it. */
 export function nsecEncode(secretKey: Uint8Array): string {
   if (secretKey.length !== 32) throw new Error('nsecEncode: a secret key is 32 bytes')
   return encodeBytes('nsec', secretKey)
@@ -122,7 +117,6 @@ export function neventEncode(pointer: EventPointer): string {
   return encodeBytes('nevent', concat(parts))
 }
 
-/** Points at (kind, author, d), not one version, so a listing's naddr survives price edits. */
 export function naddrEncode(pointer: AddressPointer): string {
   if (!isHex32(pointer.pubkey)) throw new Error('naddrEncode: pubkey must be 64 lowercase hex characters')
   return encodeBytes(
@@ -234,7 +228,6 @@ function assertLength(bytes: Uint8Array, expected: number, what: string): void {
   }
 }
 
-/** Non-throwing form, for user input. */
 export function tryDecodeNip19(value: unknown): DecodedNip19 | undefined {
   if (typeof value !== 'string') return undefined
   try {
@@ -244,7 +237,6 @@ export function tryDecodeNip19(value: unknown): DecodedNip19 | undefined {
   }
 }
 
-/** npub, nprofile or hex to hex. Use for every pubkey input, users paste whatever form they have. */
 export function toPubkeyHex(value: unknown): string | undefined {
   if (isHex32(value)) return value
   const decoded = tryDecodeNip19(value)

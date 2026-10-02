@@ -1,7 +1,4 @@
-/**
- * NIP-01 events on @noble directly, no Nostr library. Pure apart from signing entropy.
- * nostr-tools is dev-only, as the independent implementation in test/vectors/nip17.test.ts.
- */
+// NIP-01 events on @noble directly, no Nostr library.
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
@@ -22,13 +19,15 @@ export interface NostrEvent extends UnsignedEvent {
   sig: string
 }
 
-/**
- * NIP-07 window.nostr as an interface, since core/ may not touch `window`.
- * Extensions can't sign arbitrary messages, so spec/PROOF.md signs a reconstructible event id.
- */
+/** NIP-07 window.nostr as an interface, since core/ may not touch `window`. */
 export interface Signer {
   getPublicKey(): Promise<string>
   signEvent(event: UnsignedEvent): Promise<NostrEvent>
+  /** NIP-44 v2 between this key and `peer`, for NIP-17 messages. Absent when the signer can't. */
+  nip44?: {
+    encrypt(peer: string, plaintext: string): Promise<string>
+    decrypt(peer: string, payload: string): Promise<string>
+  }
 }
 
 const HEX32_RE = /^[0-9a-f]{64}$/
@@ -44,11 +43,7 @@ export function isHex64(value: unknown): value is string {
   return typeof value === 'string' && HEX64_RE.test(value)
 }
 
-/**
- * NIP-01 id preimage `[0, pubkey, created_at, kind, tags, content]` as compact JSON.
- * JSON.stringify emits exactly the escapes NIP-01 wants for any well-formed string.
- * Don't hand-roll a serialiser. One byte off is a different id.
- */
+/** NIP-01 id preimage `[0, pubkey, created_at, kind, tags, content]` as compact JSON. */
 export function serializeEvent(event: UnsignedEvent): string {
   assertSerialisable(event)
   return JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content])
@@ -90,7 +85,6 @@ function show(value: unknown): string {
   return String(value)
 }
 
-/** sha256 of the serialisation. This is what gets signed. */
 export function eventDigest(event: UnsignedEvent): Uint8Array {
   return sha256(utf8ToBytes(serializeEvent(event)))
 }
@@ -99,11 +93,6 @@ export function eventId(event: UnsignedEvent): string {
   return bytesToHex(eventDigest(event))
 }
 
-/**
- * Sign with a raw secret key. 32 bytes of BIP-340 `auxRand` give a deterministic sig,
- * as the test vectors use. Omit it for real signing and @noble uses the CSPRNG (side-channel hardening).
- * Most signing goes through a {@link Signer}, which never exposes the key.
- */
 export function signEvent(
   unsigned: UnsignedEvent,
   secretKey: Uint8Array,
@@ -121,12 +110,6 @@ export function signEvent(
   return { ...unsigned, id: bytesToHex(digest), sig: bytesToHex(sig) }
 }
 
-/**
- * Checks shape, then id, then sig. Both crypto checks are required. Relays supply `id`
- * unchecked, so a sig check alone lets content be rewritten under a valid sig.
- * An id check alone proves only that someone ran sha256.
- * Returns a reason instead of throwing. Bad events from relays are routine.
- */
 export function checkEvent(event: unknown): { ok: true; event: NostrEvent } | { ok: false; reason: string } {
   if (typeof event !== 'object' || event === null) return { ok: false, reason: 'not an object' }
   const e = event as Record<string, unknown>
@@ -156,7 +139,6 @@ export function checkEvent(event: unknown): { ok: true; event: NostrEvent } | { 
   return { ok: true, event: e as unknown as NostrEvent }
 }
 
-/** Boolean form of checkEvent. */
 export function verifyEvent(event: unknown): event is NostrEvent {
   return checkEvent(event).ok
 }
@@ -183,10 +165,7 @@ export function tagValues(event: Pick<UnsignedEvent, 'tags'>, name: string): str
   return event.tags.filter((t) => t[0] === name && t.length > 1).map((t) => t[1])
 }
 
-/**
- * NIP-01 address `<kind>:<pubkey>:<d>`, as in a NIP-19 naddr or an `a` tag.
- * With no `d` tag the third field is empty, which is still valid.
- */
+/** NIP-01 address `<kind>:<pubkey>:<d>`, as in a NIP-19 naddr or an `a` tag. */
 export function addressOf(event: Pick<NostrEvent, 'kind' | 'pubkey' | 'tags'>): string {
   return `${event.kind}:${event.pubkey}:${tagValue(event, 'd') ?? ''}`
 }
@@ -200,4 +179,28 @@ export function isEphemeral(kind: number): boolean {
 }
 export function isAddressable(kind: number): boolean {
   return kind >= 30000 && kind < 40000
+}
+
+/** NIP-01 filter match. A relay can answer a REQ with any valid event, so check each one against what was asked. */
+export function matchFilter(filter: Record<string, unknown>, event: NostrEvent): boolean {
+  const list = (key: string): unknown[] | undefined => (Array.isArray(filter[key]) ? (filter[key] as unknown[]) : undefined)
+
+  if (list('ids') && !list('ids')!.includes(event.id)) return false
+  if (list('authors') && !list('authors')!.includes(event.pubkey)) return false
+  if (list('kinds') && !list('kinds')!.includes(event.kind)) return false
+  if (typeof filter.since === 'number' && event.created_at < filter.since) return false
+  if (typeof filter.until === 'number' && event.created_at > filter.until) return false
+
+  for (const key of Object.keys(filter)) {
+    if (!/^#[a-zA-Z]$/.test(key)) continue
+    const wanted = list(key)
+    if (!wanted) continue
+    const name = key.slice(1)
+    if (!event.tags.some((t) => t[0] === name && wanted.includes(t[1]))) return false
+  }
+  return true
+}
+
+export function matchFilters(filters: readonly Record<string, unknown>[], event: NostrEvent): boolean {
+  return filters.some((f) => matchFilter(f, event))
 }
