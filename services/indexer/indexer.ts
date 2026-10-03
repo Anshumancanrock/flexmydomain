@@ -1,22 +1,16 @@
 #!/usr/bin/env bun
-/**
- * Indexer: reads listings from relays, verifies them, stores SQLite, serves /search.
- *
- *   bun services/indexer/indexer.ts [--db ./fmd-index.db] [--port 8788] [--once]
- *
- * A cache for search, TLD facets and sorting, which relays can't do. Nothing
- * may live only here. Delete the db and it rebuilds from the relays.
- * Verifies with the browser's own core/ and net/ code so the two agree.
- */
 
 import { Database } from 'bun:sqlite'
 import {
   DEFAULT_RELAYS,
+  LISTING_D_PREFIX,
   checkListing,
   listingFilter,
   parseListing,
   applyDeletions,
   deletionFilter,
+  tagValue,
+  type NostrEvent,
 } from '../../core/nostr/index.js'
 import { newestPerAddress, queryRelays } from '../../net/relay.js'
 import { checkDomainProof } from '../../net/verify.js'
@@ -60,11 +54,13 @@ CREATE TABLE IF NOT EXISTS listings (
   published_at INTEGER NOT NULL,
   created_at   INTEGER NOT NULL,
   registered_at INTEGER,
-  -- the verification result, refreshed on every sweep
+  -- the verification result, refreshed on every sweep that could check DNS
   verified     INTEGER NOT NULL DEFAULT 0,
   dnssec       INTEGER NOT NULL DEFAULT 0,
   reason       TEXT,
-  checked_at   INTEGER NOT NULL,
+  verified_at  INTEGER,            -- the last sweep that could check DNS for this version
+  checked_at   INTEGER NOT NULL,   -- the last sweep that saw the listing at all
+  misses       INTEGER NOT NULL DEFAULT 0,
   raw          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS listings_domain ON listings(domain);
@@ -86,39 +82,131 @@ async function pool<T>(items: readonly T[], limit: number, fn: (item: T) => Prom
   )
 }
 
-async function sweep(db: Database, options: Options): Promise<void> {
-  const startedAt = Math.floor(Date.now() / 1000)
-  const events = await queryRelays(options.relays, [listingFilter({ limit: 1000 })], { timeoutMs: 10000 }).catch(() => [])
-  const current = newestPerAddress(events)
+const MISSES_BEFORE_DROP = 3
 
-  const authors = [...new Set(current.map((e) => e.pubkey))]
+/** How long a verdict stands while DNS can't be checked: a resolver is down, say. */
+const VERDICT_TTL_SECONDS = 24 * 3600
+
+function migrate(db: Database): void {
+  const columns = new Set((db.query('PRAGMA table_info(listings)').all() as { name: string }[]).map((c) => c.name))
+  if (!columns.has('verified_at')) db.run('ALTER TABLE listings ADD COLUMN verified_at INTEGER')
+  if (!columns.has('misses')) db.run('ALTER TABLE listings ADD COLUMN misses INTEGER NOT NULL DEFAULT 0')
+}
+
+async function fetchListings(
+  options: Options,
+  filter: Record<string, unknown>,
+): Promise<{ events: NostrEvent[]; deletions: NostrEvent[]; answered: boolean; majority: boolean }> {
+  let finished = 0
+  const events = await queryRelays(options.relays, [filter], {
+    timeoutMs: 10000,
+    onRelayDone: (_relay, _count, _error, complete) => { if (complete) finished++ },
+  }).catch(() => [])
+  const authors = [...new Set(events.map((e) => e.pubkey))]
   const deletions = authors.length
     ? await queryRelays(options.relays, [deletionFilter(authors)], { timeoutMs: 8000 }).catch(() => [])
     : []
-  const live = applyDeletions(current, deletions)
+  return {
+    events,
+    deletions,
+    answered: finished === options.relays.length,
+    majority: finished > 0 && finished * 2 >= options.relays.length,
+  }
+}
+
+async function sweep(db: Database, options: Options): Promise<void> {
+  const startedAt = Math.floor(Date.now() / 1000)
+  const first = await fetchListings(options, listingFilter({ limit: 1000 }))
+  const events = [...first.events]
+  const deletions = [...first.deletions]
+  let answered = first.answered
+  let majority = first.majority
+
+  const seen = new Set(newestPerAddress(events).map((e) => e.id))
+  const missing = (db.query('SELECT pubkey, domain, event_id FROM listings').all() as
+    { pubkey: string; domain: string; event_id: string }[]).filter((r) => !seen.has(r.event_id))
+  for (let i = 0; i < missing.length; i += 100) {
+    const batch = missing.slice(i, i + 100)
+    const found = await fetchListings(options, listingFilter({
+      authors: [...new Set(batch.map((r) => r.pubkey))],
+      '#d': batch.map((r) => LISTING_D_PREFIX + r.domain),
+    }))
+    answered &&= found.answered
+    majority &&= found.majority
+    events.push(...found.events)
+    deletions.push(...found.deletions)
+  }
+  // Newest per address across every answer, so a relay holding an old version can't bring it back.
+  const latest = newestPerAddress(events)
+  const live = applyDeletions(latest, deletions)
 
   console.log(`${new Date().toISOString()}  ${live.length} listings fetched`)
 
+  const liveIds = new Set(live.map((e) => e.id))
+  let deleted = 0
+  for (const event of latest.filter((e) => !liveIds.has(e.id))) {
+    deleted += db.run('DELETE FROM listings WHERE address = $address AND created_at <= $at', {
+      $address: `${event.kind}:${event.pubkey}:${tagValue(event, 'd')}`,
+      $at: event.created_at,
+    } as never).changes
+  }
+
+  // Never back to an older version: a relay that missed the newest one may still answer with the last.
   const upsert = db.prepare(`
     INSERT INTO listings (address, event_id, pubkey, domain, tld, price_sats, summary, description,
-                          status, published_at, created_at, registered_at, verified, dnssec, reason, checked_at, raw)
+                          status, published_at, created_at, registered_at, verified, dnssec, reason,
+                          verified_at, checked_at, misses, raw)
     VALUES ($address, $event_id, $pubkey, $domain, $tld, $price_sats, $summary, $description,
-            $status, $published_at, $created_at, $registered_at, $verified, $dnssec, $reason, $checked_at, $raw)
+            $status, $published_at, $created_at, $registered_at, $verified, $dnssec, $reason,
+            $verified_at, $checked_at, 0, $raw)
     ON CONFLICT(address) DO UPDATE SET
       event_id = excluded.event_id, price_sats = excluded.price_sats, summary = excluded.summary,
       description = excluded.description, status = excluded.status, published_at = excluded.published_at,
       created_at = excluded.created_at, registered_at = excluded.registered_at,
-      verified = excluded.verified, dnssec = excluded.dnssec, reason = excluded.reason,
-      checked_at = excluded.checked_at, raw = excluded.raw
+      verified = CASE WHEN $dns = 0 AND $expired = 0 AND excluded.event_id = listings.event_id AND listings.verified_at > $fresh
+                      THEN listings.verified ELSE excluded.verified END,
+      dnssec = CASE WHEN $dns = 0 AND $expired = 0 AND excluded.event_id = listings.event_id AND listings.verified_at > $fresh
+                    THEN listings.dnssec ELSE excluded.dnssec END,
+      reason = CASE WHEN $dns = 0 AND $expired = 0 AND excluded.event_id = listings.event_id AND listings.verified_at > $fresh
+                    THEN listings.reason ELSE excluded.reason END,
+      verified_at = CASE WHEN $dns = 1 THEN excluded.verified_at
+                         WHEN excluded.event_id = listings.event_id THEN listings.verified_at ELSE NULL END,
+      checked_at = excluded.checked_at, misses = 0, raw = excluded.raw
+    WHERE excluded.created_at > listings.created_at
+       OR (excluded.created_at = listings.created_at AND excluded.event_id <= listings.event_id)
   `)
+  const touch = db.prepare('UPDATE listings SET checked_at = $at, misses = 0 WHERE address = $address')
+  const storedOf = db.prepare('SELECT event_id, created_at, raw FROM listings WHERE address = $address')
 
   let verifiedCount = 0
+  let failed = 0
   await pool(live, options.concurrency, async (event) => {
-    const parsed = parseListing(event)
-    if (!parsed.ok) return
+    try {
+      await index(event)
+    } catch (err) {
+      // Anyone can publish a listing. One that breaks here must not stop the sweep.
+      failed++
+      console.error(`  skipped ${event.id}: ${(err as Error).message}`)
+    }
+  })
+
+  async function index(fetched: NostrEvent): Promise<void> {
+    const first = parseListing(fetched)
+    if (!first.ok) return
+    const address = `30402:${fetched.pubkey}:fmd:listing:${first.listing.domain}`
+
+    const stored = storedOf.get({ $address: address } as never) as { event_id: string; created_at: number; raw: string } | null
+    const newer = stored !== null &&
+      (stored.created_at > fetched.created_at || (stored.created_at === fetched.created_at && stored.event_id < fetched.id))
+    const event: NostrEvent = newer ? (JSON.parse(stored.raw) as NostrEvent) : fetched
+    const parsed = newer ? parseListing(event) : first
+    if (!parsed.ok) {
+      touch.run({ $at: startedAt, $address: address } as never)
+      return
+    }
     const listing = parsed.listing
 
-    /* Same check the browser runs. Never serve a listing a client would refuse. */
+    // Same check the browser runs. Never serve a listing a client would refuse.
     const report = await checkDomainProof({
       domain: listing.domain,
       pubkey: event.pubkey,
@@ -126,9 +214,10 @@ async function sweep(db: Database, options: Options): Promise<void> {
     }).catch(() => null)
     const check = checkListing({ event, dnsProof: report?.dns, now: startedAt })
     if (check.ok) verifiedCount++
+    const dns = report?.answered === true
 
-    upsert.run({
-      $address: `30402:${event.pubkey}:fmd:listing:${listing.domain}`,
+    const { changes } = upsert.run({
+      $address: address,
       $event_id: event.id,
       $pubkey: event.pubkey,
       $domain: listing.domain,
@@ -143,18 +232,32 @@ async function sweep(db: Database, options: Options): Promise<void> {
       $verified: check.ok ? 1 : 0,
       $dnssec: report?.dnssec ? 1 : 0,
       $reason: check.ok ? null : (check.reason ?? 'unverified'),
+      $verified_at: dns ? startedAt : null,
       $checked_at: startedAt,
       $raw: JSON.stringify(event),
-    })
-  })
+      $dns: dns ? 1 : 0,
+      $expired: check.expired ? 1 : 0,
+      $fresh: startedAt - VERDICT_TTL_SECONDS,
+    } as never)
+    if (changes === 0) touch.run({ $at: startedAt, $address: address } as never)
+  }
 
-  /* Rows this sweep didn't touch (older checked_at) are gone from the relays. Drop them. */
   // bun:sqlite takes named bindings here but only types the positional form.
-  const dropped = db.run('DELETE FROM listings WHERE checked_at < $at', {
-    $at: startedAt,
-  } as never).changes
+  let dropped = deleted
+  if (answered) {
+    dropped += db.run('DELETE FROM listings WHERE checked_at < $at', { $at: startedAt } as never).changes
+  } else if (majority) {
+    db.run('UPDATE listings SET misses = misses + 1 WHERE checked_at < $at', { $at: startedAt } as never)
+    dropped += db.run('DELETE FROM listings WHERE checked_at < $at AND misses >= $k', { $at: startedAt, $k: MISSES_BEFORE_DROP } as never).changes
+    console.log(`  not every relay finished answering, so a missing row goes after ${MISSES_BEFORE_DROP} such sweeps`)
+  } else {
+    console.log('  too few relays finished answering, so nothing was dropped')
+  }
 
-  console.log(`  ${verifiedCount} verified, ${live.length - verifiedCount} unverified, ${dropped} dropped\n`)
+  console.log(
+    `  ${verifiedCount} verified, ${live.length - verifiedCount - failed} unverified, ` +
+      `${failed} skipped, ${dropped} dropped\n`,
+  )
 }
 
 function serve(db: Database, options: Options): void {
@@ -185,15 +288,16 @@ function serve(db: Database, options: Options): void {
       const tld = (url.searchParams.get('tld') ?? '').trim().toLowerCase()
       // Unverified only on request, and always labelled.
       const includeUnverified = url.searchParams.get('unverified') === '1'
-      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50)))
+      const asked = Math.trunc(Number(url.searchParams.get('limit') ?? 50))
+      const limit = Number.isFinite(asked) ? Math.min(200, Math.max(1, asked)) : 50
       const sort = url.searchParams.get('sort') ?? 'price-desc'
 
-      const order = {
-        'price-desc': 'price_sats DESC',
-        'price-asc': 'price_sats ASC',
-        newest: 'published_at DESC',
-        az: 'domain ASC',
-      }[sort] ?? 'price_sats DESC'
+      const order = new Map([
+        ['price-desc', 'price_sats DESC'],
+        ['price-asc', 'price_sats ASC'],
+        ['newest', 'published_at DESC'],
+        ['az', 'domain ASC'],
+      ]).get(sort) ?? 'price_sats DESC'
 
       const rows = db
         .query(
@@ -211,7 +315,6 @@ function serve(db: Database, options: Options): void {
 
       return Response.json(
         {
-          // Say it's a cache so nobody mistakes it for the marketplace.
           cache: true,
           source: 'nostr relays',
           relays: options.relays,
@@ -234,6 +337,7 @@ async function main(): Promise<void> {
   const db = new Database(options.dbPath)
   db.run('PRAGMA journal_mode = WAL')
   db.run(SCHEMA)
+  migrate(db)
 
   console.log('flexmydomain indexer (a cache of the relays)')
   console.log(`  db       ${options.dbPath}`)

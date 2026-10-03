@@ -1,14 +1,4 @@
 #!/usr/bin/env bun
-/**
- * Domain verifier: NIP-90 daemon that re-resolves listing and portfolio proofs
- * from this machine and publishes kind 6970 attestations. Optional, since every
- * page checks DNS itself. Verifiers only count as independent on different
- * networks and resolvers.
- *
- *   bun services/verifier/verifier.ts --nsec <nsec1...> [--once] [--interval 3600]
- *
- * Use a key that signs attestations and nothing else, so a leak costs no funds or identity.
- */
 
 import { readFileSync } from 'node:fs'
 import {
@@ -32,7 +22,6 @@ interface Options {
   relays: string[]
   intervalSeconds: number
   once: boolean
-  /** Max parallel DoH lookups. Providers rate-limit. */
   concurrency: number
 }
 
@@ -64,7 +53,6 @@ function parseArgs(argv: string[]): Options {
   }
 }
 
-/** Every (domain, claimant) pair named by a listing or a portfolio. */
 async function collectSubjects(relays: string[]): Promise<Map<string, { domain: string; claimant: string }>> {
   const subjects = new Map<string, { domain: string; claimant: string }>()
 
@@ -121,8 +109,7 @@ async function sweep(options: Options, pubkey: string): Promise<void> {
       return
     }
 
-    /* A failed lookup is never a negative result (spec/PROOF.md). Calling it
-       `absent` would make our network trouble look like a vanished proof. */
+    // A failed lookup is never a negative result (spec/PROOF.md).
     const verdict = report.status.proven ? 'proven' : report.answered ? 'absent' : 'unreachable'
     if (verdict === 'proven') proven++
     else if (verdict === 'absent') absent++

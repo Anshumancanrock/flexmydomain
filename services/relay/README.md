@@ -25,15 +25,16 @@ that would fail on every reader's machine is refused when it is published.
 | kind | stored when |
 |---|---|
 | 30402 listing | tagged `flexmydomain` and its embedded proof verifies for its own key |
-| 30078 | a domain proof, a portfolio or an escrow view that parses. For an escrow view, the stated address must be the one its keys produce |
-| 5 deletion | one of its `a` coordinates is an address this project publishes: a listing (`fmd:listing:*`), a proof, the portfolio or an escrow view, the arbiter set or watchlist, an `fmd-*` badge. Other apps' deletions of the same kinds are refused |
+| 30078 | a domain proof, a portfolio, an escrow view, an arbiter's ruling, or an escrow key backup that parses. For an escrow view, its `d` tag must be the id its terms hash to, and the stated address the one those terms produce; a view of the earlier flow, where the arbiter held the domain, or one still carrying that flow's fields, is refused. A key backup is encrypted to its author, so only its outside is checked: exactly the `d` (`fmd:key:<slot>`) and `alt` tags the page writes, and a content that could be NIP-44 and is at most 4,096 characters. The earlier flow's custody receipts (`fmd:custody:*`) are not stored |
+| 5 deletion | one of its `a` coordinates is an address this project publishes: a listing (`fmd:listing:*`), a proof, the portfolio, an escrow view, a key backup, the arbiter set or watchlist, an `fmd-*` badge, the site's handler. Other apps' deletions of the same kinds are refused, and so is a deletion that also names events by id (`e`), or names a ruling: rulings are the arbiter's public record, and this relay never deletes them |
 | 9735 zap receipt | the zap request inside it is a flex-board zap (`fmd_flex` or `t=flexmydomain`), paid to `FMD_FLEX_RECIPIENT` when that is set |
 | 10002 relay list | up to 50 relays, by `ws://` or `wss://` URL. The site publishes them, and the outbox model reads them |
 | 30000 | the `fmd:arbiters` and `fmd:watchlist` sets |
 | 1985, 5970, 6970 | trade receipts (`fmd.trade`), verification requests and attestations that parse |
 | 7000 | job feedback from the verifiers named in `FMD_VERIFIERS` |
 | 30009, 8, 30008 | the `fmd-*` badges |
-| 1059 gift wrap | never, until `FMD_ACCEPT_GIFT_WRAPS=1` |
+| 31990 | the site's NIP-89 handler (`d = fmd-client`) |
+| 1059 gift wrap | never, until `FMD_ACCEPT_GIFT_WRAPS=1`, and then only one naming exactly one recipient. The escrow's private chats use the public relays; turn this on only once reads of kind 1059 can be held back until the reader signs in (NIP-42), which strfry 1.1.x can't do |
 
 Anything else gets `blocked: this relay stores flexmydomain events only`.
 Client writes are rate-limited per address (30 a minute, bursts of 60), and an
@@ -43,10 +44,14 @@ Profiles (kind 0) are refused. The site never publishes one, every profile is
 on the public relays anyway, and an unverifiable 64 KB document from any
 freshly minted key is the cheapest way to fill a relay's disk.
 
-Gift wraps stay off. No page reads them yet, and strfry 1.1.x cannot restrict
-who reads them, so this relay would hand private-message metadata to anyone
-who asked. Turn them on together with the private-channel UI and a strfry that
-has `restrictedReadKinds` (on strfry's master branch, not yet in a release).
+Gift wraps stay off. An escrow's private chats, and invites and replies sent
+privately, travel as gift wraps, and strfry 1.1.x cannot restrict who reads
+them, so this relay would hand anyone who asked which keys receive messages,
+how many and how large. Turn them on together with a strfry that has
+`restrictedReadKinds` (on strfry's master branch, not yet in a release). With
+this relay in `extraRelays` and gift wraps off, the chats still work: the
+escrow page sends each message to every escrow relay, and a message goes
+through once any of them takes the recipient's copy.
 
 What the policy does not check: event signatures (strfry has already verified
 them), and DNS or zapper keys (a write path must not wait on the network).
@@ -73,7 +78,11 @@ filters are in `entrypoint.sh`:
 ```
 
 Standalone proof events are not mirrored. They carry no tag a filter could
-select on, and every listing and portfolio embeds its proof anyway.
+select on, and every listing and portfolio embeds its proof anyway. Nor are
+escrow key backups, which carry only their `d` and `alt` tags so that nothing
+outside them says which escrow they belong to: this relay holds the ones the
+site sends it. Escrow views and rulings carry `t=flexmydomain`, so the first
+filter mirrors them.
 
 The filters select by tag, and other apps share some of these kinds and
 tags: the deletions filter, for one, sees every marketplace's delistings. The
@@ -218,4 +227,7 @@ test override, which bound the ports to loopback, gave Caddy its local CA for
   described under "Starting over", the export imported back complete.
 
 Not tested here: a real Let's Encrypt certificate, which needs a public host
-name, and IPv6 with `enable_ipv6`.
+name, and IPv6 with `enable_ipv6`. Nor the write policy's changes since that
+run, which store rulings and escrow key backups and refuse a deletion that
+names a ruling or names events by id: `test/vectors/relay-policy.test.ts` and
+`test/vectors/keybackup.test.ts` cover those, not a run of the image.
