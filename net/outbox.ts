@@ -1,10 +1,8 @@
-/**
- * NIP-65 outbox routing. Rules live in core/nostr/relays.ts, sockets in net/relay.ts.
- * Authors are read where they write, not on relays we picked. A new key costs one
- * round trip for its kind 10002 list. Keys without one (most, today) use the fallback.
- */
+// NIP-65 outbox routing. Rules live in core/nostr/relays.ts, sockets in net/relay.ts.
 
 import {
+  RELAY_LIST_KIND,
+  normaliseRelayUrl,
   parseRelayList,
   planAuthorQuery,
   readRelaysFor,
@@ -16,17 +14,22 @@ import { DEFAULT_RELAYS } from '../core/nostr/index.js'
 import { newestPerAddress, publishToRelays, queryRelays, type Filter, type PublishResult, type QueryOptions } from './relay.js'
 import type { NostrEvent } from '../core/nostr/event.js'
 
-/**
- * Session cache of who writes where. Not persisted. A user who moves relays
- * should be found on the new ones at their next visit.
- */
+const RETRY_UNSURE_MS = 30_000
+
+/** One canonical spelling per relay, so one relay is never asked or counted twice. */
+function canonical(urls: readonly string[]): string[] {
+  return [...new Set(urls.map((u) => normaliseRelayUrl(u) ?? u))]
+}
+
 export class RelayDirectory {
   private lists = new Map<string, RelayEntry[]>()
   private pending = new Map<string, Promise<RelayEntry[]>>()
+  private unsure = new Map<string, number>()
 
   constructor(
-    /** Where lists are looked up, and the relays for a key without one. */
     readonly fallback: readonly string[] = DEFAULT_RELAYS,
+    /** Relays that must finish before "no list" counts as an answer: a majority, at most three. */
+    readonly quorum = Math.min(3, Math.ceil(fallback.length / 2)),
   ) {}
 
   /** Cache only, no network. */
@@ -34,33 +37,49 @@ export class RelayDirectory {
     return this.lists.get(pubkey)
   }
 
-  /** Seed the cache from relay-list events we already have. */
+  certain(pubkey: string): boolean {
+    return this.lists.has(pubkey) && !this.unsure.has(pubkey)
+  }
+
   absorb(events: readonly NostrEvent[]): void {
     for (const event of newestPerAddress(events)) {
       const entries = parseRelayList(event)
-      if (entries.length > 0) this.lists.set(event.pubkey, entries)
+      if (entries.length > 0) {
+        this.lists.set(event.pubkey, entries)
+        this.unsure.delete(event.pubkey)
+      }
     }
   }
 
-  /**
-   * Fetch relay lists, once per key. Concurrent callers share the request, or a
-   * page with thirty listings would ask about the same seller thirty times.
-   */
-  async resolve(pubkeys: readonly string[], options: QueryOptions = {}): Promise<Map<string, RelayEntry[]>> {
-    const missing = [...new Set(pubkeys)].filter((p) => !this.lists.has(p) && !this.pending.has(p))
+  async resolve(
+    pubkeys: readonly string[],
+    options: { timeoutMs?: number; retryUnsure?: boolean } = {},
+  ): Promise<Map<string, RelayEntry[]>> {
+    const stale = (p: string): boolean => {
+      const at = this.unsure.get(p)
+      return at !== undefined && (options.retryUnsure === true || Date.now() - at > RETRY_UNSURE_MS)
+    }
+    const missing = [...new Set(pubkeys)].filter((p) => (!this.lists.has(p) || stale(p)) && !this.pending.has(p))
 
     if (missing.length > 0) {
-      const request = queryRelays(this.fallback, [relayListFilter(missing)], { timeoutMs: 4000, ...options })
+      let finished = 0
+      // Only the timeout passes through: a caller's limit or callback would cut the lookup short.
+      const request = queryRelays(this.fallback, [relayListFilter(missing)], {
+        timeoutMs: options.timeoutMs ?? 4000,
+        onRelayDone: (_relay, _count, _error, complete) => { if (complete) finished++ },
+      })
+        .catch(() => [] as NostrEvent[])
         .then((events) => {
           this.absorb(events)
-          // Cache misses as []. Otherwise every render re-asks about each key
-          // with no kind 10002, which today is most keys.
-          for (const pubkey of missing) if (!this.lists.has(pubkey)) this.lists.set(pubkey, [])
+          // Cache misses as []. Otherwise every render re-asks about each key with no kind 10002, which today is most keys.
+          const sure = finished >= this.quorum
+          for (const pubkey of missing) {
+            if ((this.lists.get(pubkey)?.length ?? 0) > 0 && !this.unsure.has(pubkey)) continue
+            this.lists.set(pubkey, [])
+            if (sure) this.unsure.delete(pubkey)
+            else this.unsure.set(pubkey, Date.now())
+          }
           return events
-        })
-        .catch(() => {
-          for (const pubkey of missing) if (!this.lists.has(pubkey)) this.lists.set(pubkey, [])
-          return [] as NostrEvent[]
         })
 
       for (const pubkey of missing) {
@@ -83,37 +102,64 @@ export class RelayDirectory {
     return writeRelaysFor(this.lists.get(pubkey) ?? [], this.fallback)
   }
 
-  /** Where to find this key's events. Its write relays, not ours. */
   readRelays(pubkey: string): string[] {
     return readRelaysFor(this.lists.get(pubkey) ?? [], this.fallback)
   }
 }
 
-/**
- * Publish to the author's write relays. The author is event.pubkey, never the
- * connected user, so a republished event still goes where its author writes.
- */
 export async function publishOutbox(
   directory: RelayDirectory,
   event: NostrEvent,
   options: { extraRelays?: readonly string[] } = {},
 ): Promise<PublishResult[]> {
-  await directory.resolve([event.pubkey])
-  const relays = [...new Set([...directory.writeRelays(event.pubkey), ...(options.extraRelays ?? [])])]
-  return publishToRelays(relays, event)
+  await directory.resolve([event.pubkey], { retryUnsure: true })
+  const before = directory.writeRelays(event.pubkey)
+  const named = event.kind === RELAY_LIST_KIND ? writeRelaysFor(parseRelayList(event), []) : []
+  const relays = canonical([...before, ...named, ...(options.extraRelays ?? [])])
+  const results = await publishToRelays(relays, event)
+  // Later writes follow the new list, but only once some relay holds it.
+  if (event.kind === RELAY_LIST_KIND && results.some((r) => r.ok)) directory.absorb([event])
+  return results
 }
 
-/**
- * Query each author on the relays they write to. One filter per relay with only
- * the authors it serves, so 10 authors on 4 relays is a few requests, not 40.
- */
+export interface OwnRead {
+  /** The user's own events only, whatever a relay sends. */
+  events: NostrEvent[]
+  complete: boolean
+  answered: number
+  unanswered: string[]
+}
+
+export async function readOwn(
+  directory: RelayDirectory,
+  pubkey: string,
+  filters: Filter[],
+  options: { extraRelays?: readonly string[]; timeoutMs?: number } = {},
+): Promise<OwnRead> {
+  await directory.resolve([pubkey], { retryUnsure: true }).catch(() => undefined)
+  const own = (directory.known(pubkey) ?? []).filter((r) => r.write).map((r) => r.url)
+  const asked = canonical([...(own.length ? own : directory.fallback), ...(options.extraRelays ?? [])])
+  const finished = new Set<string>()
+  const events = await queryRelays(asked, filters, {
+    timeoutMs: options.timeoutMs ?? 6000,
+    onRelayDone: (relay, _count, _error, complete) => { if (complete) finished.add(relay) },
+  }).catch(() => [] as NostrEvent[])
+  const unanswered = asked.filter((r) => !finished.has(r))
+  return {
+    events: events.filter((e) => e.pubkey === pubkey),
+    complete: directory.certain(pubkey) && unanswered.length === 0,
+    answered: finished.size,
+    unanswered,
+  }
+}
+
 export async function queryOutbox(
   directory: RelayDirectory,
   authors: readonly string[],
   filter: Filter,
   options: QueryOptions = {},
 ): Promise<NostrEvent[]> {
-  const lists = await directory.resolve(authors, options)
+  const lists = await directory.resolve(authors, { timeoutMs: options.timeoutMs })
   const plan = planAuthorQuery(lists, authors, directory.fallback)
 
   const byId = new Map<string, NostrEvent>()
@@ -126,10 +172,6 @@ export async function queryOutbox(
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at)
 }
 
-/**
- * Authorless query like "every listing". Nothing to route by, so this sweeps the
- * given relays. The UI should say results cover those relays, not the network.
- */
 export async function queryDiscovery(
   relays: readonly string[],
   filters: Filter[],
