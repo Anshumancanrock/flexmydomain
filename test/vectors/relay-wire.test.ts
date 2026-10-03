@@ -1,14 +1,16 @@
-// net/relay.ts over a real WebSocket against test/harness/relay.ts. Each case is a failure mode
-// that would otherwise only show up in a browser, on somebody else's relay.
+// net/relay.ts over a real WebSocket, against test/harness/relay.ts.
 
 import { test, expect, describe, afterEach } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 
 import {
+  buildAuthEvent,
   buildListing,
   buildPortfolio,
   listingFilter,
+  matchFilter,
+  portfolioFilter,
   signEvent,
   type NostrEvent,
 } from '../../core/nostr/index.ts'
@@ -16,13 +18,15 @@ import { proofEvent } from '../../core/oracle/index.ts'
 import {
   countOnRelay,
   countOnRelays,
+  keepConnectionsWarm,
   newestPerAddress,
   publishToRelay,
   publishToRelays,
   queryRelay,
   queryRelays,
+  type RelayAuth,
 } from '../../net/relay.ts'
-import { RelayDirectory, publishOutbox, queryOutbox } from '../../net/outbox.ts'
+import { RelayDirectory, publishOutbox, queryOutbox, readOwn } from '../../net/outbox.ts'
 import { buildRelayList } from '../../core/nostr/relays.ts'
 import { startRelay, type TestRelay } from '../harness/relay.ts'
 
@@ -124,8 +128,7 @@ describe('querying', () => {
     expect(seen['ws://localhost:1'].error ?? seen['ws://localhost:1'].count === 0).toBeTruthy()
   })
 
-  /* A page replacing an event (a portfolio) from what it read must know the read finished.
-     A timeout doesn't mean "there is nothing". */
+  // A page replacing an event (a portfolio) must know its read finished. A timeout isn't "nothing there".
   test('onRelayDone says complete only when the relay said EOSE', async () => {
     const finished = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
     const hanging = relay({ events: [listingFor(ALICE, 'lumenary.com')], withholdEose: true })
@@ -296,5 +299,233 @@ describe('the outbox model, over the wire', () => {
     expect(c.get(BOB.pk)).toEqual([])
     // Misses are cached, or every render re-asks the network about every key.
     expect(directory.known(ALICE.pk)).toEqual([])
+    expect(directory.certain(ALICE.pk)).toBe(true)
+  })
+
+  const listOf = (who: typeof ALICE, urls: string[], createdAt = IAT) => signEvent(
+    buildRelayList({ pubkey: who.pk, relays: urls.map((url) => ({ url, read: false, write: true })), createdAt }),
+    who.sk,
+    AUX,
+  )
+
+  test('"no list" from too few relays is a guess, and a write asks again', async () => {
+    // The relay with Alice's list doesn't answer in time. Caching "no list" for good
+    // would send her writes only to the fallback for the rest of the session.
+    const mine = relay()
+    const holder = relay({ dropOnOpen: true, events: [listOf(ALICE, [mine.url])] })
+    const quick = relay()
+    // Both must answer before "no list" counts.
+    const directory = new RelayDirectory([quick.url, holder.url], 2)
+    await directory.resolve([ALICE.pk], { timeoutMs: 300 })
+    expect(directory.known(ALICE.pk)).toEqual([])
+    expect(directory.certain(ALICE.pk)).toBe(false)
+
+    quick.add(listOf(ALICE, [mine.url]))
+    await publishOutbox(directory, listingFor(ALICE, 'lumenary.com'))
+    expect(directory.certain(ALICE.pk)).toBe(true)
+    expect(mine.published).toHaveLength(1)
+  })
+
+  test('the quorum is a majority of the fallback relays, never more than three', () => {
+    const urls = (n: number) => Array.from({ length: n }, (_, i) => `wss://r${i}.example`)
+    expect([1, 2, 3, 4, 5, 6, 10].map((n) => new RelayDirectory(urls(n)).quorum)).toEqual([1, 1, 2, 2, 3, 3, 3])
+  })
+
+  test('a new relay list goes to the relays it adds, and later writes follow it', async () => {
+    const old = relay()
+    const added = relay()
+    const fallback = relay()
+    const directory = new RelayDirectory([fallback.url])
+    directory.absorb([listOf(ALICE, [old.url])])
+
+    await publishOutbox(directory, listOf(ALICE, [added.url], IAT + 10))
+    expect(old.published).toHaveLength(1)
+    expect(added.published).toHaveLength(1)
+
+    await publishOutbox(directory, listingFor(ALICE, 'lumenary.com'))
+    expect(added.published.map((e) => e.kind)).toContain(30402)
+  })
+
+  test('a new relay list that no relay accepts leaves later writes where they were', async () => {
+    const old = relay({ refuseWith: 'blocked: down for maintenance' })
+    const added = relay({ refuseWith: 'restricted: not a member' })
+    const directory = new RelayDirectory([relay().url])
+    directory.absorb([listOf(ALICE, [old.url])])
+
+    const results = await publishOutbox(directory, listOf(ALICE, [added.url], IAT + 10))
+    expect(results.some((r) => r.ok)).toBe(false)
+    // Readers still look where the old list says, so writes must keep going there.
+    expect(directory.writeRelays(ALICE.pk)).toEqual([old.url])
+  })
+
+  test("a caller's limit doesn't cut short the relay-list lookup", async () => {
+    const theirs = relay({ events: [listingFor(ALICE, 'lumenary.com'), listingFor(BOB, 'zeta.io')] })
+    const fallback = relay({ events: [listOf(ALICE, [theirs.url]), listOf(BOB, [theirs.url])] })
+    const directory = new RelayDirectory([fallback.url])
+    await queryOutbox(directory, [ALICE.pk, BOB.pk], { kinds: [30402] }, { limit: 1 })
+    expect(directory.writeRelays(ALICE.pk)).toContain(theirs.url)
+    expect(directory.writeRelays(BOB.pk)).toContain(theirs.url)
+  })
+})
+
+describe('reading your own events before replacing them', () => {
+  const listOf = (who: typeof ALICE, urls: string[]) => signEvent(
+    buildRelayList({ pubkey: who.pk, relays: urls.map((url) => ({ url, read: false, write: true })), createdAt: IAT }),
+    who.sk,
+    AUX,
+  )
+  const portfolioAt = (createdAt: number) =>
+    signEvent(buildPortfolio({ pubkey: ALICE.pk, entries: [], createdAt }), ALICE.sk, AUX)
+
+  test('every relay the key writes to is asked, not only the first few a reader uses', async () => {
+    // The newest portfolio sits only on the sixth. A read capped at four never sees it.
+    const writes = Array.from({ length: 6 }, (_, i) => relay(i === 5 ? { events: [portfolioAt(IAT + 50)] } : {}))
+    const fallback = relay({ events: [listOf(ALICE, writes.map((r) => r.url)), portfolioAt(IAT)] })
+    const directory = new RelayDirectory([fallback.url])
+
+    const read = await readOwn(directory, ALICE.pk, [portfolioFilter(ALICE.pk)], { extraRelays: [fallback.url] })
+    expect(newestPerAddress(read.events)[0].created_at).toBe(IAT + 50)
+    expect(read.complete).toBe(true)
+    expect(read.answered).toBe(7)
+    expect(read.unanswered).toEqual([])
+  })
+
+  test('a relay that does not finish makes the read incomplete, and is named', async () => {
+    const quiet = relay({ withholdEose: true, events: [portfolioAt(IAT + 50)] })
+    const fine = relay()
+    const fallback = relay({ events: [listOf(ALICE, [quiet.url, fine.url])] })
+    const directory = new RelayDirectory([fallback.url])
+
+    const read = await readOwn(directory, ALICE.pk, [portfolioFilter(ALICE.pk)], { timeoutMs: 300 })
+    expect(read.complete).toBe(false)
+    expect(read.unanswered).toEqual([quiet.url])
+    expect(read.answered).toBe(1)
+  })
+
+  test('a relay list that was only a guess makes the read incomplete', async () => {
+    const holder = relay({ dropOnOpen: true, events: [listOf(ALICE, [relay().url])] })
+    const quick = relay()
+    const directory = new RelayDirectory([quick.url, holder.url], 2)
+
+    const read = await readOwn(directory, ALICE.pk, [portfolioFilter(ALICE.pk)], { timeoutMs: 300 })
+    expect(directory.certain(ALICE.pk)).toBe(false)
+    expect(read.complete).toBe(false)
+  })
+
+  test("only the key's own events come back, whatever a relay sends", async () => {
+    const bobs = signEvent(buildPortfolio({ pubkey: BOB.pk, entries: [], createdAt: IAT + 99 }), BOB.sk, AUX)
+    const liar = relay({ ignoreFilters: true, events: [bobs, portfolioAt(IAT)] })
+    const directory = new RelayDirectory([liar.url])
+
+    const read = await readOwn(directory, ALICE.pk, [portfolioFilter(ALICE.pk)])
+    expect(read.events.map((e) => e.pubkey)).toEqual([ALICE.pk])
+  })
+})
+
+describe('warm connections', () => {
+  afterEach(() => keepConnectionsWarm(0))
+
+  test('off by default: every read opens its own connection and closes it', async () => {
+    const r = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
+    await queryRelay(r.url, [listingFilter()])
+    await queryRelay(r.url, [listingFilter()])
+    expect(r.connections).toBe(2)
+    await Bun.sleep(50)
+    expect(r.openNow).toBe(0)
+  })
+
+  test('on: the next read of a relay starts on the socket the last clean read left open', async () => {
+    keepConnectionsWarm(2000)
+    const listing = listingFor(ALICE, 'lumenary.com')
+    const r = relay({ events: [listing, listingFor(BOB, 'zeta.io')] })
+    expect((await queryRelay(r.url, [{ ...listingFilter(), authors: [ALICE.pk] }])).map((e) => e.id)).toEqual([listing.id])
+    expect((await queryRelay(r.url, [{ ...listingFilter(), authors: [ALICE.pk] }])).map((e) => e.id)).toEqual([listing.id])
+    expect((await queryRelays([r.url], [{ ...listingFilter(), authors: [BOB.pk] }])).map((e) => e.pubkey)).toEqual([BOB.pk])
+    expect(r.connections).toBe(1)
+  })
+
+  test('a held socket the relay has closed is not used', async () => {
+    keepConnectionsWarm(2000)
+    const r = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
+    await queryRelay(r.url, [listingFilter()])
+    r.kick()
+    await Bun.sleep(50)
+    expect(await queryRelay(r.url, [listingFilter()])).toHaveLength(1)
+    expect(r.connections).toBe(2)
+  })
+
+  test('a held socket that dies under the next read: that read starts again on a new one, and completes', async () => {
+    keepConnectionsWarm(2000)
+    const r = relay({ events: [listingFor(ALICE, 'lumenary.com')], dropSecondReq: true })
+    await queryRelay(r.url, [listingFilter()])
+    const done: boolean[] = []
+    const events = await queryRelays([r.url], [listingFilter()], { onRelayDone: (_relay, _count, _error, complete) => done.push(!!complete) })
+    expect(events).toHaveLength(1)
+    expect(done).toEqual([true])
+    expect(r.connections).toBe(2)
+  })
+
+  test('a read that timed out closes its socket rather than handing it on', async () => {
+    keepConnectionsWarm(2000)
+    const r = relay({ events: [listingFor(ALICE, 'lumenary.com')], withholdEose: true })
+    await queryRelay(r.url, [listingFilter()], { timeoutMs: 150 })
+    await queryRelay(r.url, [listingFilter()], { timeoutMs: 150 })
+    expect(r.connections).toBe(2)
+    await Bun.sleep(50)
+    expect(r.openNow).toBe(0)
+  })
+
+  test('a read that may authenticate neither takes a held socket nor leaves its own', async () => {
+    keepConnectionsWarm(2000)
+    const r = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
+    const auth: RelayAuth = async (url, challenge) =>
+      signEvent(buildAuthEvent({ relay: url, challenge, pubkey: ALICE.pk, createdAt: IAT }), ALICE.sk, AUX)
+    await queryRelay(r.url, [listingFilter()]) // leaves its socket held
+    expect(await queryRelay(r.url, [listingFilter()], { auth })).toHaveLength(1) // a socket of its own, closed after
+    expect(r.connections).toBe(2)
+    await queryRelay(r.url, [listingFilter()]) // takes the held one
+    expect(r.connections).toBe(2)
+    await Bun.sleep(50)
+    expect(r.openNow).toBe(1)
+  })
+
+  test('a held socket closes by itself once its time is up, and turning it off closes the rest', async () => {
+    keepConnectionsWarm(100)
+    const a = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
+    await queryRelay(a.url, [listingFilter()])
+    expect(a.openNow).toBe(1)
+    await Bun.sleep(250)
+    expect(a.openNow).toBe(0)
+
+    keepConnectionsWarm(5000)
+    const b = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
+    await queryRelay(b.url, [listingFilter()])
+    expect(b.openNow).toBe(1)
+    keepConnectionsWarm(0)
+    await Bun.sleep(50)
+    expect(b.openNow).toBe(0)
+  })
+})
+
+describe('a relay that ignores the filter', () => {
+  test("events that don't match what was asked are dropped, however valid", async () => {
+    // A lying relay serves Bob's portfolio for Alice's query. Republishing from it would replace hers.
+    const bobs = signEvent(buildPortfolio({ pubkey: BOB.pk, entries: [], createdAt: IAT }), BOB.sk, AUX)
+    const r = relay({ events: [bobs, listingFor(BOB, 'zeta.io')], ignoreFilters: true })
+    expect(await queryRelays([r.url], [portfolioFilter(ALICE.pk)], { timeoutMs: 2000 })).toEqual([])
+    expect(await queryRelays([r.url], [portfolioFilter(BOB.pk)], { timeoutMs: 2000 })).toEqual([bobs])
+  })
+
+  test('the matcher follows NIP-01', () => {
+    const e = listingFor(ALICE, 'lumenary.com')
+    expect(matchFilter({ kinds: [30402], authors: [ALICE.pk] }, e)).toBe(true)
+    expect(matchFilter({ authors: [BOB.pk] }, e)).toBe(false)
+    expect(matchFilter({ ids: [e.id] }, e)).toBe(true)
+    expect(matchFilter({ since: e.created_at + 1 }, e)).toBe(false)
+    expect(matchFilter({ until: e.created_at - 1 }, e)).toBe(false)
+    expect(matchFilter({ '#d': ['fmd:listing:lumenary.com'] }, e)).toBe(true)
+    expect(matchFilter({ '#d': ['fmd:listing:other.com'] }, e)).toBe(false)
+    // Keys the matcher can't check, like NIP-50 search, don't narrow it.
+    expect(matchFilter({ kinds: [30402], search: 'anything' }, e)).toBe(true)
   })
 })

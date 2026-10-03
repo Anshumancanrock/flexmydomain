@@ -1,5 +1,4 @@
-// NIP-65 vectors for core/nostr/relays.ts. Backwards routing fails silently. You'd see only the
-// listings that happened to land on your own relays, and the UI wouldn't say so.
+// NIP-65 vectors for core/nostr/relays.ts.
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -162,7 +161,6 @@ describe('outbox routing', () => {
   })
 
   test('a list with only read relays still falls back for publishing', () => {
-    // The list says nothing about where they write, so the fallback applies.
     const readOnly = [{ url: 'wss://only-reads.example', read: true, write: false }]
     expect(writeRelaysFor(readOnly, FALLBACK)).toEqual(FALLBACK)
     expect(inboxRelaysFor(readOnly, FALLBACK)).toEqual(['wss://only-reads.example'])

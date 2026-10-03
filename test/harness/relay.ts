@@ -1,18 +1,21 @@
-// In-memory NIP-01 relay (plus NIP-45 COUNT) for exercising net/relay.ts over a real WebSocket.
-// A fixture, not a relay. It stores what it gets and verifies nothing.
+// In-memory NIP-01 relay (plus NIP-45 COUNT) on a real WebSocket. Stores what it gets, verifies nothing.
 
-import type { NostrEvent } from '../../core/nostr/event.js'
+import { checkEvent, type NostrEvent } from '../../core/nostr/event.js'
 
 export interface RelayOptions {
-  /** Refuse every publish with this message. */
   refuseWith?: string
   /** Answer COUNT. Many real relays don't. */
   supportsCount?: boolean
-  /** Never send EOSE, so the caller has to time out. */
   withholdEose?: boolean
   dropOnOpen?: boolean
-  /** Seed events. */
+  /** Send everything held on every REQ, like a lying relay. */
+  ignoreFilters?: boolean
   events?: NostrEvent[]
+  /** NIP-42 as relay.damus.io does it: challenge on connect, gift wraps only to the authed key they name. */
+  requireAuth?: boolean
+  requireAuthToWrite?: boolean
+  /** Close the socket on its second REQ without answering, like a relay dropping an idle connection. */
+  dropSecondReq?: boolean
 }
 
 export interface TestRelay {
@@ -22,10 +25,15 @@ export interface TestRelay {
   /** Every EVENT received, in order. */
   published: NostrEvent[]
   add(...events: NostrEvent[]): void
+  /** Connections opened so far. */
+  readonly connections: number
+  readonly openNow: number
+  /** Close every open connection, like a relay restart. */
+  kick(): void
   close(): void
 }
 
-/** NIP-01 filter match. Covers the filters we send. */
+/** NIP-01 filter match, enough for the filters the client sends. */
 export function matches(event: NostrEvent, filter: Record<string, unknown>): boolean {
   if (Array.isArray(filter.ids) && !filter.ids.includes(event.id)) return false
   if (Array.isArray(filter.authors) && !filter.authors.includes(event.pubkey)) return false
@@ -42,10 +50,7 @@ export function matches(event: NostrEvent, filter: Record<string, unknown>): boo
   return true
 }
 
-/**
- * Start a relay on an ephemeral port. Replaceable and addressable kinds keep one
- * event per (kind, pubkey, d) like a real relay. Tests rely on the newest winning.
- */
+/** Replaceable and addressable kinds keep only the newest event per (kind, pubkey, d), like a real relay. */
 export function startRelay(options: RelayOptions = {}): TestRelay {
   const events: NostrEvent[] = []
   const published: NostrEvent[] = []
@@ -72,6 +77,14 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
 
   for (const seed of options.events ?? []) store(seed)
 
+  const sessions = new WeakMap<object, { challenge: string; authed?: string }>()
+  const sockets = new Set<{ close(): void }>()
+  const reqs = new WeakMap<object, number>()
+  let connections = 0
+  const giftWrapKind = 1059
+  const wantsWraps = (filters: Record<string, unknown>[]) =>
+    filters.some((f) => !Array.isArray(f.kinds) || (f.kinds as unknown[]).includes(giftWrapKind))
+
   const server = Bun.serve({
     port: 0,
     fetch(request, srv) {
@@ -80,7 +93,17 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
     },
     websocket: {
       open(ws) {
-        if (options.dropOnOpen) ws.close()
+        connections++
+        sockets.add(ws)
+        if (options.dropOnOpen) {
+          ws.close()
+          return
+        }
+        if (options.requireAuth || options.requireAuthToWrite) {
+          const challenge = `challenge-${Math.random().toString(36).slice(2)}`
+          sessions.set(ws, { challenge })
+          ws.send(JSON.stringify(['AUTH', challenge]))
+        }
       },
       message(ws, raw) {
         let frame: unknown
@@ -92,8 +115,24 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
         if (!Array.isArray(frame)) return
         const [type, id, ...rest] = frame as [string, string, ...Record<string, unknown>[]]
 
+        if (type === 'AUTH') {
+          const session = sessions.get(ws)
+          const checked = checkEvent(id)
+          const event = id as unknown as NostrEvent
+          const challenge = checked.ok ? event.tags.find((t) => t[0] === 'challenge')?.[1] : undefined
+          const ok = !!session && checked.ok && event.kind === 22242 && challenge === session.challenge &&
+            event.tags.some((t) => t[0] === 'relay')
+          if (ok) session!.authed = event.pubkey
+          ws.send(JSON.stringify(['OK', (id as unknown as { id?: string })?.id, ok, ok ? '' : 'auth-required: bad auth event']))
+          return
+        }
+
         if (type === 'EVENT') {
           const event = id as unknown as NostrEvent
+          if (options.requireAuthToWrite && !sessions.get(ws)?.authed) {
+            ws.send(JSON.stringify(['OK', event.id, false, 'auth-required: authenticate first']))
+            return
+          }
           if (options.refuseWith) {
             ws.send(JSON.stringify(['OK', event.id, false, options.refuseWith]))
             return
@@ -105,9 +144,22 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
         }
 
         if (type === 'REQ') {
+          const asked = (reqs.get(ws) ?? 0) + 1
+          reqs.set(ws, asked)
+          if (options.dropSecondReq && asked === 2) {
+            ws.close()
+            return
+          }
           const filters = rest
+          const authed = sessions.get(ws)?.authed
+          if (options.requireAuth && wantsWraps(filters) && !authed) {
+            ws.send(JSON.stringify(['CLOSED', id, 'auth-required: gift wraps go only to the key they name']))
+            return
+          }
           for (const event of events) {
-            if (filters.some((f) => matches(event, f))) {
+            // A gift wrap goes only to the key its p tag names, as NIP-17 asks of relays.
+            if (options.requireAuth && event.kind === giftWrapKind && !event.tags.some((t) => t[0] === 'p' && t[1] === authed)) continue
+            if (options.ignoreFilters || filters.some((f) => matches(event, f))) {
               ws.send(JSON.stringify(['EVENT', id, event]))
             }
           }
@@ -130,6 +182,9 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
           // No subscriptions are kept, so nothing to tear down.
         }
       },
+      close(ws) {
+        sockets.delete(ws)
+      },
     },
   })
 
@@ -138,6 +193,15 @@ export function startRelay(options: RelayOptions = {}): TestRelay {
     events,
     published,
     add: (...more) => more.forEach(store),
+    get connections() {
+      return connections
+    },
+    get openNow() {
+      return sockets.size
+    },
+    kick: () => {
+      for (const ws of [...sockets]) ws.close()
+    },
     close: () => server.stop(true),
   }
 }
