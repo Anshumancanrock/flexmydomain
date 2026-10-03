@@ -1,5 +1,4 @@
-// Relay write policy (services/relay/policy.ts, write-policy.ts). Accepted events come from the
-// site's own core/ builders. Most refusals are near misses of one, so refusing everything fails.
+// Relay write policy (services/relay/policy.ts, write-policy.ts).
 
 import { test, expect, describe } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -8,7 +7,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { signEvent, type NostrEvent, type UnsignedEvent } from '../../core/nostr/event.js'
 import { buildListing } from '../../core/nostr/listing.js'
 import { buildPortfolio } from '../../core/nostr/portfolio.js'
-import { buildEscrowEvent } from '../../core/nostr/escrow.js'
+import { buildEscrowEvent, buildRuling } from '../../core/nostr/escrow.js'
 import { buildDeletion } from '../../core/nostr/deletion.js'
 import { buildZapRequest } from '../../core/nostr/zap.js'
 import { buildArbiterSet, buildWatchlist } from '../../core/nostr/profile.js'
@@ -18,7 +17,7 @@ import { buildAttestation, buildVerifyRequest } from '../../core/nostr/attestati
 import { FMD_BADGES, buildBadgeAward, buildBadgeDefinition } from '../../core/nostr/badge.js'
 import { createProof, proofEvent } from '../../core/oracle/proof.js'
 import { sealMessage } from '../../client/messages.js'
-import { OFF_TOPIC, decide, isOurAddress } from '../../services/relay/policy.js'
+import { ARBITER_RECORD, OFF_TOPIC, decide, isArbiterRecord, isOurAddress } from '../../services/relay/policy.js'
 import { createRateLimiter, handle, optionsFromEnv, rateKey } from '../../services/relay/write-policy.js'
 
 const SK = new Uint8Array(32).fill(7)
@@ -38,6 +37,18 @@ const refuses = (e: NostrEvent, why: RegExp | string, opts = {}) => {
 }
 
 const { record, event: proofEvt } = await createProof({ domain: DOMAIN, iat: NOW, signer })
+
+const ARBITER_SK = new Uint8Array(32).fill(13)
+const ARBITER_X = schnorr.getPublicKey(ARBITER_SK)
+const escrowView = () => buildEscrowEvent({
+  pubkey: PK, createdAt: NOW, salt: 'ab'.repeat(32), buyer: schnorr.getPublicKey(OTHER_SK), seller: schnorr.getPublicKey(SK),
+  arbiter: ARBITER_X, timeoutBlocks: 144, deliverBlocks: 12, network: 'signet', amountSats: 50_000, domain: DOMAIN,
+})
+// A custody receipt from the earlier flow, where the arbiter held the domain.
+const oldReceipt = () => sign({
+  pubkey: bytesToHex(ARBITER_X), created_at: NOW, kind: 30078, content: JSON.stringify({ v: 1, stage: 'received' }),
+  tags: [['d', `fmd:custody:${'ef'.repeat(32)}:received`], ['p', OTHER], ['p', PK]],
+}, ARBITER_SK)
 const listing = sign(buildListing({ pubkey: PK, domain: DOMAIN, priceSats: 2_500_000, publishedAt: NOW, proof: record }))
 
 describe('listings (30402)', () => {
@@ -59,18 +70,34 @@ describe('application data (30078)', () => {
   test('a domain proof, a portfolio and an escrow view are stored', () => {
     accepts(proofEvt)
     accepts(sign(buildPortfolio({ pubkey: PK, createdAt: NOW, entries: [{ domain: DOMAIN, iat: NOW, sig: record.sig, source: 'dns', firstSeen: NOW }] })))
-    const escrow = sign(buildEscrowEvent({
-      pubkey: PK, createdAt: NOW, salt: 'ab'.repeat(32), buyer: schnorr.getPublicKey(SK), seller: schnorr.getPublicKey(OTHER_SK),
-      timeoutTo: 'seller', timeoutBlocks: 144, network: 'signet', amountSats: 50_000, domain: DOMAIN,
-    }))
-    accepts(escrow)
+    accepts(sign(escrowView()))
+  })
+
+  test("an arbiter's ruling is stored, and a malformed one refused", () => {
+    const ruling = buildRuling({
+      id: 'ef'.repeat(32), decision: 'refund', reason: 'the seller did not push in time',
+      parties: [OTHER, PK], pubkey: PK, createdAt: NOW,
+    })
+    accepts(sign(ruling))
+    const body = JSON.parse(ruling.content)
+    body.decision = 'keep it'
+    refuses(sign({ ...ruling, content: JSON.stringify(body) }), /not a valid ruling/)
+  })
+
+  test("the earlier flow's custody receipts are no longer this project's events", () => {
+    refuses(oldReceipt(), OFF_TOPIC)
+    expect(isOurAddress(`30078:${PK}:fmd:custody:${'ef'.repeat(32)}:received`)).toBe(false)
+  })
+
+  test('an escrow view still carrying the custody fields is refused', () => {
+    const unsigned = escrowView()
+    const body = JSON.parse(unsigned.content)
+    body.custody_account = 'arbiter@example.com'
+    refuses(sign({ ...unsigned, content: JSON.stringify(body) }), /not a valid escrow view/)
   })
 
   test('an escrow view whose address its own keys do not produce is refused', () => {
-    const unsigned = buildEscrowEvent({
-      pubkey: PK, createdAt: NOW, salt: 'ab'.repeat(32), buyer: schnorr.getPublicKey(SK), seller: schnorr.getPublicKey(OTHER_SK),
-      timeoutTo: 'seller', timeoutBlocks: 144, network: 'signet', amountSats: 50_000, domain: DOMAIN,
-    })
+    const unsigned = escrowView()
     const body = JSON.parse(unsigned.content)
     body.address = 'tb1p' + 'q'.repeat(58)
     refuses(sign({ ...unsigned, content: JSON.stringify(body) }), /not a valid escrow view/)
@@ -96,17 +123,26 @@ describe('deletions (5)', () => {
     refuses(sign(buildDeletion({ pubkey: PK, events: [note], createdAt: NOW })), OFF_TOPIC)
   })
 
+  test("an arbiter's ruling can't be deleted, by address or by an id riding along", () => {
+    const ruling = sign(buildRuling({ id: 'ef'.repeat(32), decision: 'refund', reason: 'late', parties: [OTHER, PK], pubkey: PK, createdAt: NOW }))
+    refuses(sign(buildDeletion({ pubkey: PK, events: [ruling], createdAt: NOW })), ARBITER_RECORD)
+    refuses(sign(buildDeletion({ pubkey: PK, events: [listing, ruling], createdAt: NOW })), ARBITER_RECORD)
+    const smuggled = sign({ pubkey: PK, created_at: NOW, kind: 5, content: '', tags: [
+      ['a', `30402:${PK}:fmd:listing:${DOMAIN}`], ['e', ruling.id], ['k', '30402'], ['k', '30078'],
+    ] })
+    refuses(smuggled, /by address only/)
+    expect(isArbiterRecord(`30078:${PK}:fmd:ruling:${'ef'.repeat(32)}`)).toBe(true)
+    expect(isArbiterRecord(`30078:${PK}:fmd:escrow:${'ef'.repeat(32)}`)).toBe(false)
+    expect(isArbiterRecord(`30402:${PK}:fmd:ruling:x`)).toBe(false)
+  })
+
   test('deleting a proof, the portfolio or an escrow view is stored', () => {
     const portfolio = sign(buildPortfolio({ pubkey: PK, createdAt: NOW, entries: [{ domain: DOMAIN, iat: NOW, sig: record.sig, source: 'dns', firstSeen: NOW }] }))
-    const escrow = sign(buildEscrowEvent({
-      pubkey: PK, createdAt: NOW, salt: 'ab'.repeat(32), buyer: schnorr.getPublicKey(SK), seller: schnorr.getPublicKey(OTHER_SK),
-      timeoutTo: 'seller', timeoutBlocks: 144, network: 'signet', amountSats: 50_000, domain: DOMAIN,
-    }))
+    const escrow = sign(escrowView())
     for (const event of [proofEvt, portfolio, escrow]) accepts(sign(buildDeletion({ pubkey: PK, events: [event], createdAt: NOW })))
   })
 
-  /* Other apps publish deletions of 30402 and 30078 to the same public relays, and the
-     mirror's #k filter sees them all. */
+  // Other apps' 30402 and 30078 deletions reach the mirror through its #k filter.
   test("another marketplace's delisting, or another app's 30078 deletion, is refused", () => {
     const theirs = (kind: number, d: string) => sign({
       pubkey: PK, created_at: NOW, kind: 5, content: '', tags: [['a', `${kind}:${PK}:${d}`], ['k', String(kind)]],
@@ -133,6 +169,7 @@ describe('deletions (5)', () => {
     expect(isOurAddress(`30402:${PK}:fmd:listing:${DOMAIN}`)).toBe(true)
     expect(isOurAddress(`30078:${PK}:fmd:portfolio`)).toBe(true)
     expect(isOurAddress(`30078:${PK}:fmd:escrow:${'ab'.repeat(16)}`)).toBe(true)
+    expect(isOurAddress(`30078:${PK}:fmd:ruling:${'ab'.repeat(32)}`)).toBe(true)
     expect(isOurAddress(`30000:${PK}:fmd:arbiters`)).toBe(true)
     expect(isOurAddress(`30009:${PK}:fmd-verified-sale`)).toBe(true)
     expect(isOurAddress(`31990:${PK}:fmd-client`)).toBe(true)
@@ -215,7 +252,7 @@ describe('the rest of what the site publishes', () => {
 
 describe('gift wraps (1059)', () => {
   const wrap = sealMessage({ senderSecretKey: SK, recipient: OTHER, content: 'the auth code', now: NOW })
-  test('refused by default: nothing reads them yet, and a relay cannot inspect them', () => {
+  test('refused by default: a relay cannot inspect them, and the escrow relays carry the chats', () => {
     refuses(wrap, /private messages are not stored here yet/)
   })
   test('stored when the operator turns them on', () => accepts(wrap, { acceptGiftWraps: true }))
