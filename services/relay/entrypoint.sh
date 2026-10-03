@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# Entrypoint for the relay image. Roles:
-#
-#   relay     relay plus mirror (default)
-#   backfill  one-off: fetch what the public relays have and this one lacks
-#
-# Anything else goes straight to strfry. Run maintenance in the running
-# container with `exec`, never `run`:
-#
-#   docker compose exec strfry /app/entrypoint.sh scan '{"kinds":[30402]}'
-#   docker compose exec strfry /app/entrypoint.sh backfill
-#
-# Why one container and `exec`: every strfry process opens the same LMDB, and
-# LMDB tells live readers apart by PID. A second container (`run`, or another
-# service) numbers PIDs from 1 again, can collide with one in here and then
-# fails to open the db. Sharing a PID namespace doesn't help either. Docker
-# won't order or retry the joining container's start, so after a reboot the
-# mirror could stay down silently.
-#
-# Mirror: `strfry router` streams new events from the public relays, and a
-# negentropy (NIP-77) backfill fetches what it missed, at start-up and every
-# FMD_BACKFILL_HOURS. Both go through the client write policy, so the mirror
-# can't pull in anything a client couldn't write.
+# Roles: relay (default, relay + mirror), backfill (one-off). Anything else goes to strfry.
+# Run maintenance with `docker compose exec`, never `run`: LMDB tracks readers by PID,
+# and a second container's PIDs can collide with ours.
 set -euo pipefail
 
 # Overridable so the script also runs outside the image.
@@ -30,8 +11,7 @@ POLICY=${FMD_POLICY_BIN:-/app/fmd-write-policy}
 die() { echo "fmd-relay: $*" >&2; exit 64; }
 hex64='^[0-9a-f]{64}$'
 
-# Validate config before anything starts. A malformed setting stops the
-# container with a reason, never a silent fallback.
+# fail loudly on bad config instead of falling back
 
 RELAY_HOST=${RELAY_HOST:-}
 RELAY_URL=${RELAY_URL:-${RELAY_HOST:+wss://$RELAY_HOST}}
@@ -66,9 +46,7 @@ for url in $UPSTREAM_RELAYS; do
   [[ "$url" =~ $relay_re ]] || die "UPSTREAM_RELAYS: '$url' is not a ws:// or wss:// URL"
 done
 
-# Grouped by selecting tag, since each router stream opens one connection per
-# upstream. Proofs are left out. No tag selects them, and listings and
-# portfolios embed theirs anyway.
+# one router stream per selecting tag; proofs ride inside listings and portfolios
 FILTERS=(
   '{"kinds":[30402,30078,6970],"#t":["flexmydomain"]}'
   '{"kinds":[5],"#k":["30402","30078"]}'

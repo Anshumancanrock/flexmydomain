@@ -1,19 +1,4 @@
 #!/usr/bin/env bun
-/**
- * strfry write-policy plugin: one JSON line in per event, one out (strfry
- * docs/plugins.md). policy.ts decides. This adds the event source and rate limits.
- *
- * Env config, so one binary serves both relay and router:
- *
- *   FMD_FLEX_RECIPIENT      x-only hex; keep only flex zaps paid to this key
- *   FMD_VERIFIERS           comma-separated x-only hex; keep their NIP-90 feedback
- *   FMD_ACCEPT_GIFT_WRAPS   "1" to store kind 1059 (off by default; see policy.ts)
- *   FMD_RATE_PER_MINUTE     sustained writes per client IP, or IPv6 /64 (default 30)
- *   FMD_RATE_BURST          burst allowance per client IP, or IPv6 /64 (default 60)
- *
- * Standalone build:
- *   bun build --compile services/relay/write-policy.ts --outfile fmd-write-policy
- */
 
 import { createInterface } from 'node:readline'
 import type { NostrEvent } from '../../core/nostr/event.js'
@@ -34,11 +19,7 @@ export interface PluginOutput {
   msg?: string
 }
 
-/**
- * Token bucket per client address. Only client writes hit it. Imports, router
- * and sync are our own traffic. Buckets idle 10 minutes are dropped so address
- * rotation can't grow the map without bound.
- */
+/** Token bucket per client address. Only client writes hit it. */
 export function createRateLimiter(perMinute: number, burst: number) {
   const buckets = new Map<string, { tokens: number; at: number }>()
   let calls = 0
@@ -58,7 +39,6 @@ export function createRateLimiter(perMinute: number, burst: number) {
   }
 }
 
-/** Rate-limit key. IPv6 hosts pick any address in their /64, so key on the /64. IPv4-mapped counts as IPv4. */
 export function rateKey(sourceType: string | undefined, sourceInfo: string | undefined): string {
   const ip = (sourceInfo ?? 'unknown').toLowerCase()
   if (sourceType !== 'IP6') return ip
@@ -108,16 +88,20 @@ export function handle(
   }
 
   if (decision.action === 'accept') return { id, action: 'accept' }
-  /* Only clients get a reason. An empty msg keeps strfry from logging every
-     off-topic event a busy upstream sends. */
-  return { id, action: 'reject', msg: fromClient ? decision.msg : '' }
+  // Only clients get a reason. An empty msg keeps strfry from logging every off-topic event a busy upstream sends.
+  return { id, action: 'reject', msg: fromClient ? decision.msg.slice(0, 512) : '' }
+}
+
+const positive = (value: string | undefined, fallback: number): number => {
+  const n = Number(value)
+  return value !== undefined && Number.isFinite(n) && n > 0 ? n : fallback
 }
 
 if (import.meta.main) {
   const options = optionsFromEnv(process.env)
   const allow = createRateLimiter(
-    Number(process.env.FMD_RATE_PER_MINUTE ?? 30),
-    Number(process.env.FMD_RATE_BURST ?? 60),
+    positive(process.env.FMD_RATE_PER_MINUTE, 30),
+    positive(process.env.FMD_RATE_BURST, 60),
   )
   const lines = createInterface({ input: process.stdin, terminal: false })
 

@@ -1,15 +1,8 @@
-/**
- * Rules behind the relay's strfry write policy. Pure: event in, decision out
- * (rate limits live in write-policy.ts). We store only what the site publishes,
- * parsed with the same core/ code readers use, so bad events are refused on write.
- * Not checked: signatures (strfry does that first), DNS and zap LNURL keys (need
- * the network, readers check them).
- */
-
 import { tagValue, tagValues, type NostrEvent } from '../../core/nostr/event.js'
 import { LISTING_D_PREFIX, LISTING_KIND, LISTING_TOPIC, checkListing } from '../../core/nostr/listing.js'
 import { PORTFOLIO_D, parsePortfolio } from '../../core/nostr/portfolio.js'
-import { ESCROW_D_PREFIX, parseEscrowEvent } from '../../core/nostr/escrow.js'
+import { ESCROW_D_PREFIX, RULING_D_PREFIX, parseEscrowEvent, parseRuling } from '../../core/nostr/escrow.js'
+import { KEY_BACKUP_D_PREFIX, isKeyBackup } from '../../core/nostr/keybackup.js'
 import { DELETION_KIND } from '../../core/nostr/deletion.js'
 import { RECEIPT_KIND, RECEIPT_NAMESPACE, parseReceipt } from '../../core/nostr/receipt.js'
 import {
@@ -37,11 +30,6 @@ export interface PolicyOptions {
   flexRecipient?: string
   /** Keys whose NIP-90 feedback (kind 7000) is kept. Nothing in it ties it to us. */
   verifiers?: readonly string[]
-  /**
-   * Kind 1059. Off by default: nothing reads them yet, and storing wraps for
-   * anyone makes us an opaque DM store. Enable along with the private-channel UI
-   * and NIP-42-gated reads (strfry `restrictedReadKinds`, not in 1.1.x yet).
-   */
   acceptGiftWraps?: boolean
 }
 
@@ -57,7 +45,7 @@ export function decide(event: NostrEvent, options: PolicyOptions = {}): Decision
   switch (event.kind) {
     case LISTING_KIND:
       return decideListing(event)
-    case PROOF_KIND: // 30078: proofs, portfolios, escrow views
+    case PROOF_KIND:
       return decideAppData(event)
     case DELETION_KIND:
       return decideDeletion(event)
@@ -95,7 +83,6 @@ export function decide(event: NostrEvent, options: PolicyOptions = {}): Decision
   }
 }
 
-/* Same rule readers apply (spec/PROTOCOL.md): our topic plus a proof signed by the listing's key. */
 function decideListing(event: NostrEvent): Decision {
   if (!tagValues(event, 't').includes(LISTING_TOPIC)) return reject(OFF_TOPIC)
   const check = checkListing({ event })
@@ -105,7 +92,7 @@ function decideListing(event: NostrEvent): Decision {
   return accept
 }
 
-/* Every NIP-78 app shares 30078. Keep only our three `d` namespaces, parsed as readers parse them. */
+// Every NIP-78 app shares 30078. Keep only our own `d` namespaces, parsed as readers parse them.
 function decideAppData(event: NostrEvent): Decision {
   const d = tagValue(event, 'd') ?? ''
   if (d.startsWith(PROOF_D_PREFIX)) {
@@ -120,17 +107,35 @@ function decideAppData(event: NostrEvent): Decision {
     const view = parseEscrowEvent(event)
     return view.ok ? accept : reject(`not a valid escrow view (${view.reason})`)
   }
+  if (d.startsWith(RULING_D_PREFIX)) {
+    const ruling = parseRuling(event)
+    return ruling.ok ? accept : reject(`not a valid ruling (${ruling.reason})`)
+  }
+  if (d.startsWith(KEY_BACKUP_D_PREFIX)) {
+    // Encrypted to its author, so only the outside can be checked.
+    return isKeyBackup(event) ? accept : reject('not a valid key backup')
+  }
+
   return reject(OFF_TOPIC)
 }
 
-/* Keep a deletion only if an `a` tag names one of our addresses (the site
-   deletes by address). Apps sharing 30402/30078 send id-only or foreign
-   deletions by the hundred. strfry itself refuses deleting another key's event. */
+// Keep a deletion only if an `a` tag names one of our addresses (the site deletes by address).
 function decideDeletion(event: NostrEvent): Decision {
-  return tagValues(event, 'a').some(isOurAddress) ? accept : reject(OFF_TOPIC)
+  const addresses = tagValues(event, 'a')
+  if (!addresses.some(isOurAddress)) return reject(OFF_TOPIC)
+  if (addresses.some(isArbiterRecord)) return reject(ARBITER_RECORD)
+  if (tagValues(event, 'e').length) return reject('a deletion here names its events by address only')
+  return accept
 }
 
-/** Whether `<kind>:<pubkey>:<d>` is one of ours. d can contain colons (`fmd:listing:example.com`). */
+export const ARBITER_RECORD = "rulings are the arbiter's public record, and this relay never deletes them"
+
+export function isArbiterRecord(coordinate: string): boolean {
+  const [kind, , ...rest] = coordinate.split(':')
+  const d = rest.join(':')
+  return Number(kind) === PROOF_KIND && d.startsWith(RULING_D_PREFIX)
+}
+
 export function isOurAddress(coordinate: string): boolean {
   const [kind, pubkey, ...rest] = coordinate.split(':')
   if (!/^\d+$/.test(kind ?? '') || !/^[0-9a-f]{64}$/.test(pubkey ?? '') || rest.length === 0) return false
@@ -139,7 +144,8 @@ export function isOurAddress(coordinate: string): boolean {
     case LISTING_KIND:
       return d.startsWith(LISTING_D_PREFIX)
     case PROOF_KIND:
-      return d.startsWith(PROOF_D_PREFIX) || d === PORTFOLIO_D || d.startsWith(ESCROW_D_PREFIX)
+      return d.startsWith(PROOF_D_PREFIX) || d === PORTFOLIO_D || d.startsWith(ESCROW_D_PREFIX) || d.startsWith(RULING_D_PREFIX) ||
+        d.startsWith(KEY_BACKUP_D_PREFIX)
     case FOLLOW_SET_KIND:
       return d === ARBITER_SET_D || d === WATCHLIST_D
     case BADGE_DEFINITION_KIND:
@@ -151,8 +157,6 @@ export function isOurAddress(coordinate: string): boolean {
   }
 }
 
-/* Judge by the embedded zap request. The payer's request carries the flex tags,
-   and zappers copy no custom tags into the receipt. */
 function decideZapReceipt(event: NostrEvent, options: PolicyOptions): Decision {
   if (options.flexRecipient && tagValue(event, 'p') !== options.flexRecipient) return reject(OFF_TOPIC)
   let request: { kind?: unknown; tags?: unknown } | undefined
@@ -169,9 +173,7 @@ function decideZapReceipt(event: NostrEvent, options: PolicyOptions): Decision {
   return ours ? accept : reject(OFF_TOPIC)
 }
 
-/* NIP-65 relay lists, read by the outbox model. Anyone can mint a key, so lists
-   are bounded. Kind 0 isn't stored at all. The site never publishes one, and
-   64 KB profiles from fresh keys are the cheapest way to fill the disk. */
+// NIP-65 relay lists, read by the outbox model. Anyone can mint a key, so lists are bounded.
 export const MAX_RELAY_LIST_ENTRIES = 50
 
 function decideRelayList(event: NostrEvent): Decision {
@@ -186,7 +188,7 @@ function decideRelayList(event: NostrEvent): Decision {
   return accept
 }
 
-/* NIP-90 inputs as buildVerifyRequest writes them: one domain, one claimant. */
+// NIP-90 inputs as buildVerifyRequest writes them: one domain, one claimant.
 function isVerifyRequest(event: NostrEvent): boolean {
   const inputs = event.tags.filter((t) => t[0] === 'i')
   return inputs.some((t) => t[4] === 'domain') && inputs.some((t) => t[4] === 'claimant')
