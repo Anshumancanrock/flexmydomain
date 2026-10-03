@@ -1,7 +1,6 @@
 // Minimal NIP-01 relay pool. No reconnects or caching: open, read to EOSE, close.
-// Relays are untrusted. Every event goes through checkEvent before we keep it.
 
-import { checkEvent, type NostrEvent } from '../core/nostr/event.js'
+import { checkEvent, matchFilters, type NostrEvent } from '../core/nostr/event.js'
 
 /** NIP-01 filter. Loosely typed, since relays accept more than we send. */
 export type Filter = Record<string, unknown>
@@ -9,16 +8,15 @@ export type Filter = Record<string, unknown>
 export interface QueryOptions {
   /** Per relay. A slow relay must not stall the page. */
   timeoutMs?: number
-  /** Stop reading a relay after this many verified events. */
   limit?: number
   signal?: AbortSignal
-  /**
-   * Called per relay. `complete` means EOSE or the limit was hit. After a
-   * timeout or a drop the events may be partial, so check it before replacing
-   * an event you rebuilt from them.
-   */
   onRelayDone?: (relay: string, count: number, error?: string, complete?: boolean) => void
+  /** Signs a NIP-42 AUTH for a relay that asks, or undefined to decline. */
+  auth?: RelayAuth
 }
+
+/** Sign a kind 22242 for `relay` and its `challenge` (core/nostr/nip42.ts buildAuthEvent). */
+export type RelayAuth = (relay: string, challenge: string) => Promise<NostrEvent | undefined>
 
 export interface PublishResult {
   relay: string
@@ -28,10 +26,63 @@ export interface PublishResult {
 
 const DEFAULT_TIMEOUT_MS = 6000
 
-/**
- * Query relays in parallel and dedupe by id. Invalid events drop silently.
- * For addressable kinds, pick the version with newestPerAddress.
- */
+/* ---------- Warm connections ---------- */
+
+let warmMs = 0
+const warm = new Map<string, { socket: WebSocket; timer: ReturnType<typeof setTimeout> }>()
+
+/** Keep sockets open `ms` after a clean read for the next one, or 0 to stop (closing those held). */
+export function keepConnectionsWarm(ms: number): void {
+  warmMs = Number.isFinite(ms) && ms > 0 ? ms : 0
+  if (warmMs === 0) {
+    for (const [relay, held] of [...warm]) {
+      warm.delete(relay)
+      clearTimeout(held.timer)
+      closeQuietly(held.socket)
+    }
+  }
+}
+
+function closeQuietly(socket: WebSocket): void {
+  try {
+    socket.close()
+  } catch {
+  }
+}
+
+function park(relay: string, socket: WebSocket): void {
+  if (warmMs === 0 || socket.readyState !== WebSocket.OPEN || warm.has(relay)) {
+    closeQuietly(socket)
+    return
+  }
+  const drop = () => {
+    if (warm.get(relay)?.socket !== socket) return
+    clearTimeout(warm.get(relay)!.timer)
+    warm.delete(relay)
+  }
+  socket.onopen = null
+  socket.onmessage = null
+  socket.onerror = drop
+  socket.onclose = drop
+  const timer = setTimeout(() => {
+    drop()
+    closeQuietly(socket)
+  }, warmMs)
+  warm.set(relay, { socket, timer })
+}
+
+function takeWarm(relay: string): WebSocket | undefined {
+  const held = warm.get(relay)
+  if (!held) return undefined
+  warm.delete(relay)
+  clearTimeout(held.timer)
+  if (held.socket.readyState !== WebSocket.OPEN) {
+    closeQuietly(held.socket)
+    return undefined
+  }
+  return held.socket
+}
+
 export async function queryRelays(
   relays: readonly string[],
   filters: Filter[],
@@ -52,7 +103,6 @@ export async function queryRelays(
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at)
 }
 
-/** One relay. Resolves at EOSE, the limit or the timeout. */
 export async function queryRelay(relay: string, filters: Filter[], options: QueryOptions = {}): Promise<NostrEvent[]> {
   return (await queryRelayDetailed(relay, filters, options)).events
 }
@@ -61,21 +111,50 @@ function queryRelayDetailed(
   relay: string,
   filters: Filter[],
   options: QueryOptions = {},
+  fresh = false,
 ): Promise<{ events: NostrEvent[]; complete: boolean }> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const deadline = Date.now() + timeoutMs
   const subId = `fmd-${Math.random().toString(36).slice(2, 10)}`
 
   return new Promise((resolve, reject) => {
+    // A read that may authenticate never shares a socket, in either direction.
+    const reused = fresh || options.auth ? undefined : takeWarm(relay)
     let socket: WebSocket
     try {
-      socket = new WebSocket(relay)
+      socket = reused ?? new WebSocket(relay)
     } catch (err) {
       reject(err)
       return
     }
+    let heard = false
 
     const events: NostrEvent[] = []
     let settled = false
+    // NIP-42: the relay's challenge, our answer, and whether it took it.
+    let challenge: string | undefined
+    let authId: string | undefined
+    let authOk = false
+    let closedForAuth = false
+    let retried = false
+    const request = () => socket.send(JSON.stringify(['REQ', subId, ...filters]))
+    const authenticate = async () => {
+      if (!options.auth || challenge === undefined || authId !== undefined) return
+      let signed: NostrEvent | undefined
+      try {
+        signed = await options.auth(relay, challenge)
+      } catch {
+        signed = undefined
+      }
+      if (settled) return
+      if (!signed) {
+        // Declined: a query waiting on it can't go on.
+        if (closedForAuth) finish()
+        return
+      }
+      authId = signed.id
+      socket.send(JSON.stringify(['AUTH', signed]))
+    }
 
     const finish = (error?: Error, complete = false) => {
       if (settled) return
@@ -84,12 +163,22 @@ function queryRelayDetailed(
       options.signal?.removeEventListener('abort', onAbort)
       try {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(['CLOSE', subId]))
-        socket.close()
+        // Only a clean read with no AUTH in it hands its socket on.
+        if (!error && complete && !options.auth) park(relay, socket)
+        else socket.close()
       } catch {
-        // Already closed.
       }
       if (error) reject(error)
       else resolve({ events, complete })
+    }
+
+    const retry = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
+      closeQuietly(socket)
+      queryRelayDetailed(relay, filters, { ...options, timeoutMs: Math.max(1, deadline - Date.now()) }, true).then(resolve, reject)
     }
 
     const onAbort = () => finish(new Error('aborted'))
@@ -98,10 +187,8 @@ function queryRelayDetailed(
     // A timeout resolves with what we have. One hung relay must not blank the page.
     const timer = setTimeout(() => finish(), timeoutMs)
 
-    socket.onopen = () => socket.send(JSON.stringify(['REQ', subId, ...filters]))
-
-    socket.onerror = () => finish(new Error(`${relay}: connection failed`))
-    socket.onclose = () => finish()
+    socket.onerror = () => (reused && !heard ? retry() : finish(new Error(`${relay}: connection failed`)))
+    socket.onclose = () => (reused && !heard ? retry() : finish())
 
     socket.onmessage = (message: MessageEvent) => {
       let frame: unknown
@@ -113,45 +200,80 @@ function queryRelayDetailed(
       if (!Array.isArray(frame)) return
 
       const [type, id, payload] = frame as [string, string, unknown]
+      if (type === 'AUTH' && typeof id === 'string') {
+        challenge = id
+        void authenticate()
+        return
+      }
+      if (type === 'OK' && authId !== undefined && id === authId) {
+        authOk = payload === true
+        if (closedForAuth) {
+          if (authOk && !retried) {
+            retried = true
+            closedForAuth = false
+            request()
+          } else {
+            finish()
+          }
+        }
+        return
+      }
       if (id !== subId) return
+      heard = true
 
       if (type === 'EVENT') {
         const checked = checkEvent(payload)
-        if (checked.ok) {
+        if (checked.ok && matchFilters(filters, checked.event)) {
           events.push(checked.event)
           if (options.limit !== undefined && events.length >= options.limit) finish(undefined, true)
         }
         return
       }
       if (type === 'EOSE') finish(undefined, true)
-      if (type === 'CLOSED') finish()
+      if (type === 'CLOSED') {
+        // Once only: a relay that keeps refusing after accepting our AUTH has said no.
+        if (typeof payload === 'string' && payload.startsWith('auth-required:') && options.auth && !retried) {
+          if (authOk) {
+            retried = true
+            request()
+          } else {
+            closedForAuth = true
+            void authenticate()
+          }
+          return
+        }
+        finish()
+      }
+    }
+
+    if (reused) {
+      try {
+        request()
+      } catch {
+        retry()
+      }
+    } else {
+      socket.onopen = request
     }
   })
 }
 
-/**
- * Returns every relay's answer, refusals included, and the UI should show them.
- * Two of five accepting is not "published". Refusals usually give a reason the
- * user can fix.
- */
 export async function publishToRelays(
   relays: readonly string[],
   event: NostrEvent,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; auth?: RelayAuth } = {},
 ): Promise<PublishResult[]> {
   const checked = checkEvent(event)
   if (!checked.ok) {
-    // Fail here once, not with a different error from each relay.
     throw new Error(`publishToRelays: this event does not verify: ${checked.reason}`)
   }
   return Promise.all(relays.map((relay) => publishToRelay(relay, checked.event, options)))
 }
 
-/** One relay. Resolves on its OK frame. */
 export function publishToRelay(
   relay: string,
   event: NostrEvent,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; auth?: RelayAuth } = {},
 ): Promise<PublishResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
@@ -172,14 +294,29 @@ export function publishToRelay(
       try {
         socket.close()
       } catch {
-        // Already closed.
       }
       resolve(result)
     }
 
     const timer = setTimeout(() => finish({ relay, ok: false, message: 'timed out' }), timeoutMs)
+    // NIP-42, as for queries: answer a challenge only when asked to, and send the event again once.
+    let challenge: string | undefined
+    let authId: string | undefined
+    let refused: PublishResult | undefined
+    const send = () => socket.send(JSON.stringify(['EVENT', event]))
+    const authenticate = async () => {
+      if (!options.auth || challenge === undefined || authId !== undefined) return
+      const signed = await options.auth(relay, challenge).catch(() => undefined)
+      if (settled) return
+      if (!signed) {
+        if (refused) finish(refused)
+        return
+      }
+      authId = signed.id
+      socket.send(JSON.stringify(['AUTH', signed]))
+    }
 
-    socket.onopen = () => socket.send(JSON.stringify(['EVENT', event]))
+    socket.onopen = send
     socket.onerror = () => finish({ relay, ok: false, message: 'connection failed' })
     socket.onclose = () => finish({ relay, ok: false, message: 'closed before acknowledging' })
 
@@ -192,16 +329,34 @@ export function publishToRelay(
       }
       if (!Array.isArray(frame)) return
       const [type, id, ok, reason] = frame as [string, string, boolean, string]
+      if (type === 'AUTH' && typeof id === 'string') {
+        challenge = id
+        if (refused) void authenticate()
+        return
+      }
+      if (type === 'OK' && authId !== undefined && id === authId) {
+        if (ok === true && refused) {
+          refused = undefined
+          send()
+        } else if (refused) {
+          finish(refused)
+        }
+        return
+      }
       if (type !== 'OK' || id !== event.id) return
-      finish({ relay, ok: ok === true, message: typeof reason === 'string' && reason !== '' ? reason : undefined })
+      const result = { relay, ok: ok === true, message: typeof reason === 'string' && reason !== '' ? reason : undefined }
+      // Once only, and only when asked to authenticate.
+      if (!result.ok && options.auth && authId === undefined && result.message?.startsWith('auth-required:')) {
+        refused = result
+        if (challenge !== undefined) void authenticate()
+        return
+      }
+      finish(result)
     }
   })
 }
 
-/**
- * NIP-45 COUNT. Support is patchy, and a relay without it sends NOTICE, an
- * error or nothing. That gives undefined, never 0. Render it as unknown.
- */
+/** NIP-45 COUNT. Support is patchy, and a relay without it sends NOTICE, an error or nothing. */
 export function countOnRelay(
   relay: string,
   filters: Filter[],
@@ -227,7 +382,6 @@ export function countOnRelay(
       try {
         socket.close()
       } catch {
-        // Already closed.
       }
       resolve(value)
     }
@@ -252,10 +406,6 @@ export function countOnRelay(
   })
 }
 
-/**
- * Max of the relay counts, not the sum. Relays overlap, so a sum counts an
- * event once per relay holding it. The max is a lower bound on the true total.
- */
 export async function countOnRelays(
   relays: readonly string[],
   filters: Filter[],
@@ -279,10 +429,7 @@ export async function fetchRelayInfo(relay: string, options: { signal?: AbortSig
   return response.json()
 }
 
-/**
- * Newest event per (kind, pubkey, d), lowest id on a tie (NIP-01). Some relays
- * also return older versions, which would bring back a stale price.
- */
+/** Newest event per (kind, pubkey, d), lowest id on a tie (NIP-01). */
 export function newestPerAddress(events: readonly NostrEvent[]): NostrEvent[] {
   const best = new Map<string, NostrEvent>()
   for (const event of events) {
