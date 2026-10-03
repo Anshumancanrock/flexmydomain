@@ -1,15 +1,10 @@
-/**
- * Where net/ and core/oracle meet. Verdicts come back with the raw lookups attached.
- * Pages, services/verifier and services/indexer all call this. Keep it the only copy
- * of the checking rules. Two verifiers that disagree are worse than one wrong one.
- */
-
 import {
   checkEligibility,
   combineProofs,
   nip05DocumentUrl,
   proofRecordName,
   normaliseDomain,
+  rdapAnswerProblem,
   verifyNip05,
   verifyProofRecords,
   type DomainProofStatus,
@@ -24,7 +19,6 @@ export interface DomainReport {
   domain: string
   pubkey: string
   status: DomainProofStatus
-  /** At least one resolver answered. */
   answered: boolean
   dnssec: boolean
   lookup: TxtLookup
@@ -34,11 +28,7 @@ export interface DomainReport {
   checkedAt: number
 }
 
-/**
- * DNS first, NIP-05 only if DNS didn't prove it. DNS outranks NIP-05.
- * Only records every answering resolver returned are verified. A partial record is
- * mid-propagation or a resolver being lied to, and neither proves anything to a buyer.
- */
+/** DNS first, NIP-05 only if DNS didn't prove it. DNS outranks NIP-05. */
 export async function checkDomainProof(params: {
   domain: string
   pubkey: string
@@ -51,12 +41,15 @@ export async function checkDomainProof(params: {
   const checkedAt = params.now ?? Math.floor(Date.now() / 1000)
 
   const lookup = await lookupTxt(proofRecordName(domain), { signal: params.signal, now: checkedAt })
-  const dns = verifyProofRecords({
-    domain,
-    pubkey: params.pubkey,
-    records: lookup.agreed,
-    now: checkedAt,
-  })
+  const silent = lookup.observations.filter((o) => o.error !== undefined)
+  const dns: ProofVerification = lookup.complete
+    ? verifyProofRecords({ domain, pubkey: params.pubkey, records: lookup.agreed, now: checkedAt })
+    : {
+        ok: false,
+        reason: silent.length
+          ? `not checked, ${silent.map((o) => `${o.provider} did not answer (${o.error})`).join(' and ')}`
+          : 'not checked, no resolver was asked',
+      }
 
   let nip05: Nip05Verification | undefined
   let url: string | undefined
@@ -72,7 +65,7 @@ export async function checkDomainProof(params: {
     domain,
     pubkey: params.pubkey,
     status: combineProofs({ domain, pubkey: params.pubkey, dns, nip05 }),
-    answered: lookup.answered,
+    answered: lookup.complete,
     dnssec: lookup.dnssec,
     lookup,
     dns,
@@ -82,10 +75,8 @@ export async function checkDomainProof(params: {
   }
 }
 
-/** Snapshot kept for the evidence file. */
 export interface RegistryReport {
   domain: string
-  /** Unset when the TLD has no RDAP or gave no usable answer. */
   eligibility?: Eligibility
   snapshot: RdapSnapshot
   /** False means flex only, no escrow. */
@@ -93,10 +84,6 @@ export interface RegistryReport {
   checkedAt: number
 }
 
-/**
- * Registry lookup plus eligibility rules. No RDAP means `supported: false` and no
- * eligibility at all. A verdict we couldn't reach must never render as one that passed.
- */
 export async function checkRegistry(params: {
   domain: string
   now?: number
@@ -105,9 +92,19 @@ export async function checkRegistry(params: {
 }): Promise<RegistryReport> {
   const domain = normaliseDomain(params.domain)
   const checkedAt = params.now ?? Math.floor(Date.now() / 1000)
-  const snapshot = await fetchRdapDomain(domain, { ...params, now: checkedAt })
+  let snapshot: Awaited<ReturnType<typeof fetchRdapDomain>>
+  try {
+    snapshot = await fetchRdapDomain(domain, { ...params, now: checkedAt })
+  } catch (err) {
+    return {
+      domain,
+      snapshot: { domain, url: '', ok: false, status: undefined, observedAt: checkedAt, error: (err as Error).message },
+      supported: true,
+      checkedAt,
+    }
+  }
 
-  if (!snapshot.supported || !snapshot.ok) {
+  if (!snapshot.supported || !snapshot.ok || rdapAnswerProblem(snapshot.response, domain)) {
     return { domain, snapshot, supported: snapshot.supported, checkedAt }
   }
 
@@ -125,7 +122,6 @@ export async function checkRegistry(params: {
   }
 }
 
-/** Both oracles in parallel, for the add-a-domain flow. */
 export async function checkDomain(params: {
   domain: string
   pubkey: string

@@ -1,9 +1,3 @@
-/**
- * TXT lookups over DoH through two independent resolvers. core/oracle judges.
- * One resolver can be wrong, stale, poisoned or compelled, so both must agree.
- * A disagreement is reported, never settled by picking one.
- */
-
 /** RFC 8484 JSON endpoints, both CORS-enabled (checked 2026-09-18). */
 export const DOH_PROVIDERS = [
   { name: 'cloudflare', url: 'https://cloudflare-dns.com/dns-query' },
@@ -12,39 +6,30 @@ export const DOH_PROVIDERS = [
 
 export const TXT_TYPE = 16
 
-/** One provider's answer, kept verbatim as evidence. */
 export interface DohObservation {
   provider: string
-  /** Quotes stripped, multi-strings joined. */
   records: string[]
-  /** DNS RCODE. 0 (NOERROR) and 3 (NXDOMAIN) are both answers. */
   status: number | undefined
-  /** Provider validated the DNSSEC chain. */
   dnssec: boolean
-  /** Provider did not answer at all. Not the same as no records. */
   error?: string
   /** Unix seconds. */
   observedAt: number
-  /** Body as received, for the evidence file. */
   raw?: string
 }
 
 export interface TxtLookup {
   name: string
   observations: DohObservation[]
-  /** Returned by every answering provider. Verify against these only. */
+  /** Returned by every provider, all of which answered. Verify against these only. */
   agreed: string[]
-  /** Returned by only some providers. Shown, never trusted. */
+  /** Returned by only some providers, or by one while another failed. Shown, never trusted. */
   disputed: string[]
+  /** At least one provider answered. */
   answered: boolean
-  /** Every answering provider validated DNSSEC. */
+  complete: boolean
   dnssec: boolean
 }
 
-/**
- * One provider. `cd=false&do=true` asks it to validate DNSSEC and say so. A
- * provider that ignores the flags returns AD false, shown as "not DNSSEC-signed".
- */
 export async function lookupTxtVia(
   provider: { name: string; url: string },
   name: string,
@@ -67,14 +52,18 @@ export async function lookupTxtVia(
     }
 
     const body = JSON.parse(raw) as { Status?: number; AD?: boolean; Answer?: { type?: number; data?: string }[] }
-    const records = (body.Answer ?? [])
-      .filter((a) => a.type === TXT_TYPE && typeof a.data === 'string')
+    const status = typeof body.Status === 'number' ? body.Status : undefined
+    if (status !== 0 && status !== 3) {
+      return { provider: provider.name, records: [], status, dnssec: false, observedAt, raw, error: `DNS status ${status ?? 'missing'}` }
+    }
+    const records = (Array.isArray(body.Answer) ? body.Answer : [])
+      .filter((a) => a?.type === TXT_TYPE && typeof a.data === 'string')
       .map((a) => unquoteTxt(a.data as string))
 
     return {
       provider: provider.name,
       records,
-      status: typeof body.Status === 'number' ? body.Status : undefined,
+      status,
       dnssec: body.AD === true,
       observedAt,
       raw,
@@ -91,22 +80,12 @@ export async function lookupTxtVia(
   }
 }
 
-/**
- * Join a DoH TXT value like `"chunk one" "chunk two"`. RDATA chunks are at most
- * 255 bytes and concatenate with no separator, so never join on a space.
- * The 209-char proof record never splits, but other records in the zone may.
- */
 export function unquoteTxt(data: string): string {
   const parts = data.match(/"(?:[^"\\]|\\.)*"/g)
   if (!parts) return data.trim()
   return parts.map((p) => p.slice(1, -1).replace(/\\(.)/g, '$1')).join('')
 }
 
-/**
- * Ask every provider in parallel and compare. A failed provider is recorded as
- * failed, not empty. Escrow must never move on one failed lookup, and
- * `answered` lets callers enforce that.
- */
 export async function lookupTxt(
   name: string,
   options: { providers?: readonly { name: string; url: string }[]; signal?: AbortSignal; now?: number } = {},
@@ -122,10 +101,11 @@ export async function lookupTxt(
     }
   }
 
+  const complete = answering.length === observations.length && observations.length > 0
   const agreed: string[] = []
   const disputed: string[] = []
   for (const [record, count] of counts) {
-    if (count === answering.length && answering.length > 0) agreed.push(record)
+    if (complete && count === answering.length) agreed.push(record)
     else disputed.push(record)
   }
 
@@ -135,14 +115,12 @@ export async function lookupTxt(
     agreed: agreed.sort(),
     disputed: disputed.sort(),
     answered: answering.length > 0,
+    complete,
     dnssec: answering.length > 0 && answering.every((o) => o.dnssec),
   }
 }
 
-/**
- * NIP-05 document, the alternative proof (spec/PROOF.md section 7). A CORS
- * failure means the domain doesn't offer this proof. Not a fault.
- */
+/** NIP-05 document, the alternative proof (spec/PROOF.md section 7). */
 export async function fetchNip05(
   url: string,
   options: { signal?: AbortSignal; now?: number } = {},

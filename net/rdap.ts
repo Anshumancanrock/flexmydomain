@@ -1,14 +1,7 @@
-/**
- * RDAP fetching (IANA bootstrap and registry queries). core/oracle/rdap.ts decides.
- * Responses are kept as raw text plus sha256. The digest goes in the escrow event,
- * and a hash of re-serialised JSON would prove nothing about what the registry sent.
- */
-
-import { rdapBaseUrls, rdapDomainUrl, snapshotHash } from '../core/oracle/rdap.js'
+import { parseRdapDomain, rdapAnswerProblem, rdapBaseUrls, rdapDomainUrl, snapshotHash, type RdapFacts } from '../core/oracle/rdap.js'
 
 export const RDAP_BOOTSTRAP_URL = 'https://data.iana.org/rdap/dns.json'
 
-/** One RDAP observation, with what a dispute needs. */
 export interface RdapSnapshot {
   domain: string
   url: string
@@ -23,11 +16,7 @@ export interface RdapSnapshot {
   error?: string
 }
 
-/**
- * IANA bootstrap file, cached in the module for a day by default (`force` skips).
- * It is ~150 KB and changes daily at most. Supported TLDs are whatever it lists,
- * so a registry that adds RDAP works with no code change.
- */
+/** IANA bootstrap file, cached in the module for a day by default (`force` skips). It is ~150 KB and changes daily at most. */
 let bootstrapCache: { at: number; value: unknown } | undefined
 
 export async function fetchRdapBootstrap(
@@ -44,16 +33,10 @@ export async function fetchRdapBootstrap(
   return value
 }
 
-/** For tests, and for a manual refresh. */
 export function clearBootstrapCache(): void {
   bootstrapCache = undefined
 }
 
-/**
- * Query one registry. A 404 is the registry saying "not registered", returned
- * with status 404, not thrown. A network failure has no status. An answer may
- * move an escrow, and a failed request never may.
- */
 export async function fetchRdapDomainAt(
   baseUrl: string,
   domain: string,
@@ -66,10 +49,13 @@ export async function fetchRdapDomainAt(
       headers: { accept: 'application/rdap+json, application/json' },
       signal: options.signal,
       credentials: 'omit',
+      // Two polls that agree only mean something if both reached the registry.
+      cache: 'no-store',
     })
-    const raw = await response.text()
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const raw = new TextDecoder().decode(bytes)
     if (!response.ok) {
-      return { domain, url, ok: false, status: response.status, raw, hash: snapshotHash(raw), observedAt }
+      return { domain, url, ok: false, status: response.status, raw, hash: snapshotHash(bytes), observedAt }
     }
     return {
       domain,
@@ -78,7 +64,7 @@ export async function fetchRdapDomainAt(
       status: response.status,
       response: JSON.parse(raw),
       raw,
-      hash: snapshotHash(raw),
+      hash: snapshotHash(bytes),
       observedAt,
     }
   } catch (err) {
@@ -86,11 +72,6 @@ export async function fetchRdapDomainAt(
   }
 }
 
-/**
- * Query through the bootstrap file, trying each published base URL in turn.
- * The first is often slow or down, so one failure is no verdict on the name.
- * Rate limits are the usual failure. Pollers should back off, not spin.
- */
 export async function fetchRdapDomain(
   domain: string,
   options: { bootstrap?: unknown; signal?: AbortSignal; now?: number } = {},
@@ -100,15 +81,14 @@ export async function fetchRdapDomain(
   const bases = rdapBaseUrls(bootstrap, domain)
 
   if (bases.length === 0) {
-    // Not an error. "Flex any domain, escrow only what we can verify", and
-    // without RDAP we can't verify.
+    // Not an error. "Flex any domain, escrow only what we can verify", and without RDAP we can't verify.
     return {
       domain,
       url: '',
       ok: false,
       status: undefined,
       observedAt,
-      error: 'this TLD publishes no RDAP service',
+      error: 'this TLD publishes no RDAP service over HTTPS',
       bootstrap,
       supported: false,
     }
@@ -118,9 +98,26 @@ export async function fetchRdapDomain(
   for (const base of bases) {
     const snapshot = await fetchRdapDomainAt(base, domain, { ...options, now: observedAt })
     if (snapshot.ok) return { ...snapshot, bootstrap, supported: true }
-    // A 404 is the registry answering. Another mirror would say the same.
     if (snapshot.status === 404) return { ...snapshot, bootstrap, supported: true }
     last = snapshot
   }
   return { ...(last as RdapSnapshot), bootstrap, supported: true }
+}
+
+/** One reading of a domain's registry record, or why there isn't one. */
+export async function readDomain(
+  domain: string,
+  options: { bootstrap?: unknown; signal?: AbortSignal; now?: number } = {},
+): Promise<{ ok: true; facts: RdapFacts; hash: string } | { ok: false; reason: string; final?: boolean }> {
+  const snapshot = await fetchRdapDomain(domain, options)
+  if (!snapshot.supported) {
+    return { ok: false, reason: 'this TLD publishes no RDAP service over HTTPS, so its registrar cannot be checked', final: true }
+  }
+  if (snapshot.status === 404) return { ok: false, reason: 'the registry says this domain is not registered', final: true }
+  if (!snapshot.ok || snapshot.raw === undefined) {
+    return { ok: false, reason: snapshot.error ?? `the registry did not answer (HTTP ${snapshot.status ?? 'none'})` }
+  }
+  const problem = rdapAnswerProblem(snapshot.response, domain)
+  if (problem) return { ok: false, reason: problem }
+  return { ok: true, facts: parseRdapDomain(snapshot.response), hash: snapshot.hash ?? snapshotHash(snapshot.raw) }
 }

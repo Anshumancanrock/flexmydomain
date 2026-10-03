@@ -25,12 +25,22 @@ work with no backend.
     outbox.ts    NIP-65 outbox routing over the relay pool
     rdap.ts      the IANA bootstrap file and registry queries
     relay.ts     a minimal Nostr relay pool: query, publish, count
-    transfer.ts  RDAP polls as dated, hashed transfer observations
     verify.ts    the domain proof and registry checks: fetch, then decide
 
 Two rules hold throughout:
 
 - Never let one failed fetch mean "no". A negative result requires an answer,
-  not a timeout. Every function here distinguishes "the provider said there is
-  no such record" from "the provider did not answer".
+  not a timeout. DNS, RDAP and LNURL results say "the provider said there is no
+  such record" apart from "the provider did not answer". Relay reads report it
+  per relay through `onRelayDone` (`readOwn` sums it up), and a page checks it
+  before it says anything is absent. `queryOutbox` doesn't report it, so it is
+  for display only.
 - Always carry the observation: raw bytes, the provider, the timestamp.
+
+A relay read opens a socket per relay and closes it at EOSE. A page can call
+`keepConnectionsWarm(ms)` (the pages use 4 seconds) so that a socket whose read
+ended cleanly stays open that long, and the next read of that relay starts on it
+instead of paying for a new TLS handshake. A held socket the relay closed is
+not used, and one that dies under a read is replaced once, within the read's
+own time limit. A read that may answer a NIP-42 challenge never takes or leaves
+a held socket. Services and scripts leave it off, so they exit when done.
