@@ -1,53 +1,73 @@
-// Browser bundle, built to web/assets/fmd.js. Pages get all library code from it.
-// No backend. Every user-facing feature works with our servers switched off.
-
 export * from '../core/oracle/index.js'
 export * from '../core/nostr/index.js'
 
-/* By name, not a star. ES modules silently drop a name two star exports share,
-   and escrow's generic helpers (taggedHash, compareBytes) are likeliest to clash. */
 export {
   addressToScript,
-  buildCommitment,
+  arbiterRule,
+  bindingInternalKey,
   buildSpend,
   buildTree,
+  collectSettlements,
+  completeSettlement,
+  deadlines,
   decodeAddress,
   decodeRecovery,
-  deriveTransferState,
   describeTree,
   encodeRecovery,
   escrowPublicKey,
   escrowPublicKeyHex,
   feeOf,
   finaliseSpend,
-  fundable,
-  registrantActed,
-  transferAllowed,
+  leafOfWitness,
+  normaliseAccount,
+  registrarFindings,
+  proposalOf,
   rebuildFromRecovery,
-  releasable,
+  roleOf,
+  rulesProblem,
   serializeSigned,
+  settlementFee,
+  settlementKey,
+  settlementProblem,
+  settlementTx,
   sighashFor,
+  signSettlement,
   signSpend,
+  signersOf,
   spendWith,
   txid,
+  verifySettlement,
   verifySpendSignature,
   vsize,
-  MIN_POLL_GAP_SECONDS,
+  SPACESHIP_IANA_ID,
+  TRANSFER_LOCK_DAYS,
+  BINDING_TAG,
+  MAX_FEE_RATE,
+  MIN_ARBITER_BLOCKS,
   NETWORK_HRP,
+  PROPOSER,
   RECOVERY_PREFIX,
-  REQUIRED_AGREEING_POLLS,
+  SETTLEMENT_LEAVES,
+  SITE_RULES,
 } from '../core/escrow/index.js'
 export type {
+  BoardEntry,
+  Deadlines,
   EscrowLeaf,
   EscrowOutpoint,
   EscrowTree,
   NetworkName,
-  Observation,
   Recovery,
+  RuleAction,
+  RuleVerdict,
+  Settlement,
+  SettlementKind,
+  SettlementLeaf,
+  SignedSettlement,
   SpendDestination,
-  TransferCommitment,
-  TransferState,
-  TransferVerdict,
+  Stage,
+  TradeFacts,
+  TradeRules,
   Tx,
 } from '../core/escrow/index.js'
 
@@ -60,6 +80,7 @@ export {
   fetchRdapBootstrap,
   fetchRdapDomain,
   fetchRdapDomainAt,
+  readDomain,
 } from '../net/rdap.js'
 export type { RdapSnapshot } from '../net/rdap.js'
 
@@ -67,18 +88,20 @@ export {
   countOnRelay,
   countOnRelays,
   fetchRelayInfo,
+  keepConnectionsWarm,
   newestPerAddress,
   publishToRelay,
   publishToRelays,
   queryRelay,
   queryRelays,
 } from '../net/relay.js'
-export type { Filter, PublishResult, QueryOptions } from '../net/relay.js'
+export type { Filter, PublishResult, QueryOptions, RelayAuth } from '../net/relay.js'
 
 export { CHAIN_APIS, EXPLORERS, chainApi, findFunding } from '../net/chain.js'
-export type { ChainApi, ChainTx, Utxo } from '../net/chain.js'
+export type { AddressHistory, AddressOutput, ChainApi, ChainTx, Spender, Utxo } from '../net/chain.js'
 
-export { RelayDirectory, publishOutbox, queryDiscovery, queryOutbox } from '../net/outbox.js'
+export { RelayDirectory, publishOutbox, queryDiscovery, queryOutbox, readOwn } from '../net/outbox.js'
+export type { OwnRead } from '../net/outbox.js'
 
 export {
   clearZapperKeyCache,
@@ -90,19 +113,25 @@ export {
 export type { LnurlPayInfo } from '../net/lnurl.js'
 
 export { checkDomain, checkDomainProof, checkRegistry } from '../net/verify.js'
-export { observe, record } from '../net/transfer.js'
 export type { DomainReport, RegistryReport } from '../net/verify.js'
 
-export { canSealWith, readMessages, sealMessage, wrapEntropy } from './messages.js'
+export { canSealWith, readMessages, readMessagesWith, sealMessage, wrapEntropy, wrapForEach, wrapForEachWith } from './messages.js'
+
+export { INVOICE_OFFER_SECONDS, bip21, bolt11Expiry, btcAmount, invoiceOfferEnds, qrSvg } from './pay.js'
 
 export {
+  UNLOCKED_MAX_IDLE,
   extensionSigner,
   forgetStoredKey,
+  forgetUnlocked,
   generateSecretKey,
   hasExtension,
   hasStoredKey,
+  keepUnlocked,
   loadKey,
   localSigner,
   storeKey,
+  storedPubkey,
+  unlockedKey,
   waitForExtension,
 } from './signer.js'
