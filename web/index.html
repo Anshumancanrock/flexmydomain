@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'sha256-cM2xWURx3FFGsh6xpUZEAgSA5jlPRcVB5vf8Vji4aNw='; object-src 'none'; base-uri 'none'; form-action 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
@@ -81,9 +82,9 @@
       <h1>Flex <em>your</em> domain</h1>
       <div class="claim" id="claim">
         <p class="claim-head">Flex at <b id="c-rank">#1</b> for
-          <button class="c-step" id="c-minus" type="button" aria-label="Aim at a cheaper rank">&minus;</button>
-          <em id="c-amount">&mdash;</em>
-          <button class="c-step" id="c-plus" type="button" aria-label="Aim at a higher rank">+</button>
+          <button class="c-step" id="c-minus" type="button" aria-label="Pay less">&minus;</button>
+          <span class="c-price"><em id="c-amount">&mdash;</em><small id="c-sats"></small></span>
+          <button class="c-step" id="c-plus" type="button" aria-label="Pay more">+</button>
         </p>
         <form class="claim-form" id="form" novalidate>
           <label class="c-field">
@@ -97,6 +98,7 @@
           <button class="btn btn-accent" type="submit">Flex it</button>
         </form>
         <p class="hint" id="hint" role="status"></p>
+        <p class="hint pending-line" id="pending" hidden></p>
       </div>
     </div>
 
@@ -134,13 +136,6 @@
     </section>
 
     <aside class="side">
-      <div class="panel weekly">
-        <div class="panel-head sm">
-          <h2>This week’s zaps</h2>
-        </div>
-        <ol class="wk-list" id="weekly"></ol>
-      </div>
-
       <div class="panel stats">
         <div class="stat-hero">
           <span class="stat-ic" aria-hidden="true">

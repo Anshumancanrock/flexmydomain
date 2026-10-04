@@ -1,8 +1,6 @@
-/* index.html: the flex board. Anyone can pay to put any domain here, so the
- * page must never imply ownership or a sale. Ownership is proven on the market.
- * Rank is the sum of public NIP-57 zap receipts. We keep no record of payers.
- */
+// index.html: the flex board. Anyone can pay to put any domain here, so the page must never imply ownership or a sale.
 import {
+  INVOICE_OFFER_SECONDS,
   MSATS_PER_SAT,
   addressOf,
   applyDeletions,
@@ -11,7 +9,9 @@ import {
   checkListing,
   deletionFilter,
   fetchLnurlPay,
+  lightningAddressUrl,
   flexZapFilter,
+  invoiceOfferEnds,
   listingFilter,
   newestPerAddress,
   npubEncode,
@@ -28,8 +28,8 @@ import {
 import type { Listing, Zap } from "./fmd.js";
 import { CONFIG, featuringEnabled } from "./config.js";
 import {
-  $, DISCOVERY_RELAYS, ZAP_RECEIPT_RELAYS, ageText, askDialog, copyToClipboard, esc, initConnect, initTheme, now,
-  onSessionChange, openConnect, sats, session,
+  $, DISCOVERY_RELAYS, ZAP_RECEIPT_RELAYS, ageText, askDialog, clockText, esc, initConnect, initTheme, invoiceBlock,
+  markInvoicePaid, now, onSessionChange, openConnect, sats, session, toast, wireInvoice,
 } from "./ui.js";
 
 const PER_PAGE = 15;
@@ -55,8 +55,14 @@ const state: {
   sort: string;
   page: number;
   range: "week" | "all";
-  target: number;
+  /** The amount picked with + and -, in sats. Until then the price of #1. */
+  amount: number | null;
   recent: Zap[];
+  missing: string[];
+  unknown: string | null;
+  answered: number;
+  /** The domain this tab just paid for, marked on the board once its receipt lands. */
+  flexed: string | null;
 } = {
   rows: [],
   loading: true,
@@ -65,39 +71,65 @@ const state: {
   sort: "rank",
   page: 1,
   range: "week",
-  target: 1,       // Rank the stepper aims at.
+  amount: null,
   recent: [],      // Verified zaps, newest first.
+  missing: [],
+  answered: 0,
+  unknown: null,
+  flexed: null,
 };
 
-/* All flex zaps go to one recipient. The domain rides in the signed zap
-   request each receipt embeds. */
+const uncertain = (): boolean => state.loading || state.unknown !== null || state.missing.length > 0;
+
 async function load(): Promise<void> {
   state.loading = true;
   render();
-
-  if (!featuringEnabled()) {
-    // Can't verify receipts without both settings. An unverifiable ranking is worse than none.
+  // The board can't be read: say why, and show no rank as certain.
+  const unknownBecause = (reason: string | null): void => {
+    state.unknown = reason;
+    state.missing = [];
+    state.answered = 0;
     state.rows = [];
     state.loading = false;
     render();
+  };
+
+  if (!featuringEnabled()) {
+    // Can't verify receipts without both settings. An unverifiable ranking is worse than none.
+    unknownBecause(null);
+    return;
+  }
+  const address = CONFIG.featuredLightningAddress.trim();
+  if (!/^https?:\/\//i.test(address) && !lightningAddressUrl(address)) {
+    unknownBecause("This site's lightning address isn't a valid one, so no payment can be counted.");
     return;
   }
 
   const recipient = CONFIG.featuredRecipientPubkey.trim().toLowerCase();
-  const provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => undefined);
+  let provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => undefined);
   if (!provider) {
-    state.rows = [];
-    state.loading = false;
-    render();
-    return;
+    const lnurl = await fetchLnurlPay(CONFIG.featuredLightningAddress).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+    if (lnurl.ok && lnurl.info.allowsNostr && lnurl.info.nostrPubkey) {
+      provider = lnurl.info.nostrPubkey;
+    } else {
+      unknownBecause(lnurl.ok
+        ? "This site's lightning address doesn't support zaps, so no payment can be counted."
+        : "The lightning provider didn't answer, so payments can't be counted. Reload in a minute.");
+      return;
+    }
   }
 
   const windowSeconds = state.range === "all" ? undefined : WEEK;
+  // Only the provider's receipts verify, so ask for those alone.
+  const finished = new Set<string>();
   const receipts = await queryDiscovery(
     DISCOVERY_RELAYS,
-    [flexZapFilter(recipient, windowSeconds ? now() - windowSeconds : undefined)],
-    { timeoutMs: 6000 },
+    [{ ...flexZapFilter(recipient, windowSeconds ? now() - windowSeconds : undefined), authors: [provider] }],
+    { timeoutMs: 6000, onRelayDone: (relay, _count, _error, complete) => { if (complete) finished.add(relay); } },
   ).catch(() => []);
+  state.unknown = null;
+  state.answered = finished.size;
+  state.missing = ZAP_RECEIPT_RELAYS.filter((r) => !finished.has(r));
 
   const verified: Zap[] = [];
   for (const receipt of receipts) {
@@ -113,12 +145,12 @@ async function load(): Promise<void> {
   state.recent = verified.sort((a, b) => b.at - a.at).slice(0, 6);
   state.loading = false;
   render();
+  settlePending(verified);
 
   linkListings();
 }
 
-/* Link a row to its market listing once the listing verifies. One way only.
-   A flex never implies ownership. */
+// Link a row to its market listing once the listing verifies. One way only.
 async function linkListings(): Promise<void> {
   if (state.rows.length === 0) return;
   const events = await queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], { timeoutMs: 6000 })
@@ -133,7 +165,8 @@ async function linkListings(): Promise<void> {
   await Promise.all(
     applyDeletions(current, deletions).map(async (event) => {
       const parsed = parseListing(event);
-      if (!parsed.ok || !wanted.has(parsed.listing.domain)) return;
+      // A sold domain isn't for sale, as on the market.
+      if (!parsed.ok || parsed.listing.status === "sold" || !wanted.has(parsed.listing.domain)) return;
       const dns = await checkDomainProof({
         domain: parsed.listing.domain,
         pubkey: event.pubkey,
@@ -151,7 +184,6 @@ async function linkListings(): Promise<void> {
   );
 }
 
-/* Rows arrive sorted by rankFlexDomains. Stamp rank now so #17 stays #17 under a filter. */
 const board = (): RankedRow[] => state.rows.map((row, i) => ({ ...row, rank: i + 1 }));
 
 function visible(): RankedRow[] {
@@ -172,7 +204,6 @@ function visible(): RankedRow[] {
   return [...rows].sort(by[state.sort] ?? by.rank);
 }
 
-/* The metal disc is the medal. A medal glyph on it is illegible at 24px. */
 const CROWN = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <path d="M2.9 7.9 7.5 12.4 12 4.9l4.5 7.5 4.6-4.5-1.7 9.8H4.6L2.9 7.9Z"/>
     <rect x="4.7" y="19.2" width="14.6" height="2.6" rx="1.3"/>
@@ -198,14 +229,12 @@ const ARROW = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" strok
     stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M5 12h13M12.5 5.5 19 12l-6.5 6.5"/></svg>`;
 
-/* Stable tile colour from a name hash. Hue stays teal to indigo to fit the accent palette. */
 const tileOf = (d: string): { h: number; l: number } => {
   let h = 0;
   for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) >>> 0;
   return { h: 186 + (h % 8) * 7, l: 52 + ((h >>> 3) % 3) * 5 };
 };
 
-/* ageText returns "today" for recent times, which takes no "ago". */
 const agoText = (ts: number): string => {
   const age = ageText(ts);
   return age === "today" ? age : `${age} ago`;
@@ -221,10 +250,8 @@ const splitName = (d: string): [string, string] => {
   return [d.slice(0, i), d.slice(i)];
 };
 
-/* Podium order, left to right. */
 const PODIUM = [{ rank: 2, cls: "r2" }, { rank: 1, cls: "r1" }, { rank: 3, cls: "r3" }];
 
-/* Podium ignores search and TLD filters, or a search would crown whatever was searched for. */
 function renderPodium(): void {
   const top = board().slice(0, 3);
 
@@ -243,7 +270,7 @@ function renderPodium(): void {
     }
 
     const [stem, t] = splitName(row.domain);
-    return `<article class="card-rank ${cls}">
+    return `<article class="card-rank ${cls}${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
       ${badge(rank)}
       <span class="name">${esc(stem)}<span class="tld">${esc(t)}</span></span>
       <span class="tag">${row.listing ? esc(row.listing.summary || "For sale on the market") : `${row.zaps} payment${row.zaps === 1 ? "" : "s"}`}</span>
@@ -256,12 +283,9 @@ function renderPodium(): void {
 }
 
 function renderRows(rows: RankedRow[]): void {
-  /* List starts at #4 under the podium. A filter brings the top three back,
-     since the podium ignores filters. */
   const filtered = state.search || state.tld;
   const body = filtered ? rows : rows.slice(PODIUM.length);
 
-  /* Clamp first, or narrowing a filter while on page 4 shows an empty page. */
   const pages = Math.max(1, Math.ceil(body.length / PER_PAGE));
   if (state.page > pages) state.page = pages;
 
@@ -272,6 +296,12 @@ function renderRows(rows: RankedRow[]): void {
     ? `<li class="empty">${
         state.loading
           ? "Asking the relays\u2026"
+          : state.unknown
+            ? esc(state.unknown)
+          : state.rows.length === 0 && state.answered === 0 && featuringEnabled()
+            ? "The relays didn't answer, so the board can't be shown. Reload in a minute."
+          : state.rows.length === 0 && state.missing.length
+            ? "No flexes were found, but not every relay answered, so there may be some. Reload in a minute."
           : state.rows.length === 0
             ? "Nobody has flexed a domain yet. Type one above and take #1."
             : filtered
@@ -283,7 +313,7 @@ function renderRows(rows: RankedRow[]): void {
         const tile = tileOf(row.domain);
         const rank = row.rank;
         const metal = rank <= 3 ? ` r${rank} metal` : "";
-        return `<li class="row${rank === 1 ? " row-top" : ""}">
+        return `<li class="row${rank === 1 ? " row-top" : ""}${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
           <span class="r-rank${metal}">#${rank}</span>
           <span class="r-av" style="--h:${tile.h};--l:${tile.l}" aria-hidden="true">${esc((stem[0] ?? "?").toUpperCase())}</span>
           <div class="r-body">
@@ -303,7 +333,6 @@ function renderRows(rows: RankedRow[]): void {
   renderPager(pages);
 }
 
-/* app.css styles `[aria-current=page]` and `:disabled`. A class such as `.on` does nothing. */
 function renderPager(pages: number): void {
   const el = $("#pager");
   if (pages <= 1) {
@@ -355,26 +384,6 @@ function renderSide(rows: BoardRow[]): void {
   $("#s-count").textContent = sats(rows.length);
   $("#s-tld").textContent = String(tlds.size);
 
-  /* Same zap window as the ranking, so the two agree. */
-  const weekly = [...rows].filter((r) => r.sats > 0).sort((a, b) => b.sats - a.sats).slice(0, 8);
-  $("#weekly").innerHTML = weekly.length
-    ? weekly.map((r, i) => {
-        const [stem, t] = splitName(r.domain);
-        // app.css styles `.wk-rank.metal`, so medal classes go on the span.
-        const metal = i < 3 ? ` r${i + 1} metal` : "";
-        return `<li class="wk-row">
-           <span class="wk-rank${metal}">#${i + 1}</span>
-           <span class="wk-name">${esc(stem)}<span class="tld">${esc(t)}</span></span>
-           <span class="wk-bid">${sats(r.sats)} sats</span>
-         </li>`;
-      }).join("")
-    : `<li class="wk-empty">${
-        featuringEnabled()
-          ? "No featured zaps this week."
-          : "Flex payments are not switched on for this site yet."
-      }</li>`;
-
-  /* `.act-i` is the 30px icon disc. On the <li> it squashes every row to 30px. */
   $("#feed").innerHTML = state.recent.length
     ? state.recent.map((zap, i) => {
         const domain = zap.flexDomain ?? "a domain";
@@ -388,7 +397,9 @@ function renderSide(rows: BoardRow[]): void {
          </li>`;
       }).join("")
     : `<li><span class="act-body"><span>${
-        featuringEnabled() ? "No zaps in the last week." : "Nothing yet. Flex payments are not switched on for this site."
+        !featuringEnabled() ? "Nothing yet. Flex payments are not switched on for this site."
+          : !state.loading && uncertain() ? "Payments can't all be counted right now."
+          : state.range === "all" ? "No zaps yet." : "No zaps in the last week."
       }</span></span></li>`;
 }
 
@@ -400,7 +411,8 @@ function render(): void {
     ? "asking the relays…"
     : !featuringEnabled()
       ? "flex payments are not switched on yet"
-      : `${all.length} domain${all.length === 1 ? "" : "s"} on the board`;
+      : `${all.length} domain${all.length === 1 ? "" : "s"} on the board` +
+        (state.unknown ? " · payments can't be counted right now" : state.missing.length ? " · not every relay answered, so payments may be missing" : "");
 
   renderPodium();
   renderChips();
@@ -409,11 +421,9 @@ function render(): void {
   paintClaim();
 }
 
-/* The site never touches the payment. The provider issues the invoice and
-   publishes the receipt the board counts. */
+// The site never touches the payment. The provider issues the invoice and publishes the receipt the board counts.
 const MIN_FLEX_SATS = 1000;
 
-/* One sat over the current holder of that rank, or the minimum for an empty floor. */
 function costOfRank(r: number): number {
   const list = board();
   const rank = Math.max(1, r);
@@ -427,10 +437,58 @@ function rankFor(amount: number): number {
   return i + 1;
 }
 
+// round amounts for + and -; anything above the last one doubles
+const STEPS = [1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000];
+
+const claimAmount = (): number => Math.max(MIN_FLEX_SATS, state.amount ?? costOfRank(1));
+
+function stepAmount(up: boolean): void {
+  const now_ = claimAmount();
+  state.amount = up
+    ? STEPS.find((s) => s > now_) ?? now_ * 2
+    : Math.max(MIN_FLEX_SATS, [...STEPS].reverse().find((s) => s < now_) ?? MIN_FLEX_SATS);
+  paintClaim();
+}
+
+// The BTC price only labels amounts in dollars; sats are what gets paid.
+const PRICE_KEY = "fmd-btc-usd-v1";
+let usdPerBtc: number | undefined;
+
+async function loadPrice(): Promise<void> {
+  try {
+    const kept = JSON.parse(localStorage.getItem(PRICE_KEY) ?? "null") as { usd?: number; at?: number } | null;
+    if (kept && typeof kept.usd === "number" && kept.usd > 0 && Date.now() - (kept.at ?? 0) < 10 * 60_000) {
+      usdPerBtc = kept.usd;
+      paintClaim();
+      return;
+    }
+  } catch { /* nothing kept */ }
+  try {
+    const res = await fetch("https://mempool.space/api/v1/prices", { signal: AbortSignal.timeout(6000) });
+    const usd = Number(((await res.json()) as { USD?: unknown }).USD);
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    usdPerBtc = usd;
+    try { localStorage.setItem(PRICE_KEY, JSON.stringify({ usd, at: Date.now() })); } catch { /* private mode */ }
+    paintClaim();
+  } catch { /* no price: amounts stay in sats */ }
+}
+
+function usdText(satsAmount: number): string | undefined {
+  if (!usdPerBtc) return undefined;
+  const v = (satsAmount * usdPerBtc) / 100_000_000;
+  const cents = v < 100;
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD",
+    minimumFractionDigits: cents ? 2 : 0, maximumFractionDigits: cents ? 2 : 0 }).format(v);
+}
+
 function paintClaim(): void {
-  const amount = costOfRank(state.target);
-  $("#c-rank").textContent = `#${rankFor(amount)}`;
-  $("#c-amount").textContent = `${sats(amount)} sats`;
+  const amount = claimAmount();
+  // A rank priced from a board with payments missing can't be promised.
+  const sure = !state.loading && !uncertain();
+  $("#c-rank").textContent = `#${rankFor(amount)}${sure ? "" : "?"}`;
+  const usd = usdText(amount);
+  $("#c-amount").textContent = usd ?? `${sats(amount)} sats`;
+  $("#c-sats").textContent = usd ? `⚡ ${sats(amount)} sats` : "";
 }
 
 function failHint(message: string): void {
@@ -453,15 +511,14 @@ async function flexIt(event: Event): Promise<void> {
     return failHint("Flex payments are not switched on for this site yet, so there is nothing to pay. Browse the market meanwhile.");
   }
   if (!session.pubkey) {
-    // The payer's signed zap request is what makes the receipt attributable.
     hint.className = "hint";
-    hint.textContent = "Connect or create a key first. Your key signs the payment.";
+    hint.textContent = "Connect first, or create an account: it signs the payment as yours.";
     openConnect();
     return;
   }
 
   const domain = normalised.domain;
-  const amount = costOfRank(state.target);
+  const amount = claimAmount();
   hint.className = "hint";
   hint.innerHTML = `Getting an invoice for <b>${esc(domain)}</b>…`;
 
@@ -488,29 +545,149 @@ async function flexIt(event: Event): Promise<void> {
     const invoice = await requestZapInvoice({ info: lnurl.info, amountMsats, zapRequest, lnurl: lnurl.url });
     if (!invoice.ok) return failHint(`The provider refused: ${invoice.reason}.`);
 
-    showInvoice(domain, amount, invoice.invoice);
+    const pending: PendingFlex = {
+      pubkey: zapRequest.pubkey,
+      domain,
+      amountSats: amount,
+      invoice: invoice.invoice,
+      requestId: zapRequest.id,
+      endsAt: invoiceOfferEnds(invoice.invoice, now()),
+    };
+    keepPending(pending);
     hint.className = "hint";
-    hint.innerHTML = `Invoice ready for <b>${esc(domain)}</b>.`;
+    hint.textContent = "";
+    renderPending();
+    showInvoice(pending);
   } catch (err) {
     failHint((err as Error).message);
   }
 }
 
-function showInvoice(domain: string, amount: number, invoice: string): void {
+function showInvoice(p: PendingFlex): void {
+  const { domain, amountSats: amount, invoice } = p;
   askDialog(
     `Flex ${domain}`,
-    `<p><b>${sats(amount)} sats</b> puts <b>${esc(domain)}</b> at <b>#${rankFor(amount)}</b>.
-        Pay in any wallet. We never touch the payment.</p>
-     <div class="nsec" id="invoice">${esc(invoice)}</div>
-     <div style="display:flex;gap:8px;flex-wrap:wrap">
-       <a class="btn btn-accent btn-sm" href="lightning:${esc(invoice)}">Open in wallet</a>
-       <button class="btn btn-ghost btn-sm" type="button" id="copy-invoice">Copy invoice</button>
-     </div>
-     <p class="hint" style="text-align:left">The board updates when your provider publishes the
+    `<p><b>${sats(amount)} sats</b>${usdText(amount) ? ` (about ${usdText(amount)})` : ""} puts <b>${esc(domain)}</b> at <b>#${rankFor(amount)}</b>.
+        Pay in any wallet. We never touch the payment.</p>` +
+     (uncertain()
+       ? `<p class="hint err" style="text-align:left"><strong>${state.loading
+           ? "The board is still loading"
+           : state.unknown
+             ? "The board was read while payments couldn't be counted"
+             : "Not every relay answered"}</strong>, so the board may be missing payments, and this may land lower
+           than #${rankFor(amount)}. ${state.loading ? "Wait for it before paying." : "Reload the page before paying to be sure."}</p>`
+       : "") +
+    invoiceBlock(invoice, { endsAt: p.endsAt }) +
+    `<p class="hint" style="text-align:left">The board updates when your provider publishes the
         receipt, usually within seconds. Being on this board says only that somebody paid; it is
         not a claim of ownership. To say you own it, prove it on the <a href="market.html">market</a>.</p>`,
   );
-  $("#copy-invoice").addEventListener("click", () => copyToClipboard($("#invoice").textContent!));
+  shownInvoice = p.requestId;
+  wireInvoice($("#key-body"), invoice, {
+    endsAt: p.endsAt,
+    onPaid: () => {
+      const now_ = pendingFlex();
+      if (now_?.requestId === p.requestId) keepPending({ ...now_, paid: true });
+      renderPending();
+      void checkPending();
+    },
+  });
+}
+
+/* ---------- The invoice waiting to be paid ---------- */
+
+interface PendingFlex {
+  pubkey: string;
+  domain: string;
+  amountSats: number;
+  invoice: string;
+  requestId: string;
+  /** Unix seconds. */
+  endsAt: number;
+  /** The wallet said it paid; waiting for the receipt. */
+  paid?: boolean;
+}
+const PENDING_KEY = "fmd-flex-invoice-v1";
+const isHex64 = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+
+function pendingFlex(): PendingFlex | undefined {
+  let p: Partial<PendingFlex> | null = null;
+  try { p = JSON.parse(localStorage.getItem(PENDING_KEY) ?? "null"); } catch { p = null; }
+  if (!p) return undefined;
+  const usable = isHex64(p.pubkey) && isHex64(p.requestId)
+    && typeof p.domain === "string" && tryNormaliseDomain(p.domain).ok
+    && Number.isSafeInteger(p.amountSats) && (p.amountSats as number) > 0
+    && typeof p.invoice === "string" && /^ln/i.test(p.invoice)
+    && Number.isSafeInteger(p.endsAt);
+  if (!usable || (p.endsAt as number) <= now()) {
+    forgetPending();
+    return undefined;
+  }
+  return p as PendingFlex;
+}
+function keepPending(p: PendingFlex): void {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } catch { }
+}
+function forgetPending(): void {
+  try { localStorage.removeItem(PENDING_KEY); } catch { }
+}
+
+let shownInvoice: string | undefined;
+
+function renderPending(): void {
+  const line = document.querySelector<HTMLElement>("#pending");
+  if (!line) return;
+  const p = pendingFlex();
+  if (!p || p.pubkey !== session.pubkey) {
+    line.hidden = true;
+    line.innerHTML = "";
+    return;
+  }
+  line.hidden = false;
+  line.innerHTML = p.paid
+    ? `Paid for <b>${esc(p.domain)}</b>. It shows on the board as soon as the receipt lands.`
+    : `Your invoice for <b>${esc(p.domain)}</b> (${sats(p.amountSats)} sats) is waiting to be paid.
+    <span id="pending-left">Expires in ${clockText(p.endsAt - now())}</span>.
+    <button class="text-btn" type="button" id="pending-open">Open it</button>`;
+}
+
+function settlePending(verified: readonly Zap[]): void {
+  const p = pendingFlex();
+  if (p && verified.some((z) => z.request.id === p.requestId)) {
+    forgetPending();
+    state.flexed = p.domain;
+    const input = document.querySelector<HTMLInputElement>("#domain");
+    const typed = input ? tryNormaliseDomain(input.value) : undefined;
+    if (input && typed?.ok && typed.domain === p.domain) input.value = "";
+    render();
+    document.querySelector(`[data-domain="${CSS.escape(p.domain)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast(`Paid: ${p.domain} is on the board.`);
+    const dialog = document.querySelector<HTMLDialogElement>("#key-dialog");
+    if (dialog?.open && shownInvoice === p.requestId) {
+      markInvoicePaid($("#key-body"), `Paid. ${esc(p.domain)} is on the board.`);
+    }
+  }
+  renderPending();
+}
+
+async function checkPending(): Promise<void> {
+  const p = pendingFlex();
+  if (!p || p.pubkey !== session.pubkey || !featuringEnabled()) return;
+  const provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => undefined);
+  if (!provider) return;
+  const recipient = CONFIG.featuredRecipientPubkey.trim().toLowerCase();
+  const since = p.endsAt - INVOICE_OFFER_SECONDS - 600;
+  const receipts = await queryRelays(ZAP_RECEIPT_RELAYS, [{ ...flexZapFilter(recipient, since), authors: [provider] }], { timeoutMs: 5000 })
+    .catch(() => []);
+  const verified: Zap[] = [];
+  for (const receipt of receipts) {
+    const result = verifyZapReceipt({ receipt, recipient, expectedProvider: provider });
+    if (result.ok) verified.push(result.zap);
+  }
+  if (verified.some((z) => z.request.id === p.requestId)) {
+    settlePending(verified);
+    load();
+  }
 }
 
 function paintLive(): void {
@@ -520,21 +697,31 @@ function paintLive(): void {
 
 initTheme();
 initConnect();
-onSessionChange(() => render());
+onSessionChange(() => { render(); renderPending(); });
 
 $("#form").addEventListener("submit", flexIt);
 
-$("#c-minus").addEventListener("click", () => {
-  // Cheaper means further down, so the rank number goes up.
-  state.target = Math.min(board().length + 1, state.target + 1);
-  paintClaim();
+$("#pending").addEventListener("click", (e) => {
+  if (!(e.target as Element).closest("#pending-open")) return;
+  const p = pendingFlex();
+  if (p && p.pubkey === session.pubkey) showInvoice(p);
+  else renderPending();
 });
-$("#c-plus").addEventListener("click", () => {
-  state.target = Math.max(1, state.target - 1);
-  paintClaim();
-});
+renderPending();
+setInterval(() => {
+  const line = document.querySelector<HTMLElement>("#pending");
+  if (!line || line.hidden) return;
+  const p = pendingFlex();
+  const left = document.querySelector<HTMLElement>("#pending-left");
+  if (p && p.pubkey === session.pubkey && left) left.textContent = `Expires in ${clockText(p.endsAt - now())}`;
+  else renderPending();
+}, 1000);
+setInterval(() => { if (!document.hidden) void checkPending(); }, 10_000);
 
-/* #sort also picks the ranking window. Switching to "rank-all" refetches receipts. */
+$("#c-minus").addEventListener("click", () => stepAmount(false));
+$("#c-plus").addEventListener("click", () => stepAmount(true));
+void loadPrice();
+
 $("#sort").addEventListener("change", (e) => {
   const value = (e.target as HTMLSelectElement).value;
   const wantRange = value === "rank-all" ? "all" : "week";
