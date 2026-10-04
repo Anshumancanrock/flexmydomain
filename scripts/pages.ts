@@ -1,8 +1,3 @@
-/**
- * web/src/<page>.ts -> web/assets/<page>.js. Transpiled one by one, not bundled,
- * so imports of ./fmd.js, ./ui.js and ./config.js stay as written. config.js is
- * hand-written so operators can edit it without a build.
- */
 export const PAGES = ['ui', 'board', 'market', 'flex', 'escrow'] as const
 
 const transpiler = new Bun.Transpiler({ loader: 'ts', target: 'browser' })

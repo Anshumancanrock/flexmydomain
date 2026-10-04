@@ -1,7 +1,3 @@
-/**
- * Local dev server for web/: `bun run serve [-p 3000]`. No caching, so edits
- * show on reload. Binds 127.0.0.1 only. Not for production.
- */
 import { join, normalize } from 'node:path'
 
 const root = join(import.meta.dir, '..', 'web')

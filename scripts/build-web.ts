@@ -1,9 +1,3 @@
-/**
- * `bun run build`: client/index.ts -> web/assets/fmd.js (one ESM bundle, no CDN)
- * and web/src/<page>.ts -> web/assets/<page>.js. Outputs are committed so the
- * site serves as-is with no build step.
- */
-
 import { PAGES, compilePage } from './pages.ts'
 
 const result = await Bun.build({
@@ -12,7 +6,7 @@ const result = await Bun.build({
   naming: 'fmd.js',
   target: 'browser',
   format: 'esm',
-  minify: false, // keep the shipped code readable
+  minify: false,
   sourcemap: 'none',
 })
 
