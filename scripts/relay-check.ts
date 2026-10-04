@@ -1,13 +1,4 @@
 #!/usr/bin/env bun
-/**
- * End-to-end check of a deployed flexmydomain relay.
- *
- *   bun run relay:check wss://relay.example.com --mine
- *
- * Publishes test events with a throwaway key. The example.com listing expires
- * after 5 minutes, so a failed deletion still cleans up. It writes, so only run
- * it on your own relay (`--mine`). The site's five public relays are refused.
- */
 
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { schnorr } from '@noble/curves/secp256k1.js'

@@ -1,11 +1,5 @@
 #!/usr/bin/env bun
-/**
- * Publish this deployment's NIP-89 handler advertisement (kind 31990), once per
- * deployment. Tells other clients which kinds we open (listings, portfolios)
- * and at what URL.
- *
- *   bun scripts/publish-handler.ts --nsec nsec1... --url https://example.com
- */
+// Publish this deployment's NIP-89 handler advertisement (kind 31990), once per deployment.
 
 import {
   DEFAULT_RELAYS,

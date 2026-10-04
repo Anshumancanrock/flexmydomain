@@ -1,22 +1,8 @@
 #!/usr/bin/env bun
-/**
- * Run an escrow end to end on a test network through public Esplora, with no
- * flexmydomain server in the path.
- *
- *   bun scripts/escrow-signet.ts new                      # make an escrow
- *   bun scripts/escrow-signet.ts watch  <recovery>        # wait for funding
- *   bun scripts/escrow-signet.ts settle <recovery> <addr> # cooperative spend
- *   bun scripts/escrow-signet.ts sweep  <recovery> <addr> # timeout spend
- *
- * `--network signet|testnet|mainnet`, default signet (working faucets, no
- * testnet-style reorgs).
- *
- * Printed keys are real private keys. Don't reuse them, and paste recovery
- * strings only into web/recover.html.
- */
 
 import { schnorr } from '@noble/curves/secp256k1.js'
 import {
+  addressToScript,
   buildTree,
   decodeRecovery,
   encodeRecovery,
@@ -36,37 +22,15 @@ const flag = (name: string): string | undefined => {
 }
 
 const network = (flag('network') ?? 'signet') as NetworkName
+if (!['mainnet', 'testnet', 'signet', 'regtest'].includes(network)) {
+  console.error(`unknown network ${JSON.stringify(network)}: use signet, testnet, mainnet or regtest`)
+  process.exit(1)
+}
 const timeoutBlocks = Number(flag('timeout') ?? 144)
 const api = chainApi(network)
 
-/** Decode a bech32m address to a scriptPubKey. Only v1 (taproot) is accepted. */
-function addressToScript(address: string): Uint8Array {
-  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
-  const lower = address.toLowerCase()
-  const split = lower.lastIndexOf('1')
-  if (split < 1) throw new Error(`${address} is not a bech32 address`)
-  const data: number[] = []
-  for (const ch of lower.slice(split + 1)) {
-    const v = CHARSET.indexOf(ch)
-    if (v === -1) throw new Error(`${address} contains a character bech32 does not use`)
-    data.push(v)
-  }
-  const values = data.slice(0, -6)
-  if (values[0] !== 1) throw new Error('only taproot (v1) destinations are supported')
-  let acc = 0
-  let bits = 0
-  const out: number[] = []
-  for (const v of values.slice(1)) {
-    acc = (acc << 5) | v
-    bits += 5
-    if (bits >= 8) {
-      bits -= 8
-      out.push((acc >> bits) & 0xff)
-    }
-  }
-  if (out.length !== 32) throw new Error('a taproot address carries a 32-byte program')
-  return new Uint8Array([0x51, 0x20, ...out])
-}
+/** Past this the fee API is broken or lying. `--fee-rate` sets one by hand. */
+const MAX_FEE_RATE = 500
 
 function loadRecovery(text: string | undefined) {
   if (!text) throw new Error('pass the recovery string')
@@ -76,7 +40,7 @@ function loadRecovery(text: string | undefined) {
 }
 
 async function cmdNew(): Promise<void> {
-  /* Fresh keys. A NIP-07 signer never exposes its secret, so there's nothing to derive from. */
+  // Fresh keys. A NIP-07 signer never exposes its secret, so there's nothing to derive from.
   const buyerSk = schnorr.utils.randomSecretKey()
   const sellerSk = schnorr.utils.randomSecretKey()
 
@@ -151,11 +115,9 @@ async function cmdSpend(leafName: 'A' | 'D'): Promise<void> {
 
   const { tree, role } = rebuildFromRecovery(recovery)
   const leaf = leafName === 'A' ? tree.leaves.A : tree.leaves.D
-  const scriptPubKey = addressToScript(destination)
+  const scriptPubKey = addressToScript(destination, network)
 
-  /* Leaf A needs both signatures, so this only works when one process holds
-     both keys (a signet test). Real parties sign apart and swap 64-byte sigs
-     via sighashFor and finaliseSpend. */
+  // Leaf A needs both signatures, so this only works when one process holds both keys (a signet test).
   const secretKeys: Record<string, Uint8Array> = { [role]: recovery.secretKey }
   const other = flag('other')
   if (other) {
@@ -171,7 +133,11 @@ async function cmdSpend(leafName: 'A' | 'D'): Promise<void> {
     )
   }
 
-  const feeRate = await api.feeRate()
+  const feeRate = flag('fee-rate') !== undefined ? Number(flag('fee-rate')) : await api.feeRate()
+  if (!Number.isFinite(feeRate) || feeRate <= 0) throw new Error('--fee-rate is sats per vbyte, above zero')
+  if (feeRate > MAX_FEE_RATE && flag('fee-rate') === undefined) {
+    throw new Error(`the fee API says ${feeRate} sat/vB, which is not believable; pass --fee-rate to choose one`)
+  }
   const probe = buildSpend({
     tree,
     leaf,
@@ -190,10 +156,15 @@ async function cmdSpend(leafName: 'A' | 'D'): Promise<void> {
   })
 
   console.log(`\nleaf ${leaf.name}  ${signed.vbytes} vbytes  fee ${fee} sats at ${feeRate} sat/vB`)
+  console.log(`pays ${recovery.funding.amountSats - fee} sats to ${destination} (${network})`)
   console.log(`txid ${signed.txid}\n`)
 
   if (argv.includes('--dry-run')) {
     console.log(signed.hex)
+    return
+  }
+  if (!argv.includes('--yes') && prompt('Broadcast it? [y/N]')?.trim().toLowerCase() !== 'y') {
+    console.log(`Not broadcast. The raw hex, if you want it later:\n${signed.hex}`)
     return
   }
 
@@ -214,9 +185,11 @@ try {
   else if (command === 'sweep') await cmdSpend('D')
   else {
     console.log('commands: new | watch <recovery> | settle <recovery> <addr> | sweep <recovery> <addr>')
-    console.log('flags:    --network signet|testnet|mainnet  --timeout <blocks>  --amount <sats>')
+    console.log('flags:    --network signet|testnet|mainnet|regtest  --timeout <blocks>  --amount <sats>')
     console.log('          --other <recovery>   (the counterparty key, for a cooperative settle)')
+    console.log('          --fee-rate <sat/vB>  (instead of asking the fee API)')
     console.log('          --dry-run            (print the hex, do not broadcast)')
+    console.log('          --yes                (broadcast without asking)')
     process.exit(1)
   }
 } catch (err) {
