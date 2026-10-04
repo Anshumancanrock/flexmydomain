@@ -1,5 +1,4 @@
-/* flex.html, plus components the other pages reuse. Tokens come from app.css.
-   Never redefine a colour here. */
+/* flex.html, plus components the other pages reuse */
 
 .flex-hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
   gap:clamp(16px,3vw,32px);padding-block:clamp(26px,4vw,46px)}
@@ -51,7 +50,7 @@
 .record-row:last-of-type{border-bottom:0}
 .record-label{font-size:11.5px;color:var(--faint);text-transform:uppercase;
   letter-spacing:.06em;width:52px;flex:none}
-.record code{font-size:12.5px;color:var(--ink);flex:1;min-width:0}
+.record code{font-size:12.5px;color:var(--ink);flex:1;min-width:0;overflow-wrap:anywhere}
 .record code.wrapped{word-break:break-all;line-height:1.55}
 .record .btn{flex:none}
 .record .hint{text-align:left;padding-bottom:12px}
@@ -61,7 +60,7 @@
   border:1px solid var(--line);border-radius:var(--r-sm);background:var(--sunk);flex-wrap:wrap}
 .obs b{font-weight:600}
 .obs .who{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:88px}
-.obs .what{color:var(--muted);flex:1;min-width:0}
+.obs .what{color:var(--muted);flex:1;min-width:0;overflow-wrap:anywhere}
 .obs.good{border-color:color-mix(in srgb,var(--live) 42%,var(--line))}
 .obs.bad{border-color:color-mix(in srgb,var(--accent) 34%,var(--line))}
 .obs .mark{width:7px;height:7px;border-radius:50%;flex:none;background:var(--faint)}
@@ -69,14 +68,15 @@
 .obs.bad .mark{background:var(--accent)}
 
 .domain-grid{display:grid;gap:var(--gap);padding-bottom:clamp(26px,4vw,48px);
-  grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+  grid-template-columns:repeat(auto-fill,minmax(min(270px,100%),1fr))}
 .domain{position:relative;display:flex;flex-direction:column;gap:11px;
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);
   padding:clamp(15px,1.7vw,19px);box-shadow:var(--shadow-sm);
   transition:transform .18s,box-shadow .18s,border-color .18s}
 .domain:hover{transform:translateY(-3px);box-shadow:var(--shadow-md)}
 .domain.stale{border-style:dashed;opacity:.74}
-.domain-name{font-size:19px;font-weight:700;letter-spacing:-.035em;word-break:break-all}
+.domain-name{font-size:19px;font-weight:700;letter-spacing:-.035em;overflow-wrap:anywhere}
+.idn{display:block;font-size:12.5px;font-weight:500;letter-spacing:0;color:var(--muted);margin-top:2px}
 .domain-tagline{font-size:13px;color:var(--muted);line-height:1.5}
 .domain-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:4px}
 .tag{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;
@@ -90,7 +90,34 @@
 
 .key-dialog{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel);
   color:var(--ink);padding:clamp(18px,2.4vw,26px);max-width:min(460px,92vw);
-  box-shadow:var(--shadow-lg)}
+  box-shadow:var(--shadow-lg);margin:auto;width:min(460px,92vw)}
+.key-dialog.at-account{margin:72px max(clamp(16px,3vw,26px),calc((100% - 1180px) / 2 + clamp(16px,3vw,26px))) auto auto;
+  max-height:calc(100% - 88px)}
+@media (max-width:600px){.key-dialog.at-account{margin:64px auto auto;max-height:calc(100% - 80px)}}
+/* A Lightning invoice: the QR code, then every way to pay it. */
+.invoice{display:grid;gap:10px;justify-items:center;margin:4px 0 12px}
+.invoice-qr{width:min(280px,70vw);aspect-ratio:1;background:#fff;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden}
+.invoice-qr svg{width:100%;height:100%}
+.invoice .btn-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.invoice .hint{margin:0;text-align:center}
+.invoice .hint:empty{display:none}
+.invoice .invoice-left{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.invoice .invoice-gone{padding:14px 0;font-size:13.5px}
+/* A button that reads as a link, inside a line of text. */
+.text-btn{border:0;background:none;padding:0;font:inherit;font-weight:650;color:var(--accent-ink);
+  text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+.text-btn:hover{color:var(--accent)}
+/* Under the flex bar: the invoice still waiting, after a reload. */
+.pending-line{color:var(--ink)}
+.pending-line #pending-left{font-family:var(--mono);color:var(--muted)}
+.invoice-text{width:100%;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel)}
+.invoice-text>summary{cursor:pointer;list-style:none;padding:10px 14px;font-size:13px;font-weight:600;
+  color:var(--ink);display:flex;align-items:center;gap:9px}
+.invoice-text>summary::-webkit-details-marker{display:none}
+.invoice-text>summary::before{content:"+";font-family:var(--mono);font-size:15px;color:var(--accent)}
+.invoice-text[open]>summary::before{content:"\2212"}
+.invoice-text>summary:hover{color:var(--accent-ink)}
+.key-dialog .invoice-text .nsec{margin:0 14px 14px;max-height:9em;overflow-y:auto}
 .key-dialog::backdrop{background:color-mix(in srgb,var(--ink) 40%,transparent);backdrop-filter:blur(3px)}
 .key-dialog h2{font-size:19px;font-weight:700;letter-spacing:-.03em;margin-bottom:12px}
 .key-dialog p{font-size:13.5px;color:var(--muted);line-height:1.6;margin-bottom:12px}
@@ -103,11 +130,17 @@
 .key-dialog .nsec{font-family:var(--mono);font-size:12px;word-break:break-all;
   background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:11px 13px;margin-bottom:12px;user-select:all}
+.key-dialog .check{display:flex;gap:8px;font-size:13px;color:var(--muted);align-items:flex-start;
+  margin-bottom:10px;cursor:pointer;line-height:1.5}
+.key-dialog .check input{width:auto;height:auto;margin:3px 0 0;flex:none;accent-color:var(--accent)}
+.key-dialog .muted-line{font-size:12.5px;color:var(--faint);margin:12px 0 0}
+.key-dialog .key-intro{color:var(--ink);font-size:14px}
 .key-choice{display:grid;gap:9px;margin-bottom:6px}
 .key-choice button{text-align:left;width:100%;height:auto;padding:13px 15px;border-radius:var(--r-md);
   justify-content:flex-start;flex-direction:column;align-items:flex-start;gap:3px}
 .key-choice button span{font-size:12.5px;font-weight:400;color:var(--muted);white-space:normal}
-.key-choice button:disabled{opacity:.5;cursor:not-allowed}
+.key-choice .btn-accent span{color:var(--on-accent);opacity:.84}
+.key-choice button:disabled{opacity:.62;cursor:not-allowed;border-style:dashed}
 .key-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
 
 .finding{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;padding:9px 13px;
@@ -133,4 +166,4 @@
   text-transform:uppercase;letter-spacing:.05em}
 .chip-x.down{border-color:color-mix(in srgb,var(--accent) 34%,var(--line));opacity:.72}
 
-.domain-grid>.empty{grid-column:1/-1}
+.domain-grid>.empty,.domain-grid>.obs{grid-column:1/-1}

@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'sha256-cM2xWURx3FFGsh6xpUZEAgSA5jlPRcVB5vf8Vji4aNw='; object-src 'none'; base-uri 'none'; form-action 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
@@ -60,14 +61,14 @@
       <div class="flex-avatar" id="avatar" aria-hidden="true" hidden></div>
       <div class="flex-who">
         <h1 id="who">A domain portfolio</h1>
-        <p class="flex-npub mono" id="npub">Connect a key, or open anyone's portfolio with <code>?p=npub1…</code></p>
+        <p class="flex-npub mono" id="npub">Connect to see yours, or open anyone's portfolio with <code>?p=npub1…</code></p>
         <p class="ident-line" id="profile"></p>
       </div>
     </div>
     <dl class="flex-stats" id="stats" hidden>
       <div><dt>Domains</dt><dd id="stat-count" class="mono">0</dd></div>
       <div><dt>Proven</dt><dd id="stat-proven" class="mono">0</dd></div>
-      <div><dt>Oldest held</dt><dd id="stat-oldest" class="mono">—</dd></div>
+      <div title="From the holder's own dates. Nothing can check them."><dt>Oldest held</dt><dd id="stat-oldest" class="mono">—</dd></div>
     </dl>
   </section>
 
@@ -120,7 +121,7 @@
   </section>
 
   <section class="wrap" id="portfolio">
-    <div class="panel-head sm">
+    <div class="panel-head sm flush">
       <h2 class="sec-h">Domains</h2>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-ghost btn-sm" id="identity-open" type="button" hidden>Keys &amp; relays</button>
@@ -143,8 +144,11 @@
          The <a href="index.html">flex board</a> is the other way round: anyone can put any
          domain there by paying, and nothing is checked.</p>
       <p class="muted-p">A TXT record proves control of the <b>zone</b>. It does not prove
-         you are the registrant, or that you can sell the name: that takes registrar
-         access, and the marketplace checks it separately before any money moves.
+         you are the registrant, or that you can sell the name: that takes the registrar
+         account that holds it. The escrow checks only that the registry shows the
+         domain registered and able to move; whether the seller can hand it over is
+         settled when it reaches the buyer's account and the buyer confirms, or by the
+         arbiter if they disagree, not checked before money moves.
          <a href="market.html" id="spec-link">Prove a domain on the market.</a></p>
     </div>
   </section>
