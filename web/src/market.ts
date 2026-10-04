@@ -1,16 +1,16 @@
-/* market.html: browse and publish listings. Show a listing only when its
- * signature, embedded proof and live DNS all verify (spec/PROTOCOL.md).
- * Relays have no gatekeeper, so fakes exist. The Unverified toggle shows why each failed.
- */
 import {
   DEFAULT_RELAYS,
+  addressOf,
   MSATS_PER_SAT,
+  registrarFindings,
+  rdapAnswerProblem,
   RelayDirectory,
   buildPortfolio,
   buildZapRequest,
   checkDomain,
   encodeProofRecord,
   fetchLnurlPay,
+  invoiceOfferEnds,
   proofEvent,
   proofRecordName,
   requestZapInvoice,
@@ -24,6 +24,7 @@ import {
   countOnRelays,
   deletionFilter,
   listingAddress,
+  neventEncode,
   listingFilter,
   newestPerAddress,
   nostrUri,
@@ -34,22 +35,22 @@ import {
   publishOutbox,
   queryDiscovery,
   queryRelays,
+  readOwn,
   shorten,
   tldOf,
   verifyPortfolio,
 } from "./fmd.js";
 import type {
-  DomainReport, Listing, ListingCheck, NostrEvent, PortfolioEntry, ProofRecord, RegistryReport,
+  DomainReport, Listing, ListingCheck, NostrEvent, OwnRead, PortfolioEntry, ProofRecord, RegistryReport,
 } from "./fmd.js";
 import {
-  $, DISCOVERY_RELAYS, ZAP_RECEIPT_RELAYS, ageText, askDialog, closeDialog, copyToClipboard, esc,
-  initConnect, initTheme, now, onSessionChange, openConnect, row, sats, session, toast,
+  $, DISCOVERY_RELAYS, ZAP_RECEIPT_RELAYS, ageText, askDialog, closeDialog, confirmIncompleteRead, copyToClipboard, esc,
+  idnLine, initConnect, initTheme, invoiceBlock, now, onSessionChange, openConnect, row, sats, session, toast, wireInvoice,
 } from "./ui.js";
 import { CONFIG, featuringEnabled } from "./config.js";
 
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
 
-/** `check` and `live` stay null until DNS answers. */
 interface ListingEntry {
   event: NostrEvent;
   listing: Listing;
@@ -57,7 +58,6 @@ interface ListingEntry {
   live: DomainReport | null;
 }
 
-/** Prove-a-domain flow in progress. */
 interface Draft {
   domain: string;
   proof: DomainReport;
@@ -76,44 +76,85 @@ const state: {
   sort: string;
   showUnverified: boolean;
   total: number | undefined;
-  portfolio: PortfolioEntry[];
-  mine: (PortfolioEntry & { proven: boolean })[];
-  portfolioKnown: boolean;
+  answered: number;
+  /** The proven, signed entries, for the sell dropdown only. Republishing reads afresh. */
+  mine: MineRead["mine"];
+  /** The listing this tab just published: first in the grid, before the relays hand it back. */
+  fresh: NostrEvent | null;
 } = {
   draft: null,
-  listings: [],     // Everything that parsed.
+  listings: [],
   loading: true,
   search: "",
   tld: null,
   sort: "price-desc",
   showUnverified: false,
   total: undefined, // NIP-45 COUNT, undefined if no relay answers.
-  portfolio: [],
+  answered: 0,
   mine: [],
-  portfolioKnown: false, // Some relay finished answering.
+  fresh: null,
 };
 
-/* No author to route by, so sweep the discovery relays. This shows what they
-   hold, not the whole network. */
+const AUTHORS_KEY = "fmd-market-authors-v1";
+const MAX_REMEMBERED = 500;
+
+function rememberedAuthors(): string[] {
+  try {
+    const list: unknown = JSON.parse(localStorage.getItem(AUTHORS_KEY) ?? "[]");
+    return Array.isArray(list)
+      ? list.filter((a): a is string => typeof a === "string" && /^[0-9a-f]{64}$/.test(a)).slice(0, MAX_REMEMBERED)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberAuthors(authors: readonly string[]): void {
+  try {
+    localStorage.setItem(AUTHORS_KEY, JSON.stringify(authors.slice(0, MAX_REMEMBERED)));
+  } catch {
+  }
+}
+
+const deletionsBy = (relays: readonly string[], authors: readonly string[], onDone?: (relay: string) => void) =>
+  relays.length && authors.length
+    ? queryRelays(relays, [deletionFilter([...authors])], {
+        timeoutMs: 4000,
+        onRelayDone: (relay, _count, _error, complete) => { if (complete) onDone?.(relay); },
+      }).catch(() => [])
+    : Promise.resolve([]);
+
+/** Only the newest load writes to the page. A delist reloads while the first may still run. */
+let loads = 0;
+
 async function load(): Promise<void> {
+  const call = ++loads;
   state.loading = true;
+  state.total = undefined;
   render();
 
-  const [events, count] = await Promise.all([
-    queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], { timeoutMs: 6000 }).catch(() => []),
-    countOnRelays(DISCOVERY_RELAYS, [listingFilter()]).catch(() => undefined),
-  ]);
-  state.total = count;
+  let answered = 0;
+  // Relays may ignore NIP-09 deletions, so we apply them ourselves.
+  const remembered = rememberedAuthors();
+  const answeredEarly = new Set<string>();
+  const early = deletionsBy(DISCOVERY_RELAYS, remembered, (relay) => answeredEarly.add(relay));
+  const events = await queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], {
+    timeoutMs: 6000,
+    onRelayDone: (_relay, _count, _error, complete) => { if (complete) answered++; },
+  }).catch(() => []);
+  if (call !== loads) return;
 
-  // One per (kind, author, d). Relays still return old versions after an edit.
   const current = newestPerAddress(events);
-
-  // Relays may ignore NIP-09 deletions. We apply them ourselves.
   const authors = [...new Set(current.map((e) => e.pubkey))];
-  const deletions = authors.length
-    ? await queryRelays(DISCOVERY_RELAYS, [deletionFilter(authors)], { timeoutMs: 4000 }).catch(() => [])
-    : [];
-  const live = applyDeletions(current, deletions);
+  const seen = new Set(remembered);
+  const later = deletionsBy(DISCOVERY_RELAYS, authors.filter((a) => !seen.has(a)));
+  const before = await early;
+  const again = deletionsBy(DISCOVERY_RELAYS.filter((r) => !answeredEarly.has(r)), authors.filter((a) => seen.has(a)));
+  const [after, retried] = await Promise.all([later, again]);
+  if (call !== loads) return;
+  const live = applyDeletions(current, [...before, ...after, ...retried]);
+  if (answered) rememberAuthors(authors);
+  state.answered = answered;
 
   state.listings = live
     .map((event) => {
@@ -121,13 +162,27 @@ async function load(): Promise<void> {
       return parsed.ok ? { event, listing: parsed.listing, check: null, live: null } : null;
     })
     .filter(Boolean) as ListingEntry[];
+  const fresh = state.fresh;
+  const freshParsed = fresh ? parseListing(fresh) : undefined;
+  if (fresh && freshParsed?.ok) {
+    const same = (e: ListingEntry) => e.event.pubkey === fresh.pubkey && e.listing.domain === freshParsed.listing.domain;
+    if (!state.listings.some((e) => same(e) && e.event.created_at >= fresh.created_at)) {
+      state.listings = [{ event: fresh, listing: freshParsed.listing, check: null, live: null }, ...state.listings.filter((e) => !same(e))];
+    }
+  }
 
   state.loading = false;
   render();
 
-  // One DNS check per listing. Render as each lands.
+  // Only the "N on the relays" note, so asked once the listings are up.
+  void countOnRelays(DISCOVERY_RELAYS, [listingFilter()]).catch(() => undefined).then((count) => {
+    if (call !== loads || count === undefined) return;
+    state.total = count;
+    render();
+  });
+
   await Promise.all(
-    state.listings.map(async (entry) => {
+    state.listings.filter(forSale).map(async (entry) => {
       const report = await checkDomainProof({
         domain: entry.listing.domain,
         pubkey: entry.event.pubkey,
@@ -135,23 +190,26 @@ async function load(): Promise<void> {
       }).catch(() => null);
       entry.live = report;
       entry.check = checkListing({ event: entry.event, dnsProof: report?.dns, now: now() });
-      render();
+      if (call === loads) render();
     }),
   );
 }
 
 const verified = (entry: ListingEntry): boolean => entry.check?.ok === true;
 
-function visible(): ListingEntry[] {
-  let rows = state.listings.filter((entry) => (state.showUnverified ? true : verified(entry)));
+const forSale = (entry: ListingEntry): boolean => entry.listing.status !== "sold";
 
-  if (state.tld) rows = rows.filter((e) => tldOf(e.listing.domain) === state.tld);
-  if (state.search) {
-    const q = state.search.toLowerCase();
-    rows = rows.filter(
-      (e) => e.listing.domain.includes(q) || e.listing.summary.toLowerCase().includes(q),
-    );
-  }
+function matchesFilter(entry: ListingEntry): boolean {
+  if (state.tld && tldOf(entry.listing.domain) !== state.tld) return false;
+  if (!state.search) return true;
+  const q = state.search.toLowerCase();
+  return entry.listing.domain.includes(q) || entry.listing.summary.toLowerCase().includes(q);
+}
+
+function visible(): ListingEntry[] {
+  const isFresh = (entry: ListingEntry) => entry.event.id === state.fresh?.id;
+  const rows = state.listings.filter((entry) =>
+    forSale(entry) && (state.showUnverified || verified(entry) || (isFresh(entry) && entry.check === null)) && matchesFilter(entry));
 
   const by: Record<string, (a: ListingEntry, b: ListingEntry) => number> = {
     "price-desc": (a, b) => b.listing.priceSats - a.listing.priceSats,
@@ -160,13 +218,14 @@ function visible(): ListingEntry[] {
     "oldest-domain": (a, b) => (a.listing.registeredAt ?? Infinity) - (b.listing.registeredAt ?? Infinity),
     az: (a, b) => a.listing.domain.localeCompare(b.listing.domain),
   };
-  return [...rows].sort(by[state.sort] ?? by["price-desc"]);
+  const sorted = [...rows].sort(by[state.sort] ?? by["price-desc"]);
+  return [...sorted.filter(isFresh), ...sorted.filter((e) => !isFresh(e))];
 }
 
 function renderTlds(): void {
   const counts = new Map<string, number>();
   for (const entry of state.listings) {
-    if (!state.showUnverified && !verified(entry)) continue;
+    if (!forSale(entry) || (!state.showUnverified && !verified(entry))) continue;
     const tld = tldOf(entry.listing.domain);
     counts.set(tld, (counts.get(tld) ?? 0) + 1);
   }
@@ -181,13 +240,19 @@ function renderTlds(): void {
 
 function render(): void {
   const rows = visible();
-  const checked = state.listings.filter((e) => e.check !== null).length;
-  const good = state.listings.filter(verified).length;
+  const selling = state.listings.filter(forSale);
+  const pending = selling.filter((e) => e.check === null).length;
+  const good = selling.filter(verified).length;
+  const sold = state.listings.length - selling.length;
+  // Both resolvers must answer before anything counts, so say when one didn't.
+  const unchecked = selling.filter((e) => e.check !== null && e.live?.answered !== true).length;
 
   $("#count").textContent = state.loading
     ? "Asking the relays…"
-    : `${good} verified of ${state.listings.length} fetched` +
-      (checked < state.listings.length ? ` · checking ${state.listings.length - checked} more` : "") +
+    : `${good} verified of ${selling.length} for sale` +
+      (pending ? ` · checking ${pending} more` : "") +
+      (unchecked ? ` · ${unchecked} not checked, a DNS resolver didn't answer` : "") +
+      (sold ? ` · ${sold} sold` : "") +
       (state.total !== undefined ? ` · ${state.total} on the relays` : "");
 
   renderTlds();
@@ -198,10 +263,20 @@ function render(): void {
     return;
   }
   if (rows.length === 0) {
+    // Only those the search and the TLD chip let through can still turn up once checked.
+    const waiting = selling.filter((e) => e.check === null && matchesFilter(e)).length;
     grid.innerHTML = `<p class="empty">${
-      state.listings.length === 0
-        ? "No listings on these relays yet. Be the first: prove a domain, then list it."
-        : "Nothing matches. Clear the search or the TLD filter."
+      selling.length === 0
+        ? sold
+          ? "Nothing for sale right now: every listing on these relays is sold. Prove a domain, then list it."
+          : state.answered === 0
+            ? "The relays didn't answer, so no listings could be read. Reload in a minute."
+            : "No listings on these relays yet. Be the first: prove a domain, then list it."
+        : waiting
+          ? `Checking ${waiting === 1 ? "a listing" : `${waiting} listings`} against the domain's DNS…`
+          : state.search || state.tld
+            ? "Nothing matches. Clear the search or the TLD filter."
+            : "None of these listings passed its check. Tick \"Show unverified listings\" under What this page checked to see them, and why."
     }</p>`;
     return;
   }
@@ -210,8 +285,10 @@ function render(): void {
     const l = entry.listing;
     const ok = verified(entry);
     const mine = entry.event.pubkey === session.pubkey;
+    const fresh = entry.event.id === state.fresh?.id;
 
     const tags: string[] = [];
+    if (fresh) tags.push(`<span class="tag fresh">just listed</span>`);
     if (ok) tags.push(`<span class="tag proven">✓ proof verified</span>`);
     else if (entry.check) tags.push(`<span class="tag unproven">unverified</span>`);
     else tags.push(`<span class="tag">checking…</span>`);
@@ -220,74 +297,75 @@ function render(): void {
     if (l.status === "sold") tags.push(`<span class="tag">sold</span>`);
     tags.push(`<span class="tag">.${esc(tldOf(l.domain))}</span>`);
 
-    return `<article class="listing${ok ? "" : " unverified"}">
+    return `<article class="listing${ok ? "" : " unverified"}${fresh ? " fresh" : ""}">
       <div class="listing-top">
-        <div class="listing-name">${esc(l.domain)}</div>
+        <div class="listing-name">${esc(l.domain)}${idnLine(l.domain)}</div>
         <div class="listing-price">${sats(l.priceSats)}<small>sats</small></div>
       </div>
       ${l.summary ? `<p class="listing-summary">${esc(l.summary)}</p>` : ""}
       ${!ok && entry.check ? `<p class="listing-why">${esc(entry.check.reason ?? "did not verify")}</p>` : ""}
       <div class="listing-meta">${tags.join("")}</div>
       <div class="listing-actions">
-        ${!mine && ok ? `<a class="btn btn-accent" href="escrow.html?${new URLSearchParams({
+        ${!mine && ok && l.status !== "sold" ? `<a class="btn btn-accent" href="escrow.html?${new URLSearchParams({
             domain: l.domain,
             amount: String(l.priceSats),
             seller: npubEncode(entry.event.pubkey),
           }).toString()}">Buy</a>` : ""}
-        <button class="btn btn-ghost" type="button" data-feature="${esc(l.domain)}">Feature</button>
-        <button class="btn btn-ghost" type="button" data-share="${esc(l.domain)}">Share</button>
+        <button class="btn btn-ghost" type="button" data-feature="${esc(entry.event.id)}">Feature</button>
+        <button class="btn btn-ghost" type="button" data-share="${esc(entry.event.id)}">Share</button>
         <button class="btn btn-ghost" type="button" data-seller="${esc(entry.event.pubkey)}">Seller</button>
-        ${mine ? `<button class="btn btn-ghost" type="button" data-delist="${esc(l.domain)}">Delist</button>` : ""}
+        ${mine && l.status !== "sold" ? `<button class="btn btn-ghost" type="button" data-delist="${esc(l.domain)}">Delist</button>` : ""}
       </div>
     </article>`;
   }).join("");
 }
 
-/* Only proven domains can be listed, since a listing embeds the proof signature. */
-async function loadMine(): Promise<void> {
-  state.portfolioKnown = false;
-  if (!session.pubkey) {
-    state.portfolio = [];
-    state.mine = [];
-    return;
-  }
+/** One read of a key's newest portfolio, kept whole, so a republish never mixes two reads. */
+interface MineRead {
+  read: OwnRead;
+  portfolio: PortfolioEntry[];
+  mine: (PortfolioEntry & { proven: boolean })[];
+  at: number;
+  /** Why the newest portfolio couldn't be read in full. Republishing would replace it. */
+  problem: string | null;
+}
 
-  /* Older portfolios exist only on the user's write relays, so ask both sets.
-     If no relay finishes, the portfolio is unknown, not empty. Republishing
-     from empty would wipe the real one. */
-  const pubkey = session.pubkey;
-  await directory.resolve([pubkey]).catch(() => {});
-  const relays = [...new Set([...directory.readRelays(pubkey), ...DISCOVERY_RELAYS])];
-  let completed = 0;
-  const events = await queryRelays(relays, [portfolioFilter(pubkey)], {
-    timeoutMs: 5000,
-    onRelayDone: (_relay, _count, _error, complete) => { if (complete) completed++; },
-  }).catch(() => []);
-  if (session.pubkey !== pubkey) return; // Key changed mid-read. Its own load follows.
-  state.portfolioKnown = completed > 0;
-
-  const newest = newestPerAddress(events)[0];
-  if (!newest) {
-    state.portfolio = [];
-    state.mine = [];
-    return;
-  }
+async function readMine(pubkey: string): Promise<MineRead> {
+  const read = await readOwn(directory, pubkey, [portfolioFilter(pubkey)], { extraRelays: DISCOVERY_RELAYS, timeoutMs: 5000 });
+  // Only the user's own events, whatever a relay sends: republishing starts from this.
+  const newest = newestPerAddress(read.events)[0];
+  const none: MineRead = { read, portfolio: [], mine: [], at: newest?.created_at ?? 0, problem: null };
+  if (!newest) return none;
   const parsed = parsePortfolio(newest);
-  if (!parsed.ok) {
-    state.portfolio = [];
+  if (!parsed.ok) return { ...none, problem: parsed.reason };
+
+  // Don't mix these up. Every republish starts from `portfolio`, all entries as published.
+  const verdicts = verifyPortfolio(parsed.portfolio);
+  return {
+    ...none,
+    portfolio: parsed.portfolio.entries,
+    mine: parsed.portfolio.entries
+      .map((entry, i) => ({ ...entry, proven: verdicts[i].proven }))
+      .filter((entry) => entry.proven && entry.iat !== undefined && entry.sig !== undefined),
+    problem: parsed.dropped.length
+      ? `${parsed.dropped.length} part${parsed.dropped.length === 1 ? "" : "s"} of it can't be read here: ${parsed.dropped[0].reason}`
+      : null,
+  };
+}
+
+let mineReads = 0;
+
+// Only proven domains can be listed, since a listing embeds the proof signature. Feeds the sell dropdown.
+async function loadMine(): Promise<void> {
+  const call = ++mineReads;
+  const pubkey = session.pubkey;
+  if (!pubkey) {
     state.mine = [];
     return;
   }
-
-  /* Don't mix these up. Every republish starts from `portfolio`, all entries as
-   * published. Kind 30078 is replaceable, so republishing the filtered `mine`
-   * would drop NIP-05 entries, which carry no signature. `mine` only feeds the
-   * sell dropdown. */
-  const verdicts = verifyPortfolio(parsed.portfolio);
-  state.portfolio = parsed.portfolio.entries;
-  state.mine = parsed.portfolio.entries
-    .map((entry, i) => ({ ...entry, proven: verdicts[i].proven }))
-    .filter((entry) => entry.proven && entry.iat !== undefined && entry.sig !== undefined);
+  const result = await readMine(pubkey);
+  if (call !== mineReads || session.pubkey !== pubkey) return;
+  state.mine = result.mine;
 }
 
 async function openSell(): Promise<void> {
@@ -348,10 +426,12 @@ async function publishListing(event: Event): Promise<void> {
   hint.textContent = "";
 
   try {
-    /* The portfolio says it was proven once. A listing claims it holds now. */
     const live = await checkDomainProof({ domain, pubkey: session.pubkey as string, dnsOnly: true });
     if (!live.status.proven) {
-      hint.textContent = `The zone no longer carries your proof: ${live.status.reason}. Re-prove it with "Prove a new domain" below.`;
+      // A resolver that didn't answer says nothing about the zone, and re-proving can't help then.
+      hint.textContent = live.answered
+        ? `The zone no longer carries your proof: ${live.status.reason}. Re-prove it with "Prove a new domain" below.`
+        : `DNS couldn't be checked: ${live.dns.reason ?? "a resolver didn't answer"}. Your record may still be there; try again in a minute.`;
       hint.className = "hint err";
       return;
     }
@@ -383,6 +463,12 @@ async function publishListing(event: Event): Promise<void> {
 
     if (accepted.length) {
       $<HTMLFormElement>("#sell-form").reset();
+      state.fresh = signed;
+      $("#sell-section").hidden = true;
+      $("#sell-results").hidden = true;
+      resetProve();
+      toast(`${domain} is listed on ${accepted.length} of ${results.length} relays.`);
+      $("#grid").scrollIntoView({ behavior: "smooth", block: "start" });
       await load();
     }
   } catch (err) {
@@ -394,9 +480,10 @@ async function publishListing(event: Event): Promise<void> {
   }
 }
 
-/* The sold republish is the reliable part. Relays may ignore the kind 5, so
-   never tell a seller their price is gone. */
+// The sold republish is the reliable part. Relays may ignore the kind 5, so never tell a seller their price is gone.
 async function delist(domain: string): Promise<void> {
+  const fresh = state.fresh ? parseListing(state.fresh) : undefined;
+  if (fresh?.ok && fresh.listing.domain === domain) state.fresh = null;
   const entry = state.listings.find(
     (e) => e.listing.domain === domain && e.event.pubkey === session.pubkey,
   );
@@ -406,7 +493,8 @@ async function delist(domain: string): Promise<void> {
     "Delist this domain",
     `<p>Two things happen, and they are not equally reliable:</p>
      <p><b>1. The listing is republished as <code>sold</code>.</b> This is the authoritative
-        signal. It replaces the old event on every relay that carried it.</p>
+        signal. It replaces the old event on your write relays and on the discovery relays.
+        A relay this page doesn't reach keeps the old one.</p>
      <p><b>2. A deletion request is sent.</b> Relays may honour it or ignore it, and anyone
         who already fetched the listing still has it.</p>
      <p>Your DNS record and your portfolio are untouched.</p>`,
@@ -416,6 +504,7 @@ async function delist(domain: string): Promise<void> {
         closeDialog();
         try {
           const l = entry.listing;
+          const at = Math.max(now(), entry.event.created_at + 1);
           const sold = await session.signer!.signEvent(
             buildListing({
               pubkey: session.pubkey as string,
@@ -425,7 +514,7 @@ async function delist(domain: string): Promise<void> {
               description: l.description || undefined,
               status: "sold",
               publishedAt: l.publishedAt,
-              createdAt: now(),
+              createdAt: at,
               proof: l.proof,
             }),
           );
@@ -434,7 +523,7 @@ async function delist(domain: string): Promise<void> {
               pubkey: session.pubkey as string,
               events: [entry.event],
               reason: "delisted",
-              createdAt: now(),
+              createdAt: at - 1,
             }),
           );
           const [a, b] = await Promise.all([
@@ -451,10 +540,14 @@ async function delist(domain: string): Promise<void> {
   );
 }
 
-function share(domain: string): void {
-  const entry = state.listings.find((e) => e.listing.domain === domain);
+// By event id. Two sellers can list one domain, and only one of them verifies.
+function share(eventId: string): void {
+  const entry = state.listings.find((e) => e.event.id === eventId);
   if (!entry) return;
-  const naddr = listingAddress(entry.listing, DEFAULT_RELAYS.slice(0, 2));
+  // An naddr holds the d tag in one length byte, so a domain near the 253-character limit doesn't fit.
+  let naddr: string;
+  try { naddr = listingAddress(entry.listing, DEFAULT_RELAYS.slice(0, 2)); }
+  catch { naddr = neventEncode({ id: entry.event.id, relays: DEFAULT_RELAYS.slice(0, 2), author: entry.event.pubkey, kind: entry.event.kind }); }
   askDialog(
     "Share this listing",
     `<p>This is the listing's identity on Nostr, not a link to a server we run. Any client
@@ -466,12 +559,11 @@ function share(domain: string): void {
   $("#copy-naddr").addEventListener("click", () => copyToClipboard($("#naddr").textContent!));
 }
 
-/* Featuring is a NIP-57 zap, and we hold no payment state. The zap request is
-   signed but never published. It rides the LNURL callback and comes back in
-   the receipt. */
-async function featureListing(domain: string): Promise<void> {
-  const entry = state.listings.find((e) => e.listing.domain === domain);
+// Featuring is a NIP-57 zap, and we hold no payment state. The zap request is signed but never published.
+async function featureListing(eventId: string): Promise<void> {
+  const entry = state.listings.find((e) => e.event.id === eventId);
   if (!entry) return;
+  const domain = entry.listing.domain;
 
   if (!featuringEnabled()) {
     askDialog(
@@ -488,7 +580,8 @@ async function featureListing(domain: string): Promise<void> {
     return;
   }
 
-  const address = listingAddress(entry.listing, DEFAULT_RELAYS.slice(0, 2));
+  // NIP-57 wants the event coordinate in the `a` tag, not an naddr.
+  const address = addressOf(entry.event);
 
   askDialog(
     `Feature ${domain}`,
@@ -542,8 +635,7 @@ async function requestInvoice(domain: string, address: string): Promise<void> {
       recipient: CONFIG.featuredRecipientPubkey.trim().toLowerCase(),
       amountMsats,
       relays: ZAP_RECEIPT_RELAYS,
-      /* Both tags. The board drops zaps without `fmd_flex`, so the listing
-         address alone would take the sats and never rank. */
+      // Both tags. The board drops zaps without `fmd_flex`, so the listing address alone would take the sats and never rank.
       flexDomain: domain,
       address,
       lnurl: lnurl.url,
@@ -563,23 +655,35 @@ async function requestInvoice(domain: string, address: string): Promise<void> {
       out.innerHTML = row("bad", `The provider refused: ${esc(invoice.reason)}.`);
       return;
     }
+    if (!out.isConnected) return;
 
+    const endsAt = invoiceOfferEnds(invoice.invoice, now());
     out.innerHTML =
-      row("good", `<b>Invoice for ${sats(amountSats)} sats.</b> Pay it in any wallet.`) +
-      `<div class="nsec" id="invoice">${esc(invoice.invoice)}</div>
-       <div style="display:flex;gap:8px;flex-wrap:wrap">
-         <a class="btn btn-accent btn-sm" href="lightning:${esc(invoice.invoice)}">Open in wallet</a>
-         <button class="btn btn-ghost btn-sm" type="button" id="copy-invoice">Copy invoice</button>
-       </div>
-       <p class="hint" style="text-align:left">The board updates when your provider publishes
+      row("good", `<b>Invoice for ${sats(amountSats)} sats.</b> Pay it with any Lightning wallet.`) +
+      invoiceBlock(invoice.invoice, { endsAt }) +
+      `<p class="hint" style="text-align:left">The board updates when your provider publishes
           the receipt, usually within seconds. We hold nothing at any point.</p>`;
-    $("#copy-invoice").addEventListener("click", () => copyToClipboard($("#invoice").textContent!));
+    wireInvoice(out, invoice.invoice, { endsAt });
     go.hidden = true;
   } catch (err) {
     out.innerHTML = row("bad", esc((err as Error).message));
   } finally {
-    go.disabled = false;
+    // The dialog may have been closed and reused while this ran. Its button isn't ours then.
+    if (out.isConnected) go.disabled = false;
   }
+}
+
+function resetProve(): void {
+  state.draft = null;
+  $<HTMLInputElement>("#domain").value = "";
+  $("#domain-hint").textContent = "";
+  for (const id of ["#registry", "#observations", "#relay-results"]) {
+    $(id).hidden = true;
+    $(id).innerHTML = "";
+  }
+  $("#record").hidden = true;
+  step(1);
+  $<HTMLDetailsElement>("#prove").open = false;
 }
 
 function step(n: number): void {
@@ -591,8 +695,7 @@ function step(n: number): void {
   });
 }
 
-/* Step 1. Registry findings never block here. A locked or young domain can
-   still be proven, and the findings matter only once money moves. */
+// Step 1. Registry findings never block here.
 async function checkName(event: Event): Promise<void> {
   event.preventDefault();
   const hint = $("#domain-hint");
@@ -606,7 +709,7 @@ async function checkName(event: Event): Promise<void> {
   const domain = normalised.domain;
   hint.className = "hint";
   hint.innerHTML = normalised.unicode !== domain
-    ? `Reading it as <b>${esc(domain)}</b>, which is <b>${esc(normalised.unicode)}</b> in A-label form.`
+    ? `Reading it as <b>${esc(normalised.unicode)}</b>, which is <b>${esc(domain)}</b> in A-label form.`
     : `Reading it as <b>${esc(domain)}</b>.`;
 
   $<HTMLButtonElement>("#check-btn").disabled = true;
@@ -632,10 +735,17 @@ function renderRegistry(reg: RegistryReport, proof: DomainReport): string {
   const rows: string[] = [];
 
   if (!reg.supported) {
-    rows.push(row("", `This TLD publishes no RDAP service, so nothing about the registration
+    rows.push(row("", `This TLD publishes no RDAP service over HTTPS, so nothing about the registration
       can be checked. You can still flex the name, but it cannot be escrowed here.`));
   } else if (!reg.eligibility) {
-    rows.push(row("", `The registry did not answer. That says nothing about the domain; try again.`));
+    const s = reg.snapshot;
+    rows.push(s.status === 404
+      ? row("bad", `The registry says this domain isn't registered.`)
+      : !s.ok
+        ? row("", `The registry did not answer${s.status ? ` (HTTP ${s.status})` : s.error ? ` (${esc(s.error)})` : ""}. That
+            says nothing about the domain; try again.`)
+        : row("", `The registry's answer wasn't usable: ${esc(rdapAnswerProblem(s.response, reg.domain) ?? "it could not be read")}.
+            That says nothing about the domain; try again.`));
   } else {
     const e = reg.eligibility;
     const f = e.facts;
@@ -644,20 +754,16 @@ function renderRegistry(reg: RegistryReport, proof: DomainReport): string {
     if (e.daysSinceRegistration !== undefined) facts.push(`registered ${ageText(f.registration!)} ago`);
     if (e.daysUntilExpiry !== undefined) facts.push(`expires in ${Math.floor(e.daysUntilExpiry)}d`);
     facts.push(e.unlocked ? "transfer lock off" : "transfer lock on");
-    rows.push(row(e.listable ? "good" : "bad", esc(facts.join(" · "))));
+    const findings = registrarFindings(f, now());
+    rows.push(row(findings.some((x) => x.level === "refuse") ? "bad" : "good", esc(facts.join(" · "))));
 
-    for (const finding of e.findings) {
+    for (const finding of findings) {
       rows.push(row(finding.level === "refuse" ? "bad" : "", esc(finding.message)));
     }
-    rows.push(row("", e.unlocked
-      ? `When somebody buys it, the escrow will ask you to turn the transfer lock
-         <b>on</b> at your registrar and, once it has seen that, <b>off</b> again. Only the
-         registrant can change the lock, so that is how a buyer knows you hold the domain
-         and not just its DNS. Listing needs nothing from the registrar.`
-      : `When somebody buys it, the escrow will ask you to turn this transfer lock
-         <b>off</b> at your registrar. Only the registrant can change the lock, so that is
-         how a buyer knows you hold the domain and not just its DNS. Listing needs nothing
-         from the registrar.`));
+    rows.push(row("", `When somebody buys it, they pay into the escrow, and you transfer the domain straight
+      to them${f.registrarName ? `: to their account at ${esc(f.registrarName)}, or with a transfer code to their
+      own registrar` : ", the registrar's usual way"}. Their confirmation pays you. Listing needs nothing from the
+      registrar.`));
   }
 
   if (proof.status.proven) {
@@ -666,7 +772,6 @@ function renderRegistry(reg: RegistryReport, proof: DomainReport): string {
   return rows.join("");
 }
 
-/* Step 2. Sign the proof, a canonical event the record alone rebuilds (spec/PROOF.md 2.1). */
 async function signProof(): Promise<void> {
   if (!state.draft || !session.signer) return;
   const button = $<HTMLButtonElement>("#sign-btn");
@@ -696,7 +801,6 @@ async function signProof(): Promise<void> {
   }
 }
 
-/* Step 3. Show each resolver's answer, so the user can watch propagation. */
 async function verifyZone(): Promise<void> {
   if (!state.draft) return;
   const button = $<HTMLButtonElement>("#verify-btn");
@@ -721,9 +825,15 @@ async function verifyZone(): Promise<void> {
     );
 
     if (report.status.proven) {
-      rows.push(row("good", `<b>Proven.</b> Both resolvers returned a record that verifies
-        for your key${report.dnssec ? ", over a validated DNSSEC chain" : ""}.`));
+      rows.push(row("good", report.status.source === "nip05"
+        ? `<b>Proven.</b> <code>${esc(report.nip05Url ?? "nostr.json")}</code> maps <code>_</code> to your key.
+            That shows control of the web server, not the zone.`
+        : `<b>Proven.</b> Both resolvers returned a record that verifies
+            for your key${report.dnssec ? ", over a validated DNSSEC chain" : ""}.`));
       step(4);
+    } else if (!report.lookup.complete) {
+      rows.push(row("bad", `A resolver did not answer, and a record counts only when both return it.
+        Check again shortly.`));
     } else if (report.lookup.disputed.length) {
       rows.push(row("bad", `One resolver sees the record and the other does not. That is
         normal for a few minutes after you add it; check again shortly.`));
@@ -740,47 +850,59 @@ async function verifyZone(): Promise<void> {
   }
 }
 
-/* Step 4. Publish the proof and the portfolio. Show every relay's answer, so
-   2 of 5 never reads as plain "published". */
 async function publish(): Promise<void> {
-  if (!state.draft?.verified || !session.signer) return;
+  if (!state.draft?.verified || !session.signer || !session.pubkey) return;
+  const draft = state.draft;
+  const pubkey = session.pubkey;
+  const signer = session.signer;
   const button = $<HTMLButtonElement>("#publish-btn");
   const out = $("#relay-results");
   button.disabled = true;
   button.textContent = "Publishing…";
   out.hidden = false;
-
-  /* This replaces the portfolio, so it needs a finished read first. */
-  if (!state.portfolioKnown) {
-    out.innerHTML = row("", "Reading your current portfolio first…");
-    await loadMine();
-  }
-  if (!state.portfolioKnown) {
-    out.innerHTML = row("bad", `<b>Nothing was published.</b> None of your relays finished
-      answering, so this page cannot see your current portfolio, and publishing now could replace
-      it with just this domain. Your proof is still valid in DNS. Try again in a minute.`);
+  const stop = (html: string) => {
+    out.innerHTML = row("bad", html);
     button.disabled = false;
     button.textContent = "Publish to relays";
+  };
+
+  out.innerHTML = row("", "Reading your current portfolio first…");
+  const current = await readMine(pubkey);
+  if (session.pubkey !== pubkey) { stop("<b>Nothing was published.</b> The connected key changed."); return; }
+  if (current.problem) {
+    stop(`<b>Nothing was published.</b> This page can't read all of your newest portfolio
+      (${esc(current.problem)}), and publishing would replace it, dropping what it can't read.`);
+    return;
+  }
+  const read = current.read;
+  const go = read.answered > 0 && (read.complete || await confirmIncompleteRead("portfolio", read));
+  if (!go || session.pubkey !== pubkey) {
+    stop(`<b>Nothing was published.</b> ${session.pubkey !== pubkey
+      ? "The connected key changed."
+      : read.answered
+        ? "Not every relay answered, so this page can't be sure it sees your current portfolio."
+        : "No relay answered, so this page can't see your current portfolio at all."}
+      Your proof is still valid in DNS. Try again in a minute.`);
     return;
   }
   out.innerHTML = row("", "Signing your portfolio…");
 
   try {
     // Republish from the full portfolio, never from the listable subset.
-    const entries = upsertEntry(state.portfolio, {
-      domain: state.draft.domain,
-      source: state.draft.proof.status.source ?? "dns",
-      iat: state.draft.record!.iat,
-      sig: state.draft.record!.sig,
+    const entries = upsertEntry(current.portfolio, {
+      domain: draft.domain,
+      source: draft.proof.status.source ?? "dns",
+      iat: draft.record!.iat,
+      sig: draft.record!.sig,
       firstSeen: now(),
     });
 
-    const portfolio = await session.signer.signEvent(
-      buildPortfolio({ pubkey: session.pubkey as string, entries, createdAt: now() }),
+    const portfolio = await signer.signEvent(
+      buildPortfolio({ pubkey, entries, createdAt: Math.max(now(), current.at + 1) }),
     );
 
     const [proofResults, portfolioResults] = await Promise.all([
-      publishOutbox(directory, state.draft.event!, { extraRelays: DISCOVERY_RELAYS }),
+      publishOutbox(directory, draft.event!, { extraRelays: DISCOVERY_RELAYS }),
       publishOutbox(directory, portfolio, { extraRelays: DISCOVERY_RELAYS }),
     ]);
 
@@ -802,11 +924,12 @@ async function publish(): Promise<void> {
       rows.unshift(row("bad", `<b>No relay accepted it.</b> Your proof is still valid (it is
         in DNS), but nothing has been published. Try again.`));
     } else {
-      rows.unshift(row("good", `<b>Published to ${accepted.size} of ${relays.length} relays.</b>
-        Your domains live there now, signed by you.`));
-      $<HTMLInputElement>("#domain").value = "";
-      step(1);
       await afterProof();
+      resetProve();
+      if (state.mine.some((e) => e.domain === draft.domain)) $<HTMLSelectElement>("#sell-domain").value = draft.domain;
+      toast(`${draft.domain} is proven. Set a price and list it.`);
+      $("#sell-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
     }
     out.innerHTML = rows.join("");
   } catch (err) {

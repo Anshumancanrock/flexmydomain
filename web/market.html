@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'sha256-cM2xWURx3FFGsh6xpUZEAgSA5jlPRcVB5vf8Vji4aNw='; object-src 'none'; base-uri 'none'; form-action 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
@@ -62,23 +63,26 @@
 
 <main id="top">
 
+  <div class="wrap range-row">
+    <nav class="range" aria-label="Sections">
+      <a class="range-opt" href="index.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M7.5 4h9v5.4a4.5 4.5 0 0 1-9 0V4Z"/>
+          <path d="M16.5 5.3H19a2.3 2.3 0 0 1 0 4.6h-1.1"/>
+          <path d="M7.5 5.3H5a2.3 2.3 0 0 0 0 4.6h1.1"/>
+          <path d="M12 13.9v3.3M8.9 20.2h6.2a2.6 2.6 0 0 0-2.6-2.9h-1a2.6 2.6 0 0 0-2.6 2.9Z"/>
+        </svg>Rank</a>
+      <a class="range-opt on" href="market.html" aria-current="page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 9h16l-1 11H5L4 9Z"/><path d="M9 9V6.5a3 3 0 0 1 6 0V9"/>
+        </svg>Marketplace</a>
+    </nav>
+  </div>
+
   <section class="wrap market-hero">
     <div>
-      <nav class="range" aria-label="Sections">
-        <a class="range-opt" href="index.html">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M7.5 4h9v5.4a4.5 4.5 0 0 1-9 0V4Z"/>
-            <path d="M16.5 5.3H19a2.3 2.3 0 0 1 0 4.6h-1.1"/>
-            <path d="M7.5 5.3H5a2.3 2.3 0 0 0 0 4.6h1.1"/>
-            <path d="M12 13.9v3.3M8.9 20.2h6.2a2.6 2.6 0 0 0-2.6-2.9h-1a2.6 2.6 0 0 0-2.6 2.9Z"/>
-          </svg>Rank</a>
-        <a class="range-opt on" href="market.html" aria-current="page">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 9h16l-1 11H5L4 9Z"/><path d="M9 9V6.5a3 3 0 0 1 6 0V9"/>
-          </svg>Marketplace</a>
-      </nav>
       <h1>Domains for sale</h1>
       <p class="lede">
         Listing is <b>free</b>, but you have to prove the domain is yours. Every listing
@@ -160,7 +164,7 @@
               <div class="step-body">
                 <h3>Publish the proof</h3>
                 <p class="step-lede">Two events, both signed by you: the proof, and your
-                   portfolio. They go to your own relays.</p>
+                   portfolio. They go to your own relays and to the discovery relays.</p>
                 <button class="btn btn-accent" type="button" id="publish-btn">Publish to relays</button>
                 <div class="relay-results" id="relay-results" hidden></div>
               </div>
