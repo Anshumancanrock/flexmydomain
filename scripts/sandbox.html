@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flexmydomain sandbox</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --ink: #10202e; --faint: #5a6b7a; --line: #d5dde5; --panel: #ffffff; --bg: #f0f5fc; --accent: #2563eb; --bad: #b42318; --good: #067647; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e6edf3; --faint: #93a4b4; --line: #26394a; --panel: #0d1b27; --bg: #07121c; --accent: #6ea8fe; --bad: #f97066; --good: #47cd89; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.55 system-ui, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  p { margin: 6px 0; }
+  .muted { color: var(--faint); }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 14px; }
+  code, .mono { font: 12.5px/1.5 ui-monospace, monospace; word-break: break-all; }
+  input, textarea { width: 100%; font: 13px ui-monospace, monospace; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+  textarea { min-height: 70px; }
+  button { font: 600 13px system-ui, sans-serif; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; margin: 6px 6px 0 0; }
+  button.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+  a { color: var(--accent); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row > input { flex: 1 1 220px; width: auto; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .tip { font-size: 26px; font-weight: 700; }
+  ol { margin: 6px 0 0 18px; padding: 0; }
+  li { margin: 4px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  td, th { text-align: left; padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  .out { min-height: 1.2em; }
+  .err { color: var(--bad); }
+  .ok { color: var(--good); }
+</style>
+</head>
+<body>
+<main>
+  <h1>flexmydomain sandbox</h1>
+  <p class="muted">Regtest bitcoin, a local relay, and a stand-in for a domain registry's record and DNS. Nothing here
+    reaches a public relay or holds real money. Keys are fresh on every start, for this machine only.</p>
+
+  <section>
+    <div class="row" style="justify-content:space-between">
+      <div><span class="muted">Chain tip</span><div class="tip" id="tip">…</div></div>
+      <div>
+        <button data-mine="1">Mine 1 block</button>
+        <button data-mine="6">Mine 6</button>
+        <button data-mine="12">Mine 12: pass a window</button>
+        <button data-mine="144">Mine 144: open the timelock</button>
+      </div>
+    </div>
+    <p class="muted">Deadlines here: the seller says the domain is sent within 12 blocks of funding, and the buyer's lone
+      refund opens 144 blocks after funding.</p>
+  </section>
+
+  <section>
+    <h2>Who's who</h2>
+    <p class="muted">Each role has its own browser origin, so each keeps its own stored key. The passphrase for every stored
+      key is <b>__PASSPHRASE__</b>.</p>
+    <div class="grid">
+      <div class="card">
+        <b>Buyer</b>
+        <p class="mono" id="buyer-npub">…</p>
+        <button data-copy="buyer-npub">Copy npub</button>
+        <p><a href="http://127.0.0.1:__WEB_PORT__/sandbox-seed.html?role=buyer" target="_blank" rel="noopener">Load the buyer key and open its page</a></p>
+        <p class="muted">Origin http://127.0.0.1:__WEB_PORT__</p>
+      </div>
+      <div class="card">
+        <b>Seller</b>
+        <p class="mono" id="seller-npub">…</p>
+        <button data-copy="seller-npub">Copy npub</button>
+        <p><a href="http://localhost:__WEB_PORT__/sandbox-seed.html?role=seller" target="_blank" rel="noopener">Load the seller key and open its page</a></p>
+        <p class="muted">Origin http://localhost:__WEB_PORT__</p>
+      </div>
+      <div class="card">
+        <b>Arbiter</b>
+        <p class="mono" id="arbiter-nsec">…</p>
+        <button data-copy="arbiter-nsec">Copy arbiter key</button>
+        <p><a href="http://[::1]:__WEB_PORT__/escrow.html?arbiter" target="_blank" rel="noopener">Escrows naming the arbiter</a></p>
+        <p class="muted">Paste the arbiter key into an escrow's page to act as the arbiter. Origin http://[::1]:__WEB_PORT__</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Open a link as another role</h2>
+    <p class="muted">An invite link opens on the origin it was made on, which holds the inviter's key. Paste it here to open
+      it on the other side's origin instead.</p>
+    <input id="link-in" placeholder="http://127.0.0.1:__WEB_PORT__/escrow.html?join=fmdinv5…">
+    <button data-as="buyer">Open as the buyer</button>
+    <button data-as="seller">Open as the seller</button>
+    <button data-as="arbiter">Open as the arbiter</button>
+  </section>
+
+  <section>
+    <h2>A trade, start to finish</h2>
+    <ol>
+      <li>Load the buyer key and the seller key with the links above. On each escrow page click <b>Connect</b>, unlock the
+        stored key with the passphrase.</li>
+      <li>As the buyer: domain (any name, say <code>lumenary.com</code>), a price like 100000, "I am buying", and the
+        seller's npub. Check the terms, pick the arbiter, and create the invite. Copy the link.</li>
+      <li>Open that link as the seller with the box above and accept: the reply goes back to the buyer's tab by itself.
+        Both sides save their recovery strings and publish their views.</li>
+      <li>Fund: copy the escrow address and amount into the faucet below and press <b>Pay and mine 1 block</b>.</li>
+      <li>As the buyer, sign the refund, and tell the seller where to send the domain: any registrar and account, say
+        Spaceship and <code>buyer@example.com</code>. It lands in the seller's Buyer chat and in their transfer box.</li>
+      <li>As the seller, pick how you send it, a move or a transfer code, give a payout address from the box below, and
+        press <b>I sent it</b>. The details reach the buyer's Seller chat.</li>
+      <li>As the buyer, <b>Confirm and pay the seller</b>, mine a block, and the escrow settles.</li>
+      <li>Then try the other ends: the seller cancelling, the transfer window running out (mine 12), the timelock (mine
+        144, then recover.html and the broadcast box below), and a dispute: either side asks the arbiter. As the arbiter,
+        open the escrow from the arbiter's list and paste the arbiter key: ask both sides for proof, tick "moved" in the
+        registry box to watch the record change, and rule.</li>
+    </ol>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>Faucet</h2>
+      <input id="pay-to" placeholder="bcrt1p… address">
+      <input id="pay-sats" placeholder="sats, e.g. 100000" inputmode="numeric" style="margin-top:6px">
+      <button class="go" data-pay="mine">Pay and mine 1 block</button>
+      <button data-pay="">Pay, leave it unconfirmed</button>
+      <p class="out" id="pay-out"></p>
+    </section>
+
+    <section>
+      <h2>Payout addresses</h2>
+      <p class="muted">Addresses of the sandbox wallet, to be paid at.</p>
+      <button class="go" id="new-address">New address</button>
+      <table id="addresses"></table>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section>
+      <h2>DNS</h2>
+      <p class="muted">TXT records both stand-in resolvers return. A blank value removes the name.</p>
+      <input id="txt-name" placeholder="_flexmydomain.lumenary.com">
+      <input id="txt-value" placeholder="the value the market's listing form shows" style="margin-top:6px">
+      <button class="go" id="txt-set">Set</button>
+      <table id="zone"></table>
+    </section>
+
+    <section>
+      <h2>Registry</h2>
+      <p class="muted">Every name is at Spaceship, unless changed here.</p>
+      <input id="reg-domain" placeholder="lumenary.com">
+      <label class="row"><input type="checkbox" id="reg-moved" style="width:auto"> moved to another registrar, as after a transfer to the buyer's</label>
+      <label class="row"><input type="checkbox" id="reg-pending" style="width:auto"> a transfer to another registrar is under way</label>
+      <button class="go" id="reg-set">Apply</button>
+      <p class="out mono" id="reg-out"></p>
+    </section>
+  </div>
+
+  <section>
+    <h2>Broadcast a raw transaction</h2>
+    <p class="muted">For a timeout sweep made offline with recover.html, or a payout a page printed instead of sending.</p>
+    <textarea id="raw-tx" placeholder="0200000000…"></textarea>
+    <button class="go" id="broadcast">Broadcast</button>
+    <p class="out mono" id="broadcast-out"></p>
+  </section>
+
+  <section>
+    <h2>The relay</h2>
+    <p class="muted" id="relay-count">…</p>
+    <table id="events"></table>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  const post = async (path, body) => {
+    const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+    return j;
+  };
+  const say = (el, html, kind = "") => { el.className = "out mono " + kind; el.innerHTML = html; };
+  const addresses = [];
+
+  async function refresh() {
+    try {
+      const s = await (await fetch("/sandbox/state")).json();
+      $("tip").textContent = s.tip;
+      $("buyer-npub").textContent = s.people.buyer.npub;
+      $("seller-npub").textContent = s.people.seller.npub;
+      $("arbiter-nsec").textContent = s.people.arbiter.nsec;
+      $("zone").innerHTML = Object.entries(s.zone).map(([name, values]) =>
+        `<tr><td class="mono">${esc(name)}</td><td class="mono">${values.map(esc).join("<br>")}</td></tr>`).join("")
+        || `<tr><td class="muted">No records.</td></tr>`;
+      $("relay-count").textContent = `${s.eventCount} event(s) held, newest first.`;
+      $("events").innerHTML = `<tr><th>kind</th><th>d</th><th>author</th><th>time</th></tr>` + s.events.map((e) =>
+        `<tr><td>${e.kind}</td><td class="mono">${esc(e.d)}</td><td class="mono">${esc(e.author.slice(0, 12))}…</td>
+         <td>${new Date(e.at * 1000).toLocaleTimeString()}</td></tr>`).join("");
+    } catch (err) {
+      $("tip").textContent = "sandbox stopped?";
+    }
+  }
+
+  document.addEventListener("click", async (e) => {
+    const t = e.target.closest("button");
+    if (!t) return;
+    if (t.dataset.mine) {
+      t.disabled = true;
+      try { await post("/sandbox/mine", { blocks: Number(t.dataset.mine) }); } finally { t.disabled = false; refresh(); }
+    } else if (t.dataset.copy) {
+      await navigator.clipboard.writeText($(t.dataset.copy).textContent);
+      t.textContent = "Copied";
+      setTimeout(() => (t.textContent = t.dataset.copy === "arbiter-nsec" ? "Copy arbiter key" : "Copy npub"), 1200);
+    } else if (t.dataset.as) {
+      const origin = { buyer: "http://127.0.0.1:__WEB_PORT__", seller: "http://localhost:__WEB_PORT__", arbiter: "http://[::1]:__WEB_PORT__" }[t.dataset.as];
+      try {
+        const url = new URL($("link-in").value.trim());
+        window.open(origin + url.pathname + url.search + url.hash, "_blank", "noopener");
+      } catch { alert("That is not a link."); }
+    } else if (t.dataset.pay !== undefined) {
+      const out = $("pay-out");
+      try {
+        const amount = Number($("pay-sats").value.replace(/[\s,_]/g, ""));
+        const r = await post("/sandbox/pay", { address: $("pay-to").value.trim(), sats: amount, mine: t.dataset.pay === "mine" });
+        say(out, `Paid in <a href="/tx/${esc(r.txid)}" target="_blank">${esc(r.txid.slice(0, 16))}…</a>${t.dataset.pay === "mine" ? ", and mined a block" : ""}.`, "ok");
+      } catch (err) { say(out, esc(err.message), "err"); }
+      refresh();
+    } else if (t.id === "new-address") {
+      const { address } = await post("/sandbox/address");
+      addresses.unshift(address);
+      drawAddresses();
+    } else if (t.dataset.check) {
+      const cell = t.parentElement.querySelector(".got");
+      try { cell.textContent = `${(await post("/sandbox/received", { address: t.dataset.check })).sats.toLocaleString()} sats received`; }
+      catch (err) { cell.textContent = err.message; }
+    } else if (t.id === "txt-set") {
+      try { await post("/sandbox/txt", { name: $("txt-name").value, value: $("txt-value").value }); $("txt-value").value = ""; }
+      catch (err) { alert(err.message); }
+      refresh();
+    } else if (t.id === "reg-set") {
+      try {
+        const r = await post("/sandbox/registry", { domain: $("reg-domain").value, moved: $("reg-moved").checked, pending: $("reg-pending").checked });
+        say($("reg-out"), `Moved: ${esc(r.moved.join(", ") || "none")}. Transfer under way: ${esc(r.pending.join(", ") || "none")}.`, "ok");
+      } catch (err) { say($("reg-out"), esc(err.message), "err"); }
+    } else if (t.id === "broadcast") {
+      const r = await fetch("/api/tx", { method: "POST", body: $("raw-tx").value.trim() });
+      const body = await r.text();
+      say($("broadcast-out"), r.ok ? `Broadcast <a href="/tx/${esc(body)}" target="_blank">${esc(body)}</a>. Mine a block to confirm it.` : esc(body), r.ok ? "ok" : "err");
+    }
+  });
+
+  function drawAddresses() {
+    $("addresses").innerHTML = addresses.map((a) =>
+      `<tr><td class="mono">${esc(a)}</td><td><button data-copy-text="${esc(a)}">Copy</button><button data-check="${esc(a)}">Check</button><span class="got muted"></span></td></tr>`).join("");
+  }
+  $("addresses").addEventListener("click", async (e) => {
+    const t = e.target.closest("[data-copy-text]");
+    if (!t) return;
+    await navigator.clipboard.writeText(t.dataset.copyText);
+    t.textContent = "Copied";
+  });
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>

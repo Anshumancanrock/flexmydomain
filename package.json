@@ -12,10 +12,10 @@
     "test:all": "bun test",
     "test:regtest": "bun test test/regtest",
     "serve": "bun run scripts/serve.ts",
+    "sandbox": "bun run scripts/sandbox.ts",
     "indexer": "bun run services/indexer/indexer.ts",
     "verifier": "bun run services/verifier/verifier.ts",
     "publish:handler": "bun run scripts/publish-handler.ts",
-    "watch:transfer": "bun run scripts/watch-transfer.ts",
     "build:recover": "bun run scripts/build-recover.ts",
     "escrow": "bun run scripts/escrow-signet.ts",
     "relay:check": "bun run scripts/relay-check.ts"
@@ -25,7 +25,8 @@
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
     "@scure/base": "2.4.0",
-    "@scure/btc-signer": "2.4.1"
+    "@scure/btc-signer": "2.4.1",
+    "uqr": "0.1.3"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
