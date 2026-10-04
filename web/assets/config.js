@@ -1,36 +1,29 @@
-/* Deployment config, the only site-specific file in web/.
- * Every value is optional. A blank one turns its feature off with a notice.
- */
+// Deployment config. Every value is optional; a blank one turns its feature off.
 export const CONFIG = {
-  /* Escrow network: "signet" | "testnet" | "mainnet" | "regtest".
-   * Keep signet until the escrow is independently audited. Mainnet is real money. */
+  // "signet" | "testnet" | "mainnet" | "regtest". Stay on signet until the escrow is audited.
   network: "signet",
 
-  /* Esplora API base URL. The browser calls it, so it needs CORS.
-   * Blank uses the network's default. */
+  // Esplora API base URL (needs CORS). Blank uses the network's default.
   chainApiBase: "",
 
-  /* Lightning address with NIP-57 zaps enabled, for flex payments. Blank turns payments off. */
-  featuredLightningAddress: "",
+  // Lightning address with NIP-57 zaps, for flex payments. Its zap key must be yours alone:
+  // a shared custodial one signs receipts for all its users.
+  featuredLightningAddress: "anshuman@cake.cash",
 
-  /* Your own pubkey that receives those zaps, x-only hex. Never copy it from a
-   * receipt, since the provider signs for all its users. Blank counts nothing. */
-  featuredRecipientPubkey: "",
+  // Your pubkey that receives those zaps, x-only hex. Don't copy it from a receipt.
+  featuredRecipientPubkey: "e6e9460b961261f71b786bf4274c001869b17e04e1b12e6c1b551e92ea4a81f8",
 
-  /* Default escrow arbiter, x-only hex. Leave blank if you won't referee disputes. */
-  arbiterPubkey: "",
+  // Arbiter public key, npub or hex. Use a key that does nothing else and keep its secret offline.
+  arbiterPubkey: "npub1p5t9q3nq26nhkt40fzpumthx0uzy5azgkh560sxfspnlfyua25mq6ucwcj",
 
-  /* Trusted attestation verifiers (x-only hex) and how many must agree
-   * (spec/PROTOCOL.md). Empty shows none. Our own DNS check always runs. */
+  // Trusted attestation verifiers (x-only hex) and how many must agree.
   verifiers: [],
   verifierThreshold: 2,
 
-  /* Extra relays to read and publish, beside the defaults, e.g. ["wss://relay.example.com"].
-   * services/relay/ is a ready-made one. Add it once
-   * `bun run relay:check wss://your.relay --mine` passes. */
+  // Extra relays beside the defaults. Add one once `bun run relay:check wss://your.relay --mine` passes.
   extraRelays: [],
 
-  /* Footer link URLs. A blank one is hidden. */
+  // Footer links. Blank ones are hidden.
   socials: {
     x: "",
     discord: "",
@@ -38,7 +31,7 @@ export const CONFIG = {
   },
 };
 
-/* Needs both, or we could take a payment we can't verify. */
+// needs both, or we could take a payment we can't verify
 export const featuringEnabled = () =>
   CONFIG.featuredLightningAddress.trim() !== "" &&
   /^[0-9a-f]{64}$/.test(CONFIG.featuredRecipientPubkey.trim());
