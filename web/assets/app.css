@@ -1,6 +1,5 @@
 /* Board page styles, plus the tokens every page uses. */
 
-/* DM Sans is variable (100-1000), so one file covers every weight. Both fonts are OFL. */
 @font-face{font-family:"DM Sans";font-weight:100 1000;font-style:normal;font-display:swap;
   src:url(fonts/dm-sans.woff2) format("woff2");
   unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,
@@ -77,7 +76,6 @@ a{color:inherit;text-decoration:none}
 ::selection{background:var(--accent);color:var(--on-accent)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:8px}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-/* Classes that set `display` (.btn and friends) otherwise beat [hidden]. */
 [hidden]{display:none !important}
 
 .skip{position:absolute;left:-9999px;top:8px;z-index:99;background:var(--accent);color:var(--on-accent);
@@ -111,6 +109,8 @@ header{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--bg) 8
   letter-spacing:-.045em;flex:none}
 .brand svg{width:auto;height:18px}
 .brand .a{color:var(--accent)}
+#connect .who-dot{width:14px;height:14px;border-radius:999px;flex:none;
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--on-accent) 40%,transparent)}
 .top-nav{display:flex;gap:clamp(14px,1.8vw,24px);font-size:13.5px;font-weight:500;flex:none}
 .top-nav a{color:var(--muted);transition:color .18s}
 .top-nav a:hover{color:var(--ink)}
@@ -161,6 +161,12 @@ header{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--bg) 8
 .claim-head b{font-weight:700}
 .claim-head em{font-style:normal;color:var(--accent);font-family:var(--mono);
   font-weight:700;letter-spacing:-.045em}
+/* The dollar figure sits on the line; the sats hang just under it. */
+.c-price{position:relative;display:inline-block}
+.c-price small{position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:1px;white-space:nowrap;
+  font-family:var(--mono);font-size:clamp(10px,.85vw,11.5px);font-weight:500;letter-spacing:0;color:var(--muted)}
+.claim-head:has(.c-price small:not(:empty)){margin-bottom:18px}
+.c-price small:empty{display:none}
 .c-step{display:grid;place-items:center;width:clamp(21px,1.9vw,26px);aspect-ratio:1;flex:none;
   border:0;border-radius:50%;cursor:pointer;background:var(--accent-soft);color:var(--accent-ink);
   font-size:clamp(13px,1.2vw,16px);line-height:1;font-family:var(--sans);
@@ -214,7 +220,7 @@ header{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--bg) 8
 .card-rank .name{max-width:100%;font-size:clamp(14px,1.4vw,18px);font-weight:700;
   letter-spacing:-.035em;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card-rank.r1 .name{font-size:clamp(16px,1.8vw,23px)}
-.card-rank .tag{margin-top:2px;font-size:12px;color:var(--muted);text-align:center;
+.card-rank .tag{display:block;margin-top:2px;font-size:12px;color:var(--muted);text-align:center;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .card-rank .bid{margin-top:7px;font-family:var(--mono);font-size:clamp(15px,1.5vw,19px);
   font-weight:700;letter-spacing:-.03em}
@@ -228,14 +234,14 @@ input::placeholder{color:var(--faint)}
 
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 312px;gap:var(--gap);
   align-items:start;padding-block:clamp(8px,1vw,12px)}
-/* Grid and flex items default to min-width:auto, so a wide table would
-   stretch the panel past the screen instead of scrolling. */
 .layout > *,.side > *,.panel{min-width:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-xl);
   box-shadow:var(--shadow-sm)}
 .panel-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
   gap:12px;padding:clamp(11px,1.2vw,13px) clamp(15px,1.7vw,20px) 0}
 .panel-head.sm{padding-bottom:0}
+/* The same head outside a panel lines up with the content below it. */
+.panel-head.flush{padding-inline:0}
 .panel-head h2{font-size:19px;font-weight:700;letter-spacing:-.03em}
 .panel-head .meta{font-size:12px;color:var(--faint);margin-top:1px}
 .sort{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--faint)}
@@ -247,7 +253,6 @@ input::placeholder{color:var(--faint)}
   background-position:calc(100% - 15px) 15px,calc(100% - 11px) 15px;
   background-size:4px 4px,4px 4px;background-repeat:no-repeat}
 .sort select:focus{border-color:var(--accent)}
-/* The market page uses the class on the select itself, not on a wrapper. */
 select.sort{height:34px;border-radius:999px;border:1px solid var(--line);background:var(--panel);
   color:var(--ink);font-family:var(--sans);font-size:12.5px;font-weight:600;padding:0 14px;
   cursor:pointer;outline:none}
@@ -294,6 +299,7 @@ select.sort:focus{border-color:var(--accent)}
   letter-spacing:-.03em;color:var(--accent);white-space:nowrap}
 .row-top{background:var(--win-bg);box-shadow:inset 3px 0 0 #f0bd45}
 .row-top:hover{background:var(--win-bg)}
+.row.fresh,.card-rank.fresh{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 55%,transparent),var(--shadow-sm)}
 .empty{padding:38px;text-align:center;color:var(--muted);font-size:14px;list-style:none}
 
 .pager{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;
@@ -314,38 +320,17 @@ select.sort:focus{border-color:var(--accent)}
 .stat-ic svg{width:19px;height:auto}
 .stat-ic.sm{width:34px;height:34px;border-radius:11px;background:var(--sunk);color:var(--accent)}
 .stat-ic.sm svg{width:16px;height:16px}
-.stat-hero b{display:block;font-family:var(--mono);font-size:21px;font-weight:700;letter-spacing:-.035em}
-.stat-hero span{display:block;font-size:12px;color:var(--muted)}
+.stat-hero b{display:block;font-family:var(--mono);font-size:21px;font-weight:700;letter-spacing:-.035em;line-height:1.2}
+.stat-hero > div > span{display:block;font-size:12px;color:var(--muted);margin-top:2px}
 .stat-pair{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:15px;
   padding-top:15px;border-top:1px solid var(--line)}
 .stat-cell{display:flex;align-items:center;gap:9px;min-width:0}
-.stat-cell b{display:block;font-family:var(--mono);font-size:16px;font-weight:700;letter-spacing:-.03em}
-.stat-cell span{display:block;font-size:11px;color:var(--muted);white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis}
+.stat-cell > div{min-width:0}
+.stat-cell b{display:block;font-family:var(--mono);font-size:16px;font-weight:700;letter-spacing:-.03em;line-height:1.2}
+.stat-cell > div > span{display:block;font-size:11px;color:var(--muted);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 .quote{margin-top:15px;padding:13px;border-radius:var(--r-md);background:var(--sunk);
   font-size:12.5px;color:var(--muted);text-align:center;text-wrap:balance}
-
-.wk-all{padding:5px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel);
-  color:var(--muted);font-family:var(--sans);font-size:11.5px;font-weight:600;letter-spacing:-.01em;
-  cursor:pointer;white-space:nowrap;transition:color .18s,border-color .18s,background .18s}
-.wk-all:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
-.wk-all:active{transform:scale(.96)}
-.wk-list{list-style:none;margin:0;padding:6px clamp(15px,1.7vw,19px) clamp(13px,1.5vw,17px)}
-.wk-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:11px;
-  padding:10px 0;border-bottom:1px solid var(--line-soft)}
-.wk-row:last-child{border-bottom:0}
-.wk-rank{width:28px;font-family:var(--mono);font-size:13px;font-weight:700;
-  letter-spacing:-.03em;color:var(--muted)}
-.wk-rank.metal{color:var(--rank-ink)}
-@supports ((-webkit-background-clip:text) or (background-clip:text)){
-  .wk-rank.metal{background-image:var(--rank-grad);
-    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-}
-.wk-name{font-size:14px;font-weight:700;letter-spacing:-.032em;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wk-bid{font-family:var(--mono);font-size:13.5px;font-weight:700;letter-spacing:-.03em;
-  color:var(--accent);white-space:nowrap}
-.wk-empty{list-style:none;padding:14px 0;text-align:center;color:var(--muted);font-size:12.5px}
 
 .activity ul{list-style:none;margin-top:12px;padding:0 clamp(15px,1.7vw,19px) clamp(13px,1.5vw,16px)}
 .activity li{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line-soft)}
@@ -378,7 +363,7 @@ select.sort:focus{border-color:var(--accent)}
 
 .sec-h{font-size:20px;font-weight:700;letter-spacing:-.032em}
 .how{padding-block:clamp(14px,2vw,22px)}
-.how-grid{display:grid;gap:var(--gap);grid-template-columns:repeat(auto-fit,minmax(238px,1fr));margin-top:14px}
+.how-grid{display:grid;gap:var(--gap);grid-template-columns:repeat(auto-fit,minmax(min(238px,100%),1fr));margin-top:14px}
 .card{padding:clamp(16px,1.8vw,20px)}
 .card .n{font-family:var(--mono);font-size:11px;color:var(--accent);font-weight:600;letter-spacing:.1em}
 .card h3{margin-top:8px;font-size:15px;font-weight:600;letter-spacing:-.026em}
@@ -415,24 +400,30 @@ footer{border-top:1px solid var(--line);background:var(--panel)}
 @media (max-width:900px){
   .hero-podium{padding-top:clamp(34px,6vw,50px)}
   .bar{flex-wrap:wrap;row-gap:6px}
-  /* Wrap below the brand, never hide it, so every section stays one tap away. */
   .top-nav{order:3;flex:1 0 100%;overflow-x:auto;scrollbar-width:none;
     padding:2px 0 4px;gap:18px}
   .top-nav::-webkit-scrollbar{display:none}
   .top-nav a{white-space:nowrap}
 }
 @media (max-width:680px){
+  .bar{column-gap:10px}
+  .brand{font-size:17px;gap:7px}
+  .brand svg{height:16px}
+  .tools{gap:6px}
+  header .btn{height:38px;padding:0 14px}
+  #connect.connected{width:38px;padding:0}
+  #connect.connected .who-npub{display:none}
+  #connect.connected .who-dot{width:20px;height:20px}
   .hide-sm{display:none}
   .r-cat{display:none}
   .search{flex-basis:42px}
   .search input{padding-right:8px}
-  .podium{grid-template-columns:1fr;gap:10px}
+  .podium{grid-template-columns:minmax(0,1fr);gap:10px}
   .card-rank.r1{margin-top:0;order:-1}
   .card-rank.r3{margin-top:0}
   .btn{height:44px}
 }
-/* Short viewports (1366x768 and the like). These blocks don't scale with vh,
-   so trim them to keep the claim bar above the fold. */
+/* Short viewports (1366x768 and the like) */
 @media (min-width:681px) and (max-height:740px){
   .card-rank{padding:clamp(11px,1.1vw,13px) clamp(11px,1.1vw,15px) clamp(9px,.9vw,11px)}
   .card-rank.r1{padding-top:clamp(12px,1.2vw,15px)}
@@ -444,7 +435,7 @@ footer{border-top:1px solid var(--line);background:var(--panel)}
   .card-rank .clicks{margin:2px 0 8px}
   .card-rank .view{height:32px}
 }
-/* Shorter still (~657px on a 1366x768 laptop). The eyebrow goes first. */
+/* Shorter still (~657px on a 1366x768 laptop) */
 @media (min-width:681px) and (max-height:690px){
   .range{padding:3px}
   .range-opt{height:28px;padding:0 12px;font-size:12.5px}
@@ -455,7 +446,7 @@ footer{border-top:1px solid var(--line);background:var(--panel)}
   .claim-form{margin-top:9px}
   .c-field input,.claim-form .btn{height:42px}
 }
-/* `*` skips pseudo-elements. Name them, or the live dot's ::after ring keeps animating. */
+/* `*` skips pseudo-elements */
 @media (prefers-reduced-motion:reduce){*,::before,::after{transition:none!important;
   animation:none!important;scroll-behavior:auto!important}}
 
