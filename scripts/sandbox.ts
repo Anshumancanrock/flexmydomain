@@ -123,6 +123,11 @@ await rpc('createwallet', ['sandbox', false, false, '', false, true, true])
 const miner = await rpc<string>('getnewaddress')
 await rpc('generatetoaddress', [101, miner])
 
+// flex payments go to this wallet too, so the faucet can pay them
+setting('flexNetwork', '"regtest"')
+setting('flexAddress', `"${await rpc<string>('getnewaddress', ['flex', 'bech32'])}"`)
+writeFileSync(join(site, 'assets/config.js'), config)
+
 const sats = (btc: number): number => Math.round(btc * 1e8)
 
 interface EsploraTx {
