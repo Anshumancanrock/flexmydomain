@@ -254,12 +254,15 @@ export {
 export type { EntryVerification, Portfolio, PortfolioEntry } from './portfolio.js'
 
 export {
+  FLEX_AMOUNT_SLACK_SATS,
   FLEX_CLAIM_D_PREFIX,
   FLEX_CLAIM_KIND,
   FLEX_CLAIM_TOPIC,
   buildFlexClaim,
   flexAmountTopic,
+  flexNearAmounts,
   flexClaimFilter,
+  flexPaymentZap,
   matchFlexPayments,
   parseFlexClaim,
 } from './flex.js'

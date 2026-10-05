@@ -1,6 +1,6 @@
 // On-chain flex payments. A plain Bitcoin payment carries no domain, so the payer first
-// signs a claim naming the domain and an exact amount, then pays that amount to the
-// site's address. The board pairs each payment with the earliest claim for its amount.
+// signs a claim naming the domain and the amount they mean to pay, then pays at least that
+// much to the site's address. The board pairs each payment with a claim by its amount.
 //
 // Nothing in the payment points back at its claim, so a copycat who sees a payment can
 // sign a backdated claim for the same amount and take the credit. That is fine for test
@@ -8,6 +8,7 @@
 
 import { isHex32, tagValue, type NostrEvent, type UnsignedEvent } from './event.js'
 import { normaliseDomain, tryNormaliseDomain } from '../oracle/domain.js'
+import { MSATS_PER_SAT, type Zap } from './zap.js'
 
 export const FLEX_CLAIM_KIND = 30078
 export const FLEX_CLAIM_D_PREFIX = 'fmd:flex:'
@@ -15,6 +16,18 @@ export const FLEX_CLAIM_TOPIC = 'fmd-flex'
 
 /** The amount as a topic too, so the board asks only for claims matching what was paid. */
 export const flexAmountTopic = (amountSats: number): string => `${FLEX_CLAIM_TOPIC}-${amountSats}`
+
+/** A payment this close above a claim's amount is taken as that claim's. Some wallets add a sat or two. */
+export const FLEX_AMOUNT_SLACK_SATS = 10
+
+/** Every amount a claim could have for these payments: each one, give or take the slack. */
+export function flexNearAmounts(amounts: readonly number[], slack = FLEX_AMOUNT_SLACK_SATS): number[] {
+  const near = new Set<number>()
+  for (const amount of amounts) {
+    for (let a = Math.max(1, amount - slack); a <= amount + slack; a++) near.add(a)
+  }
+  return [...near].sort((a, b) => a - b)
+}
 
 const CLAIM_ID = /^[0-9a-f]{16,64}$/
 const ADDRESS = /^(bc1|tb1|bcrt1)[02-9ac-hj-np-z]{8,87}$/
@@ -96,35 +109,78 @@ export function flexClaimFilter(options: { amounts?: readonly number[]; since?: 
 }
 
 /**
- * Pairs payments to `address` with claims. A payment goes to the earliest unmatched claim for
- * the same address and exact amount made in the day before it (with `slack` seconds for
- * clocks), and each claim is used once. Payments nobody claimed don't count.
+ * Pairs payments to `address` with claims made in the day before them (with `slackSeconds`
+ * for clocks). A claim's amount is a minimum: a payment counts in full for a claim at or below
+ * it, and never for one above it. Payments within `amountSlackSats` above a claim are paired
+ * first, since those odd sats name the claim; then larger payments take the closest open
+ * claim below them. A claim made before the payment beats one made after it, then the closer
+ * amount, then the earlier claim. Each claim is used once, and payments nobody claimed don't
+ * count.
  */
 export function matchFlexPayments(
   claims: readonly FlexClaim[],
   payments: readonly FlexPayment[],
-  options: { address: string; now: number; slackSeconds?: number; maxAgeSeconds?: number },
+  options: { address: string; now: number; slackSeconds?: number; maxAgeSeconds?: number; amountSlackSats?: number },
 ): { claim: FlexClaim; payment: FlexPayment }[] {
   const slack = options.slackSeconds ?? 900
+  const near = options.amountSlackSats ?? FLEX_AMOUNT_SLACK_SATS
   // a day covers any wallet, and old claims can't sit waiting for every future payment
   const maxAge = options.maxAgeSeconds ?? 86400
   const open = claims
     .filter((c) => c.address === options.address)
     .sort((a, b) => a.at - b.at || (a.event.id < b.event.id ? -1 : 1))
-  const used = new Set<string>()
   const seen = new Set<string>()
-  const ordered = [...payments].sort((a, b) => (a.at ?? options.now) - (b.at ?? options.now))
-  const out: { claim: FlexClaim; payment: FlexPayment }[] = []
-  for (const payment of ordered) {
-    const key = `${payment.txid}:${payment.vout}`
-    if (seen.has(key)) continue
-    seen.add(key)
+  const ordered = [...payments]
+    .sort((a, b) => (a.at ?? options.now) - (b.at ?? options.now))
+    .filter((p) => {
+      const key = `${p.txid}:${p.vout}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+  const used = new Set<string>()
+  const paired = new Map<FlexPayment, FlexClaim>()
+  const pick = (payment: FlexPayment, fits: (over: number) => boolean): FlexClaim | undefined => {
     const when = payment.at ?? options.now
-    const claim = open.find((c) => !used.has(c.event.id) && c.amountSats === payment.valueSats
-      && c.at <= when + slack && c.at >= when - maxAge)
-    if (!claim) continue
-    used.add(claim.event.id)
-    out.push({ claim, payment })
+    const over = (c: FlexClaim) => payment.valueSats - c.amountSats
+    // the slack is for clocks, so a claim made after the payment never beats one made before it
+    const better = (c: FlexClaim, than: FlexClaim) =>
+      (c.at > when) !== (than.at > when) ? c.at <= when : over(c) < over(than)
+    let best: FlexClaim | undefined
+    for (const c of open) {
+      if (used.has(c.event.id) || over(c) < 0 || !fits(over(c)) || c.at > when + slack || c.at < when - maxAge) continue
+      // `open` is oldest first, so a later claim wins a tie only by being closer
+      if (!best || better(c, best)) best = c
+    }
+    return best
   }
-  return out
+  for (const fits of [(over: number) => over <= near, () => true]) {
+    for (const payment of ordered) {
+      if (paired.has(payment)) continue
+      const claim = pick(payment, fits)
+      if (!claim) continue
+      used.add(claim.event.id)
+      paired.set(payment, claim)
+    }
+  }
+  return ordered.flatMap((payment) => {
+    const claim = paired.get(payment)
+    return claim ? [{ claim, payment }] : []
+  })
+}
+
+/** A paired payment in the shape the board ranks. The claim stands in for a zap's receipt. */
+export function flexPaymentZap(claim: FlexClaim, payment: FlexPayment, now: number): Zap {
+  return {
+    receipt: claim.event,
+    request: claim.event,
+    sender: claim.author,
+    recipient: '',
+    amountSats: payment.valueSats,
+    amountMsats: payment.valueSats * MSATS_PER_SAT,
+    flexDomain: claim.domain,
+    comment: '',
+    at: payment.at ?? now,
+  }
 }
