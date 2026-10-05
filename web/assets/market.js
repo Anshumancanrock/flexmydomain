@@ -1,13 +1,17 @@
 // Generated from web/src/market.ts by scripts/build-web.ts. Edit that file instead.
 import {
   DEFAULT_RELAYS,
+  addressOf,
   MSATS_PER_SAT,
+  registrarFindings,
+  rdapAnswerProblem,
   RelayDirectory,
   buildPortfolio,
   buildZapRequest,
   checkDomain,
   encodeProofRecord,
   fetchLnurlPay,
+  invoiceOfferEnds,
   proofEvent,
   proofRecordName,
   requestZapInvoice,
@@ -21,6 +25,7 @@ import {
   countOnRelays,
   deletionFilter,
   listingAddress,
+  neventEncode,
   listingFilter,
   newestPerAddress,
   nostrUri,
@@ -31,6 +36,7 @@ import {
   publishOutbox,
   queryDiscovery,
   queryRelays,
+  readOwn,
   shorten,
   tldOf,
   verifyPortfolio
@@ -42,17 +48,21 @@ import {
   ageText,
   askDialog,
   closeDialog,
+  confirmIncompleteRead,
   copyToClipboard,
   esc,
+  idnLine,
   initConnect,
   initTheme,
+  invoiceBlock,
   now,
   onSessionChange,
   openConnect,
   row,
   sats,
   session,
-  toast
+  toast,
+  wireInvoice
 } from "./ui.js";
 import { CONFIG, featuringEnabled } from "./config.js";
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
@@ -65,31 +75,87 @@ const state = {
   sort: "price-desc",
   showUnverified: false,
   total: undefined,
-  portfolio: [],
+  answered: 0,
   mine: [],
-  portfolioKnown: false
+  fresh: null
 };
+const AUTHORS_KEY = "fmd-market-authors-v1";
+const MAX_REMEMBERED = 500;
+function rememberedAuthors() {
+  try {
+    const list = JSON.parse(localStorage.getItem(AUTHORS_KEY) ?? "[]");
+    return Array.isArray(list) ? list.filter((a) => typeof a === "string" && /^[0-9a-f]{64}$/.test(a)).slice(0, MAX_REMEMBERED) : [];
+  } catch {
+    return [];
+  }
+}
+function rememberAuthors(authors) {
+  try {
+    localStorage.setItem(AUTHORS_KEY, JSON.stringify(authors.slice(0, MAX_REMEMBERED)));
+  } catch {}
+}
+const deletionsBy = (relays, authors, onDone) => relays.length && authors.length ? queryRelays(relays, [deletionFilter([...authors])], {
+  timeoutMs: 4000,
+  onRelayDone: (relay, _count, _error, complete) => {
+    if (complete)
+      onDone?.(relay);
+  }
+}).catch(() => []) : Promise.resolve([]);
+let loads = 0;
 async function load() {
+  const call = ++loads;
   state.loading = true;
+  state.total = undefined;
   render();
-  const [events, count] = await Promise.all([
-    queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], { timeoutMs: 6000 }).catch(() => []),
-    countOnRelays(DISCOVERY_RELAYS, [listingFilter()]).catch(() => {
-      return;
-    })
-  ]);
-  state.total = count;
+  let answered = 0;
+  const remembered = rememberedAuthors();
+  const answeredEarly = new Set;
+  const early = deletionsBy(DISCOVERY_RELAYS, remembered, (relay) => answeredEarly.add(relay));
+  const events = await queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], {
+    timeoutMs: 6000,
+    onRelayDone: (_relay, _count, _error, complete) => {
+      if (complete)
+        answered++;
+    }
+  }).catch(() => []);
+  if (call !== loads)
+    return;
   const current = newestPerAddress(events);
   const authors = [...new Set(current.map((e) => e.pubkey))];
-  const deletions = authors.length ? await queryRelays(DISCOVERY_RELAYS, [deletionFilter(authors)], { timeoutMs: 4000 }).catch(() => []) : [];
-  const live = applyDeletions(current, deletions);
+  const seen = new Set(remembered);
+  const later = deletionsBy(DISCOVERY_RELAYS, authors.filter((a) => !seen.has(a)));
+  const before = await early;
+  const again = deletionsBy(DISCOVERY_RELAYS.filter((r) => !answeredEarly.has(r)), authors.filter((a) => seen.has(a)));
+  const [after, retried] = await Promise.all([later, again]);
+  if (call !== loads)
+    return;
+  const live = applyDeletions(current, [...before, ...after, ...retried]);
+  if (answered)
+    rememberAuthors(authors);
+  state.answered = answered;
   state.listings = live.map((event) => {
     const parsed = parseListing(event);
     return parsed.ok ? { event, listing: parsed.listing, check: null, live: null } : null;
   }).filter(Boolean);
+  const fresh = state.fresh;
+  const freshParsed = fresh ? parseListing(fresh) : undefined;
+  if (fresh && freshParsed?.ok) {
+    const same = (e) => e.event.pubkey === fresh.pubkey && e.listing.domain === freshParsed.listing.domain;
+    if (!state.listings.some((e) => same(e) && e.event.created_at >= fresh.created_at)) {
+      state.listings = [{ event: fresh, listing: freshParsed.listing, check: null, live: null }, ...state.listings.filter((e) => !same(e))];
+    }
+  }
   state.loading = false;
   render();
-  await Promise.all(state.listings.map(async (entry) => {
+  countOnRelays(DISCOVERY_RELAYS, [listingFilter()]).catch(() => {
+    return;
+  }).then((count) => {
+    if (call !== loads || count === undefined)
+      return;
+    state.total = count;
+    render();
+  });
+  await Promise.all(state.listings.filter(forSale).map(async (entry) => {
     const report = await checkDomainProof({
       domain: entry.listing.domain,
       pubkey: entry.event.pubkey,
@@ -97,18 +163,23 @@ async function load() {
     }).catch(() => null);
     entry.live = report;
     entry.check = checkListing({ event: entry.event, dnsProof: report?.dns, now: now() });
-    render();
+    if (call === loads)
+      render();
   }));
 }
 const verified = (entry) => entry.check?.ok === true;
+const forSale = (entry) => entry.listing.status !== "sold";
+function matchesFilter(entry) {
+  if (state.tld && tldOf(entry.listing.domain) !== state.tld)
+    return false;
+  if (!state.search)
+    return true;
+  const q = state.search.toLowerCase();
+  return entry.listing.domain.includes(q) || entry.listing.summary.toLowerCase().includes(q);
+}
 function visible() {
-  let rows = state.listings.filter((entry) => state.showUnverified ? true : verified(entry));
-  if (state.tld)
-    rows = rows.filter((e) => tldOf(e.listing.domain) === state.tld);
-  if (state.search) {
-    const q = state.search.toLowerCase();
-    rows = rows.filter((e) => e.listing.domain.includes(q) || e.listing.summary.toLowerCase().includes(q));
-  }
+  const isFresh = (entry) => entry.event.id === state.fresh?.id;
+  const rows = state.listings.filter((entry) => forSale(entry) && (state.showUnverified || verified(entry) || isFresh(entry) && entry.check === null) && matchesFilter(entry));
   const by = {
     "price-desc": (a, b) => b.listing.priceSats - a.listing.priceSats,
     "price-asc": (a, b) => a.listing.priceSats - b.listing.priceSats,
@@ -116,12 +187,13 @@ function visible() {
     "oldest-domain": (a, b) => (a.listing.registeredAt ?? 1 / 0) - (b.listing.registeredAt ?? 1 / 0),
     az: (a, b) => a.listing.domain.localeCompare(b.listing.domain)
   };
-  return [...rows].sort(by[state.sort] ?? by["price-desc"]);
+  const sorted = [...rows].sort(by[state.sort] ?? by["price-desc"]);
+  return [...sorted.filter(isFresh), ...sorted.filter((e) => !isFresh(e))];
 }
 function renderTlds() {
   const counts = new Map;
   for (const entry of state.listings) {
-    if (!state.showUnverified && !verified(entry))
+    if (!forSale(entry) || !state.showUnverified && !verified(entry))
       continue;
     const tld = tldOf(entry.listing.domain);
     counts.set(tld, (counts.get(tld) ?? 0) + 1);
@@ -131,9 +203,12 @@ function renderTlds() {
 }
 function render() {
   const rows = visible();
-  const checked = state.listings.filter((e) => e.check !== null).length;
-  const good = state.listings.filter(verified).length;
-  $("#count").textContent = state.loading ? "Asking the relays…" : `${good} verified of ${state.listings.length} fetched` + (checked < state.listings.length ? ` · checking ${state.listings.length - checked} more` : "") + (state.total !== undefined ? ` · ${state.total} on the relays` : "");
+  const selling = state.listings.filter(forSale);
+  const pending = selling.filter((e) => e.check === null).length;
+  const good = selling.filter(verified).length;
+  const sold = state.listings.length - selling.length;
+  const unchecked = selling.filter((e) => e.check !== null && e.live?.answered !== true).length;
+  $("#count").textContent = state.loading ? "Asking the relays…" : `${good} verified of ${selling.length} for sale` + (pending ? ` · checking ${pending} more` : "") + (unchecked ? ` · ${unchecked} not checked, a DNS resolver didn't answer` : "") + (sold ? ` · ${sold} sold` : "") + (state.total !== undefined ? ` · ${state.total} on the relays` : "");
   renderTlds();
   const grid = $("#grid");
   if (state.loading) {
@@ -141,14 +216,18 @@ function render() {
     return;
   }
   if (rows.length === 0) {
-    grid.innerHTML = `<p class="empty">${state.listings.length === 0 ? "No listings on these relays yet. Be the first: prove a domain, then list it." : "Nothing matches. Clear the search or the TLD filter."}</p>`;
+    const waiting = selling.filter((e) => e.check === null && matchesFilter(e)).length;
+    grid.innerHTML = `<p class="empty">${selling.length === 0 ? sold ? "Nothing for sale right now: every listing on these relays is sold. Prove a domain, then list it." : state.answered === 0 ? "The relays didn't answer, so no listings could be read. Reload in a minute." : "No listings on these relays yet. Be the first: prove a domain, then list it." : waiting ? `Checking ${waiting === 1 ? "a listing" : `${waiting} listings`} against the domain's DNS…` : state.search || state.tld ? "Nothing matches. Clear the search or the TLD filter." : 'None of these listings passed its check. Tick "Show unverified listings" under What this page checked to see them, and why.'}</p>`;
     return;
   }
   grid.innerHTML = rows.map((entry) => {
     const l = entry.listing;
     const ok = verified(entry);
     const mine = entry.event.pubkey === session.pubkey;
+    const fresh = entry.event.id === state.fresh?.id;
     const tags = [];
+    if (fresh)
+      tags.push(`<span class="tag fresh">just listed</span>`);
     if (ok)
       tags.push(`<span class="tag proven">✓ proof verified</span>`);
     else if (entry.check)
@@ -162,64 +241,57 @@ function render() {
     if (l.status === "sold")
       tags.push(`<span class="tag">sold</span>`);
     tags.push(`<span class="tag">.${esc(tldOf(l.domain))}</span>`);
-    return `<article class="listing${ok ? "" : " unverified"}">
+    return `<article class="listing${ok ? "" : " unverified"}${fresh ? " fresh" : ""}">
       <div class="listing-top">
-        <div class="listing-name">${esc(l.domain)}</div>
+        <div class="listing-name">${esc(l.domain)}${idnLine(l.domain)}</div>
         <div class="listing-price">${sats(l.priceSats)}<small>sats</small></div>
       </div>
       ${l.summary ? `<p class="listing-summary">${esc(l.summary)}</p>` : ""}
       ${!ok && entry.check ? `<p class="listing-why">${esc(entry.check.reason ?? "did not verify")}</p>` : ""}
       <div class="listing-meta">${tags.join("")}</div>
       <div class="listing-actions">
-        ${!mine && ok ? `<a class="btn btn-accent" href="escrow.html?${new URLSearchParams({
+        ${!mine && ok && l.status !== "sold" ? `<a class="btn btn-accent" href="escrow.html?${new URLSearchParams({
       domain: l.domain,
       amount: String(l.priceSats),
       seller: npubEncode(entry.event.pubkey)
     }).toString()}">Buy</a>` : ""}
-        <button class="btn btn-ghost" type="button" data-feature="${esc(l.domain)}">Feature</button>
-        <button class="btn btn-ghost" type="button" data-share="${esc(l.domain)}">Share</button>
+        <button class="btn btn-ghost" type="button" data-feature="${esc(entry.event.id)}">Feature</button>
+        <button class="btn btn-ghost" type="button" data-share="${esc(entry.event.id)}">Share</button>
         <button class="btn btn-ghost" type="button" data-seller="${esc(entry.event.pubkey)}">Seller</button>
-        ${mine ? `<button class="btn btn-ghost" type="button" data-delist="${esc(l.domain)}">Delist</button>` : ""}
+        ${mine && l.status !== "sold" ? `<button class="btn btn-ghost" type="button" data-delist="${esc(l.domain)}">Delist</button>` : ""}
       </div>
     </article>`;
   }).join("");
 }
-async function loadMine() {
-  state.portfolioKnown = false;
-  if (!session.pubkey) {
-    state.portfolio = [];
-    state.mine = [];
-    return;
-  }
-  const pubkey = session.pubkey;
-  await directory.resolve([pubkey]).catch(() => {});
-  const relays = [...new Set([...directory.readRelays(pubkey), ...DISCOVERY_RELAYS])];
-  let completed = 0;
-  const events = await queryRelays(relays, [portfolioFilter(pubkey)], {
-    timeoutMs: 5000,
-    onRelayDone: (_relay, _count, _error, complete) => {
-      if (complete)
-        completed++;
-    }
-  }).catch(() => []);
-  if (session.pubkey !== pubkey)
-    return;
-  state.portfolioKnown = completed > 0;
-  const newest = newestPerAddress(events)[0];
-  if (!newest) {
-    state.portfolio = [];
-    state.mine = [];
-    return;
-  }
+async function readMine(pubkey) {
+  const read = await readOwn(directory, pubkey, [portfolioFilter(pubkey)], { extraRelays: DISCOVERY_RELAYS, timeoutMs: 5000 });
+  const newest = newestPerAddress(read.events)[0];
+  const none = { read, portfolio: [], mine: [], at: newest?.created_at ?? 0, problem: null };
+  if (!newest)
+    return none;
   const parsed = parsePortfolio(newest);
-  if (!parsed.ok) {
-    state.portfolio = [];
+  if (!parsed.ok)
+    return { ...none, problem: parsed.reason };
+  const verdicts = verifyPortfolio(parsed.portfolio);
+  return {
+    ...none,
+    portfolio: parsed.portfolio.entries,
+    mine: parsed.portfolio.entries.map((entry, i) => ({ ...entry, proven: verdicts[i].proven })).filter((entry) => entry.proven && entry.iat !== undefined && entry.sig !== undefined),
+    problem: parsed.dropped.length ? `${parsed.dropped.length} part${parsed.dropped.length === 1 ? "" : "s"} of it can't be read here: ${parsed.dropped[0].reason}` : null
+  };
+}
+let mineReads = 0;
+async function loadMine() {
+  const call = ++mineReads;
+  const pubkey = session.pubkey;
+  if (!pubkey) {
     state.mine = [];
     return;
   }
-  const verdicts = verifyPortfolio(parsed.portfolio);
-  state.portfolio = parsed.portfolio.entries;
-  state.mine = parsed.portfolio.entries.map((entry, i) => ({ ...entry, proven: verdicts[i].proven })).filter((entry) => entry.proven && entry.iat !== undefined && entry.sig !== undefined);
+  const result = await readMine(pubkey);
+  if (call !== mineReads || session.pubkey !== pubkey)
+    return;
+  state.mine = result.mine;
 }
 async function openSell() {
   if (!session.pubkey) {
@@ -265,7 +337,7 @@ async function publishListing(event) {
   try {
     const live = await checkDomainProof({ domain, pubkey: session.pubkey, dnsOnly: true });
     if (!live.status.proven) {
-      hint.textContent = `The zone no longer carries your proof: ${live.status.reason}. Re-prove it with "Prove a new domain" below.`;
+      hint.textContent = live.answered ? `The zone no longer carries your proof: ${live.status.reason}. Re-prove it with "Prove a new domain" below.` : `DNS couldn't be checked: ${live.dns.reason ?? "a resolver didn't answer"}. Your record may still be there; try again in a minute.`;
       hint.className = "hint err";
       return;
     }
@@ -286,6 +358,12 @@ async function publishListing(event) {
              The relays hold the listing now, signed by you. Its Share button gives the link.`) : row("bad", `<b>No relay accepted it.</b> Nothing was published.`)) + results.map((r) => row(r.ok ? "good" : "bad", `<b>${esc(r.relay.replace(/^wss:\/\//, ""))}</b>: ${r.ok ? "accepted" : esc(r.message ?? "refused")}`)).join("");
     if (accepted.length) {
       $("#sell-form").reset();
+      state.fresh = signed;
+      $("#sell-section").hidden = true;
+      $("#sell-results").hidden = true;
+      resetProve();
+      toast(`${domain} is listed on ${accepted.length} of ${results.length} relays.`);
+      $("#grid").scrollIntoView({ behavior: "smooth", block: "start" });
       await load();
     }
   } catch (err) {
@@ -297,12 +375,16 @@ async function publishListing(event) {
   }
 }
 async function delist(domain) {
+  const fresh = state.fresh ? parseListing(state.fresh) : undefined;
+  if (fresh?.ok && fresh.listing.domain === domain)
+    state.fresh = null;
   const entry = state.listings.find((e) => e.listing.domain === domain && e.event.pubkey === session.pubkey);
   if (!entry || !session.signer)
     return;
   askDialog("Delist this domain", `<p>Two things happen, and they are not equally reliable:</p>
      <p><b>1. The listing is republished as <code>sold</code>.</b> This is the authoritative
-        signal. It replaces the old event on every relay that carried it.</p>
+        signal. It replaces the old event on your write relays and on the discovery relays.
+        A relay this page doesn't reach keeps the old one.</p>
      <p><b>2. A deletion request is sent.</b> Relays may honour it or ignore it, and anyone
         who already fetched the listing still has it.</p>
      <p>Your DNS record and your portfolio are untouched.</p>`, {
@@ -311,6 +393,7 @@ async function delist(domain) {
       closeDialog();
       try {
         const l = entry.listing;
+        const at = Math.max(now(), entry.event.created_at + 1);
         const sold = await session.signer.signEvent(buildListing({
           pubkey: session.pubkey,
           domain: l.domain,
@@ -319,14 +402,14 @@ async function delist(domain) {
           description: l.description || undefined,
           status: "sold",
           publishedAt: l.publishedAt,
-          createdAt: now(),
+          createdAt: at,
           proof: l.proof
         }));
         const request = await session.signer.signEvent(buildDeletion({
           pubkey: session.pubkey,
           events: [entry.event],
           reason: "delisted",
-          createdAt: now()
+          createdAt: at - 1
         }));
         const [a, b] = await Promise.all([
           publishOutbox(directory, sold, { extraRelays: DISCOVERY_RELAYS }),
@@ -340,11 +423,16 @@ async function delist(domain) {
     }
   });
 }
-function share(domain) {
-  const entry = state.listings.find((e) => e.listing.domain === domain);
+function share(eventId) {
+  const entry = state.listings.find((e) => e.event.id === eventId);
   if (!entry)
     return;
-  const naddr = listingAddress(entry.listing, DEFAULT_RELAYS.slice(0, 2));
+  let naddr;
+  try {
+    naddr = listingAddress(entry.listing, DEFAULT_RELAYS.slice(0, 2));
+  } catch {
+    naddr = neventEncode({ id: entry.event.id, relays: DEFAULT_RELAYS.slice(0, 2), author: entry.event.pubkey, kind: entry.event.kind });
+  }
   askDialog("Share this listing", `<p>This is the listing's identity on Nostr, not a link to a server we run. Any client
         can resolve it from any relay, whether or not this site is still running.</p>
      <div class="nsec" id="naddr">${esc(nostrUri(naddr))}</div>
@@ -352,10 +440,11 @@ function share(domain) {
      <p class="hint">Seller: ${esc(shorten(npubEncode(entry.event.pubkey), 10))}</p>`);
   $("#copy-naddr").addEventListener("click", () => copyToClipboard($("#naddr").textContent));
 }
-async function featureListing(domain) {
-  const entry = state.listings.find((e) => e.listing.domain === domain);
+async function featureListing(eventId) {
+  const entry = state.listings.find((e) => e.event.id === eventId);
   if (!entry)
     return;
+  const domain = entry.listing.domain;
   if (!featuringEnabled()) {
     askDialog("Flex payments aren't on yet", `<p>This site hasn't switched on payments for the flex board yet, so there is
           nowhere to send a payment the board could count.</p>
@@ -367,7 +456,7 @@ async function featureListing(domain) {
     openConnect();
     return;
   }
-  const address = listingAddress(entry.listing, DEFAULT_RELAYS.slice(0, 2));
+  const address = addressOf(entry.event);
   askDialog(`Feature ${domain}`, `<p>Rank is sats zapped inside a rolling week. This pays
         <b>${esc(CONFIG.featuredLightningAddress)}</b> and tags the payment with this
         listing, so the receipt is public and anyone can re-count the board.</p>
@@ -425,20 +514,31 @@ async function requestInvoice(domain, address) {
       out.innerHTML = row("bad", `The provider refused: ${esc(invoice.reason)}.`);
       return;
     }
-    out.innerHTML = row("good", `<b>Invoice for ${sats(amountSats)} sats.</b> Pay it in any wallet.`) + `<div class="nsec" id="invoice">${esc(invoice.invoice)}</div>
-       <div style="display:flex;gap:8px;flex-wrap:wrap">
-         <a class="btn btn-accent btn-sm" href="lightning:${esc(invoice.invoice)}">Open in wallet</a>
-         <button class="btn btn-ghost btn-sm" type="button" id="copy-invoice">Copy invoice</button>
-       </div>
-       <p class="hint" style="text-align:left">The board updates when your provider publishes
+    if (!out.isConnected)
+      return;
+    const endsAt = invoiceOfferEnds(invoice.invoice, now());
+    out.innerHTML = row("good", `<b>Invoice for ${sats(amountSats)} sats.</b> Pay it with any Lightning wallet.`) + invoiceBlock(invoice.invoice, { endsAt }) + `<p class="hint" style="text-align:left">The board updates when your provider publishes
           the receipt, usually within seconds. We hold nothing at any point.</p>`;
-    $("#copy-invoice").addEventListener("click", () => copyToClipboard($("#invoice").textContent));
+    wireInvoice(out, invoice.invoice, { endsAt });
     go.hidden = true;
   } catch (err) {
     out.innerHTML = row("bad", esc(err.message));
   } finally {
-    go.disabled = false;
+    if (out.isConnected)
+      go.disabled = false;
   }
+}
+function resetProve() {
+  state.draft = null;
+  $("#domain").value = "";
+  $("#domain-hint").textContent = "";
+  for (const id of ["#registry", "#observations", "#relay-results"]) {
+    $(id).hidden = true;
+    $(id).innerHTML = "";
+  }
+  $("#record").hidden = true;
+  step(1);
+  $("#prove").open = false;
 }
 function step(n) {
   document.querySelectorAll(".step").forEach((el) => {
@@ -461,7 +561,7 @@ async function checkName(event) {
   }
   const domain = normalised.domain;
   hint.className = "hint";
-  hint.innerHTML = normalised.unicode !== domain ? `Reading it as <b>${esc(domain)}</b>, which is <b>${esc(normalised.unicode)}</b> in A-label form.` : `Reading it as <b>${esc(domain)}</b>.`;
+  hint.innerHTML = normalised.unicode !== domain ? `Reading it as <b>${esc(normalised.unicode)}</b>, which is <b>${esc(domain)}</b> in A-label form.` : `Reading it as <b>${esc(domain)}</b>.`;
   $("#check-btn").disabled = true;
   $("#check-btn").textContent = "Checking…";
   const registry = $("#registry");
@@ -482,10 +582,13 @@ async function checkName(event) {
 function renderRegistry(reg, proof) {
   const rows = [];
   if (!reg.supported) {
-    rows.push(row("", `This TLD publishes no RDAP service, so nothing about the registration
+    rows.push(row("", `This TLD publishes no RDAP service over HTTPS, so nothing about the registration
       can be checked. You can still flex the name, but it cannot be escrowed here.`));
   } else if (!reg.eligibility) {
-    rows.push(row("", `The registry did not answer. That says nothing about the domain; try again.`));
+    const s = reg.snapshot;
+    rows.push(s.status === 404 ? row("bad", `The registry says this domain isn't registered.`) : !s.ok ? row("", `The registry did not answer${s.status ? ` (HTTP ${s.status})` : s.error ? ` (${esc(s.error)})` : ""}. That
+            says nothing about the domain; try again.`) : row("", `The registry's answer wasn't usable: ${esc(rdapAnswerProblem(s.response, reg.domain) ?? "it could not be read")}.
+            That says nothing about the domain; try again.`));
   } else {
     const e = reg.eligibility;
     const f = e.facts;
@@ -497,17 +600,15 @@ function renderRegistry(reg, proof) {
     if (e.daysUntilExpiry !== undefined)
       facts.push(`expires in ${Math.floor(e.daysUntilExpiry)}d`);
     facts.push(e.unlocked ? "transfer lock off" : "transfer lock on");
-    rows.push(row(e.listable ? "good" : "bad", esc(facts.join(" · "))));
-    for (const finding of e.findings) {
+    const findings = registrarFindings(f, now());
+    rows.push(row(findings.some((x) => x.level === "refuse") ? "bad" : "good", esc(facts.join(" · "))));
+    for (const finding of findings) {
       rows.push(row(finding.level === "refuse" ? "bad" : "", esc(finding.message)));
     }
-    rows.push(row("", e.unlocked ? `When somebody buys it, the escrow will ask you to turn the transfer lock
-         <b>on</b> at your registrar and, once it has seen that, <b>off</b> again. Only the
-         registrant can change the lock, so that is how a buyer knows you hold the domain
-         and not just its DNS. Listing needs nothing from the registrar.` : `When somebody buys it, the escrow will ask you to turn this transfer lock
-         <b>off</b> at your registrar. Only the registrant can change the lock, so that is
-         how a buyer knows you hold the domain and not just its DNS. Listing needs nothing
-         from the registrar.`));
+    rows.push(row("", `When somebody buys it, they pay into the escrow, and you transfer the domain straight
+      to them${f.registrarName ? `: to their account at ${esc(f.registrarName)}, or with a transfer code to their
+      own registrar` : ", the registrar's usual way"}. Their confirmation pays you. Listing needs nothing from the
+      registrar.`));
   }
   if (proof.status.proven) {
     rows.push(row("good", `This domain already proves your key, so you can publish it straight away.`));
@@ -553,9 +654,13 @@ async function verifyZone() {
     state.draft.verified = report.status.proven;
     const rows = report.lookup.observations.map((o) => row(o.error ? "" : o.records.length ? "good" : "bad", `<b>${esc(o.provider)}</b>: ${o.error ? `did not answer (${esc(o.error)})` : `${o.records.length} TXT record${o.records.length === 1 ? "" : "s"}${o.dnssec ? ", DNSSEC validated" : ""}`}`));
     if (report.status.proven) {
-      rows.push(row("good", `<b>Proven.</b> Both resolvers returned a record that verifies
-        for your key${report.dnssec ? ", over a validated DNSSEC chain" : ""}.`));
+      rows.push(row("good", report.status.source === "nip05" ? `<b>Proven.</b> <code>${esc(report.nip05Url ?? "nostr.json")}</code> maps <code>_</code> to your key.
+            That shows control of the web server, not the zone.` : `<b>Proven.</b> Both resolvers returned a record that verifies
+            for your key${report.dnssec ? ", over a validated DNSSEC chain" : ""}.`));
       step(4);
+    } else if (!report.lookup.complete) {
+      rows.push(row("bad", `A resolver did not answer, and a record counts only when both return it.
+        Check again shortly.`));
     } else if (report.lookup.disputed.length) {
       rows.push(row("bad", `One resolver sees the record and the other does not. That is
         normal for a few minutes after you add it; check again shortly.`));
@@ -572,37 +677,51 @@ async function verifyZone() {
   }
 }
 async function publish() {
-  if (!state.draft?.verified || !session.signer)
+  if (!state.draft?.verified || !session.signer || !session.pubkey)
     return;
+  const draft = state.draft;
+  const pubkey = session.pubkey;
+  const signer = session.signer;
   const button = $("#publish-btn");
   const out = $("#relay-results");
   button.disabled = true;
   button.textContent = "Publishing…";
   out.hidden = false;
-  if (!state.portfolioKnown) {
-    out.innerHTML = row("", "Reading your current portfolio first…");
-    await loadMine();
-  }
-  if (!state.portfolioKnown) {
-    out.innerHTML = row("bad", `<b>Nothing was published.</b> None of your relays finished
-      answering, so this page cannot see your current portfolio, and publishing now could replace
-      it with just this domain. Your proof is still valid in DNS. Try again in a minute.`);
+  const stop = (html) => {
+    out.innerHTML = row("bad", html);
     button.disabled = false;
     button.textContent = "Publish to relays";
+  };
+  out.innerHTML = row("", "Reading your current portfolio first…");
+  const current = await readMine(pubkey);
+  if (session.pubkey !== pubkey) {
+    stop("<b>Nothing was published.</b> The connected key changed.");
+    return;
+  }
+  if (current.problem) {
+    stop(`<b>Nothing was published.</b> This page can't read all of your newest portfolio
+      (${esc(current.problem)}), and publishing would replace it, dropping what it can't read.`);
+    return;
+  }
+  const read = current.read;
+  const go = read.answered > 0 && (read.complete || await confirmIncompleteRead("portfolio", read));
+  if (!go || session.pubkey !== pubkey) {
+    stop(`<b>Nothing was published.</b> ${session.pubkey !== pubkey ? "The connected key changed." : read.answered ? "Not every relay answered, so this page can't be sure it sees your current portfolio." : "No relay answered, so this page can't see your current portfolio at all."}
+      Your proof is still valid in DNS. Try again in a minute.`);
     return;
   }
   out.innerHTML = row("", "Signing your portfolio…");
   try {
-    const entries = upsertEntry(state.portfolio, {
-      domain: state.draft.domain,
-      source: state.draft.proof.status.source ?? "dns",
-      iat: state.draft.record.iat,
-      sig: state.draft.record.sig,
+    const entries = upsertEntry(current.portfolio, {
+      domain: draft.domain,
+      source: draft.proof.status.source ?? "dns",
+      iat: draft.record.iat,
+      sig: draft.record.sig,
       firstSeen: now()
     });
-    const portfolio = await session.signer.signEvent(buildPortfolio({ pubkey: session.pubkey, entries, createdAt: now() }));
+    const portfolio = await signer.signEvent(buildPortfolio({ pubkey, entries, createdAt: Math.max(now(), current.at + 1) }));
     const [proofResults, portfolioResults] = await Promise.all([
-      publishOutbox(directory, state.draft.event, { extraRelays: DISCOVERY_RELAYS }),
+      publishOutbox(directory, draft.event, { extraRelays: DISCOVERY_RELAYS }),
       publishOutbox(directory, portfolio, { extraRelays: DISCOVERY_RELAYS })
     ]);
     const relays = [...new Set([...proofResults, ...portfolioResults].map((r) => r.relay))];
@@ -620,11 +739,13 @@ async function publish() {
       rows.unshift(row("bad", `<b>No relay accepted it.</b> Your proof is still valid (it is
         in DNS), but nothing has been published. Try again.`));
     } else {
-      rows.unshift(row("good", `<b>Published to ${accepted.size} of ${relays.length} relays.</b>
-        Your domains live there now, signed by you.`));
-      $("#domain").value = "";
-      step(1);
       await afterProof();
+      resetProve();
+      if (state.mine.some((e) => e.domain === draft.domain))
+        $("#sell-domain").value = draft.domain;
+      toast(`${draft.domain} is proven. Set a price and list it.`);
+      $("#sell-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
     }
     out.innerHTML = rows.join("");
   } catch (err) {

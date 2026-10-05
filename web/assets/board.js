@@ -1,5 +1,6 @@
 // Generated from web/src/board.ts by scripts/build-web.ts. Edit that file instead.
 import {
+  INVOICE_OFFER_SECONDS,
   MSATS_PER_SAT,
   addressOf,
   applyDeletions,
@@ -8,7 +9,9 @@ import {
   checkListing,
   deletionFilter,
   fetchLnurlPay,
+  lightningAddressUrl,
   flexZapFilter,
+  invoiceOfferEnds,
   listingFilter,
   newestPerAddress,
   npubEncode,
@@ -29,15 +32,19 @@ import {
   ZAP_RECEIPT_RELAYS,
   ageText,
   askDialog,
-  copyToClipboard,
+  clockText,
   esc,
   initConnect,
   initTheme,
+  invoiceBlock,
+  markInvoicePaid,
   now,
   onSessionChange,
   openConnect,
   sats,
-  session
+  session,
+  toast,
+  wireInvoice
 } from "./ui.js";
 const PER_PAGE = 15;
 const WEEK = 7 * 86400;
@@ -49,30 +56,56 @@ const state = {
   sort: "rank",
   page: 1,
   range: "week",
-  target: 1,
-  recent: []
+  amount: null,
+  recent: [],
+  missing: [],
+  answered: 0,
+  unknown: null,
+  flexed: null
 };
+const uncertain = () => state.loading || state.unknown !== null || state.missing.length > 0;
 async function load() {
   state.loading = true;
   render();
-  if (!featuringEnabled()) {
+  const unknownBecause = (reason) => {
+    state.unknown = reason;
+    state.missing = [];
+    state.answered = 0;
     state.rows = [];
     state.loading = false;
     render();
+  };
+  if (!featuringEnabled()) {
+    unknownBecause(null);
+    return;
+  }
+  const address = CONFIG.featuredLightningAddress.trim();
+  if (!/^https?:\/\//i.test(address) && !lightningAddressUrl(address)) {
+    unknownBecause("This site's lightning address isn't a valid one, so no payment can be counted.");
     return;
   }
   const recipient = CONFIG.featuredRecipientPubkey.trim().toLowerCase();
-  const provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => {
+  let provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => {
     return;
   });
   if (!provider) {
-    state.rows = [];
-    state.loading = false;
-    render();
-    return;
+    const lnurl = await fetchLnurlPay(CONFIG.featuredLightningAddress).catch((err) => ({ ok: false, reason: err.message }));
+    if (lnurl.ok && lnurl.info.allowsNostr && lnurl.info.nostrPubkey) {
+      provider = lnurl.info.nostrPubkey;
+    } else {
+      unknownBecause(lnurl.ok ? "This site's lightning address doesn't support zaps, so no payment can be counted." : "The lightning provider didn't answer, so payments can't be counted. Reload in a minute.");
+      return;
+    }
   }
   const windowSeconds = state.range === "all" ? undefined : WEEK;
-  const receipts = await queryDiscovery(DISCOVERY_RELAYS, [flexZapFilter(recipient, windowSeconds ? now() - windowSeconds : undefined)], { timeoutMs: 6000 }).catch(() => []);
+  const finished = new Set;
+  const receipts = await queryDiscovery(DISCOVERY_RELAYS, [{ ...flexZapFilter(recipient, windowSeconds ? now() - windowSeconds : undefined), authors: [provider] }], { timeoutMs: 6000, onRelayDone: (relay, _count, _error, complete) => {
+    if (complete)
+      finished.add(relay);
+  } }).catch(() => []);
+  state.unknown = null;
+  state.answered = finished.size;
+  state.missing = ZAP_RECEIPT_RELAYS.filter((r) => !finished.has(r));
   const verified = [];
   for (const receipt of receipts) {
     const result = verifyZapReceipt({ receipt, recipient, expectedProvider: provider });
@@ -86,6 +119,7 @@ async function load() {
   state.recent = verified.sort((a, b) => b.at - a.at).slice(0, 6);
   state.loading = false;
   render();
+  settlePending(verified);
   linkListings();
 }
 async function linkListings() {
@@ -98,7 +132,7 @@ async function linkListings() {
   const wanted = new Set(state.rows.map((r) => r.domain));
   await Promise.all(applyDeletions(current, deletions).map(async (event) => {
     const parsed = parseListing(event);
-    if (!parsed.ok || !wanted.has(parsed.listing.domain))
+    if (!parsed.ok || parsed.listing.status === "sold" || !wanted.has(parsed.listing.domain))
       return;
     const dns = await checkDomainProof({
       domain: parsed.listing.domain,
@@ -190,7 +224,7 @@ function renderPodium() {
       </article>`;
     }
     const [stem, t] = splitName(row.domain);
-    return `<article class="card-rank ${cls}">
+    return `<article class="card-rank ${cls}${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
       ${badge(rank)}
       <span class="name">${esc(stem)}<span class="tld">${esc(t)}</span></span>
       <span class="tag">${row.listing ? esc(row.listing.summary || "For sale on the market") : `${row.zaps} payment${row.zaps === 1 ? "" : "s"}`}</span>
@@ -209,12 +243,12 @@ function renderRows(rows) {
     state.page = pages;
   const start = (state.page - 1) * PER_PAGE;
   const page = body.slice(start, start + PER_PAGE);
-  $("#rows").innerHTML = page.length === 0 ? `<li class="empty">${state.loading ? "Asking the relays…" : state.rows.length === 0 ? "Nobody has flexed a domain yet. Type one above and take #1." : filtered ? "Nothing matches that filter." : "Only the podium so far. Flex a domain to take the next spot."}</li>` : page.map((row) => {
+  $("#rows").innerHTML = page.length === 0 ? `<li class="empty">${state.loading ? "Asking the relays…" : state.unknown ? esc(state.unknown) : state.rows.length === 0 && state.answered === 0 && featuringEnabled() ? "The relays didn't answer, so the board can't be shown. Reload in a minute." : state.rows.length === 0 && state.missing.length ? "No flexes were found, but not every relay answered, so there may be some. Reload in a minute." : state.rows.length === 0 ? "Nobody has flexed a domain yet. Type one above and take #1." : filtered ? "Nothing matches that filter." : "Only the podium so far. Flex a domain to take the next spot."}</li>` : page.map((row) => {
     const [stem, t] = splitName(row.domain);
     const tile = tileOf(row.domain);
     const rank = row.rank;
     const metal = rank <= 3 ? ` r${rank} metal` : "";
-    return `<li class="row${rank === 1 ? " row-top" : ""}">
+    return `<li class="row${rank === 1 ? " row-top" : ""}${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
           <span class="r-rank${metal}">#${rank}</span>
           <span class="r-av" style="--h:${tile.h};--l:${tile.l}" aria-hidden="true">${esc((stem[0] ?? "?").toUpperCase())}</span>
           <div class="r-body">
@@ -269,16 +303,6 @@ function renderSide(rows) {
   $("#s-total").textContent = `${sats(total)} sats`;
   $("#s-count").textContent = sats(rows.length);
   $("#s-tld").textContent = String(tlds.size);
-  const weekly = [...rows].filter((r) => r.sats > 0).sort((a, b) => b.sats - a.sats).slice(0, 8);
-  $("#weekly").innerHTML = weekly.length ? weekly.map((r, i) => {
-    const [stem, t] = splitName(r.domain);
-    const metal = i < 3 ? ` r${i + 1} metal` : "";
-    return `<li class="wk-row">
-           <span class="wk-rank${metal}">#${i + 1}</span>
-           <span class="wk-name">${esc(stem)}<span class="tld">${esc(t)}</span></span>
-           <span class="wk-bid">${sats(r.sats)} sats</span>
-         </li>`;
-  }).join("") : `<li class="wk-empty">${featuringEnabled() ? "No featured zaps this week." : "Flex payments are not switched on for this site yet."}</li>`;
   $("#feed").innerHTML = state.recent.length ? state.recent.map((zap, i) => {
     const domain = zap.flexDomain ?? "a domain";
     return `<li>
@@ -289,12 +313,12 @@ function renderSide(rows) {
            </span>
            <span class="act-figs"><b>${sats(zap.amountSats)}</b><span>${agoText(zap.at)}</span></span>
          </li>`;
-  }).join("") : `<li><span class="act-body"><span>${featuringEnabled() ? "No zaps in the last week." : "Nothing yet. Flex payments are not switched on for this site."}</span></span></li>`;
+  }).join("") : `<li><span class="act-body"><span>${!featuringEnabled() ? "Nothing yet. Flex payments are not switched on for this site." : !state.loading && uncertain() ? "Payments can't all be counted right now." : state.range === "all" ? "No zaps yet." : "No zaps in the last week."}</span></span></li>`;
 }
 function render() {
   const rows = visible();
   const all = state.rows;
-  $("#count").textContent = state.loading ? "asking the relays…" : !featuringEnabled() ? "flex payments are not switched on yet" : `${all.length} domain${all.length === 1 ? "" : "s"} on the board`;
+  $("#count").textContent = state.loading ? "asking the relays…" : !featuringEnabled() ? "flex payments are not switched on yet" : `${all.length} domain${all.length === 1 ? "" : "s"} on the board` + (state.unknown ? " · payments can't be counted right now" : state.missing.length ? " · not every relay answered, so payments may be missing" : "");
   renderPodium();
   renderChips();
   renderRows(rows);
@@ -314,10 +338,55 @@ function rankFor(amount) {
     i++;
   return i + 1;
 }
+const STEPS = [1000, 2000, 5000, 1e4, 20000, 50000, 1e5, 200000, 500000, 1e6, 2000000, 5000000, 1e7];
+const claimAmount = () => Math.max(MIN_FLEX_SATS, state.amount ?? costOfRank(1));
+function stepAmount(up) {
+  const now_ = claimAmount();
+  state.amount = up ? STEPS.find((s) => s > now_) ?? now_ * 2 : Math.max(MIN_FLEX_SATS, [...STEPS].reverse().find((s) => s < now_) ?? MIN_FLEX_SATS);
+  paintClaim();
+}
+const PRICE_KEY = "fmd-btc-usd-v1";
+let usdPerBtc;
+async function loadPrice() {
+  try {
+    const kept = JSON.parse(localStorage.getItem(PRICE_KEY) ?? "null");
+    if (kept && typeof kept.usd === "number" && kept.usd > 0 && Date.now() - (kept.at ?? 0) < 10 * 60000) {
+      usdPerBtc = kept.usd;
+      paintClaim();
+      return;
+    }
+  } catch {}
+  try {
+    const res = await fetch("https://mempool.space/api/v1/prices", { signal: AbortSignal.timeout(6000) });
+    const usd = Number((await res.json()).USD);
+    if (!Number.isFinite(usd) || usd <= 0)
+      return;
+    usdPerBtc = usd;
+    try {
+      localStorage.setItem(PRICE_KEY, JSON.stringify({ usd, at: Date.now() }));
+    } catch {}
+    paintClaim();
+  } catch {}
+}
+function usdText(satsAmount) {
+  if (!usdPerBtc)
+    return;
+  const v = satsAmount * usdPerBtc / 1e8;
+  const cents = v < 100;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: cents ? 2 : 0,
+    maximumFractionDigits: cents ? 2 : 0
+  }).format(v);
+}
 function paintClaim() {
-  const amount = costOfRank(state.target);
-  $("#c-rank").textContent = `#${rankFor(amount)}`;
-  $("#c-amount").textContent = `${sats(amount)} sats`;
+  const amount = claimAmount();
+  const sure = !state.loading && !uncertain();
+  $("#c-rank").textContent = `#${rankFor(amount)}${sure ? "" : "?"}`;
+  const usd = usdText(amount);
+  $("#c-amount").textContent = usd ?? `${sats(amount)} sats`;
+  $("#c-sats").textContent = usd ? `⚡ ${sats(amount)} sats` : "";
 }
 function failHint(message) {
   const el = $("#hint");
@@ -339,12 +408,12 @@ async function flexIt(event) {
   }
   if (!session.pubkey) {
     hint.className = "hint";
-    hint.textContent = "Connect or create a key first. Your key signs the payment.";
+    hint.textContent = "Connect first, or create an account: it signs the payment as yours.";
     openConnect();
     return;
   }
   const domain = normalised.domain;
-  const amount = costOfRank(state.target);
+  const amount = claimAmount();
   hint.className = "hint";
   hint.innerHTML = `Getting an invoice for <b>${esc(domain)}</b>…`;
   try {
@@ -367,25 +436,127 @@ async function flexIt(event) {
     const invoice = await requestZapInvoice({ info: lnurl.info, amountMsats, zapRequest, lnurl: lnurl.url });
     if (!invoice.ok)
       return failHint(`The provider refused: ${invoice.reason}.`);
-    showInvoice(domain, amount, invoice.invoice);
+    const pending = {
+      pubkey: zapRequest.pubkey,
+      domain,
+      amountSats: amount,
+      invoice: invoice.invoice,
+      requestId: zapRequest.id,
+      endsAt: invoiceOfferEnds(invoice.invoice, now())
+    };
+    keepPending(pending);
     hint.className = "hint";
-    hint.innerHTML = `Invoice ready for <b>${esc(domain)}</b>.`;
+    hint.textContent = "";
+    renderPending();
+    showInvoice(pending);
   } catch (err) {
     failHint(err.message);
   }
 }
-function showInvoice(domain, amount, invoice) {
-  askDialog(`Flex ${domain}`, `<p><b>${sats(amount)} sats</b> puts <b>${esc(domain)}</b> at <b>#${rankFor(amount)}</b>.
-        Pay in any wallet. We never touch the payment.</p>
-     <div class="nsec" id="invoice">${esc(invoice)}</div>
-     <div style="display:flex;gap:8px;flex-wrap:wrap">
-       <a class="btn btn-accent btn-sm" href="lightning:${esc(invoice)}">Open in wallet</a>
-       <button class="btn btn-ghost btn-sm" type="button" id="copy-invoice">Copy invoice</button>
-     </div>
-     <p class="hint" style="text-align:left">The board updates when your provider publishes the
+function showInvoice(p) {
+  const { domain, amountSats: amount, invoice } = p;
+  askDialog(`Flex ${domain}`, `<p><b>${sats(amount)} sats</b>${usdText(amount) ? ` (about ${usdText(amount)})` : ""} puts <b>${esc(domain)}</b> at <b>#${rankFor(amount)}</b>.
+        Pay in any wallet. We never touch the payment.</p>` + (uncertain() ? `<p class="hint err" style="text-align:left"><strong>${state.loading ? "The board is still loading" : state.unknown ? "The board was read while payments couldn't be counted" : "Not every relay answered"}</strong>, so the board may be missing payments, and this may land lower
+           than #${rankFor(amount)}. ${state.loading ? "Wait for it before paying." : "Reload the page before paying to be sure."}</p>` : "") + invoiceBlock(invoice, { endsAt: p.endsAt }) + `<p class="hint" style="text-align:left">The board updates when your provider publishes the
         receipt, usually within seconds. Being on this board says only that somebody paid; it is
         not a claim of ownership. To say you own it, prove it on the <a href="market.html">market</a>.</p>`);
-  $("#copy-invoice").addEventListener("click", () => copyToClipboard($("#invoice").textContent));
+  shownInvoice = p.requestId;
+  wireInvoice($("#key-body"), invoice, {
+    endsAt: p.endsAt,
+    onPaid: () => {
+      const now_ = pendingFlex();
+      if (now_?.requestId === p.requestId)
+        keepPending({ ...now_, paid: true });
+      renderPending();
+      checkPending();
+    }
+  });
+}
+const PENDING_KEY = "fmd-flex-invoice-v1";
+const isHex64 = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+function pendingFlex() {
+  let p = null;
+  try {
+    p = JSON.parse(localStorage.getItem(PENDING_KEY) ?? "null");
+  } catch {
+    p = null;
+  }
+  if (!p)
+    return;
+  const usable = isHex64(p.pubkey) && isHex64(p.requestId) && typeof p.domain === "string" && tryNormaliseDomain(p.domain).ok && Number.isSafeInteger(p.amountSats) && p.amountSats > 0 && typeof p.invoice === "string" && /^ln/i.test(p.invoice) && Number.isSafeInteger(p.endsAt);
+  if (!usable || p.endsAt <= now()) {
+    forgetPending();
+    return;
+  }
+  return p;
+}
+function keepPending(p) {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {}
+}
+function forgetPending() {
+  try {
+    localStorage.removeItem(PENDING_KEY);
+  } catch {}
+}
+let shownInvoice;
+function renderPending() {
+  const line = document.querySelector("#pending");
+  if (!line)
+    return;
+  const p = pendingFlex();
+  if (!p || p.pubkey !== session.pubkey) {
+    line.hidden = true;
+    line.innerHTML = "";
+    return;
+  }
+  line.hidden = false;
+  line.innerHTML = p.paid ? `Paid for <b>${esc(p.domain)}</b>. It shows on the board as soon as the receipt lands.` : `Your invoice for <b>${esc(p.domain)}</b> (${sats(p.amountSats)} sats) is waiting to be paid.
+    <span id="pending-left">Expires in ${clockText(p.endsAt - now())}</span>.
+    <button class="text-btn" type="button" id="pending-open">Open it</button>`;
+}
+function settlePending(verified) {
+  const p = pendingFlex();
+  if (p && verified.some((z) => z.request.id === p.requestId)) {
+    forgetPending();
+    state.flexed = p.domain;
+    const input = document.querySelector("#domain");
+    const typed = input ? tryNormaliseDomain(input.value) : undefined;
+    if (input && typed?.ok && typed.domain === p.domain)
+      input.value = "";
+    render();
+    document.querySelector(`[data-domain="${CSS.escape(p.domain)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast(`Paid: ${p.domain} is on the board.`);
+    const dialog = document.querySelector("#key-dialog");
+    if (dialog?.open && shownInvoice === p.requestId) {
+      markInvoicePaid($("#key-body"), `Paid. ${esc(p.domain)} is on the board.`);
+    }
+  }
+  renderPending();
+}
+async function checkPending() {
+  const p = pendingFlex();
+  if (!p || p.pubkey !== session.pubkey || !featuringEnabled())
+    return;
+  const provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => {
+    return;
+  });
+  if (!provider)
+    return;
+  const recipient = CONFIG.featuredRecipientPubkey.trim().toLowerCase();
+  const since = p.endsAt - INVOICE_OFFER_SECONDS - 600;
+  const receipts = await queryRelays(ZAP_RECEIPT_RELAYS, [{ ...flexZapFilter(recipient, since), authors: [provider] }], { timeoutMs: 5000 }).catch(() => []);
+  const verified = [];
+  for (const receipt of receipts) {
+    const result = verifyZapReceipt({ receipt, recipient, expectedProvider: provider });
+    if (result.ok)
+      verified.push(result.zap);
+  }
+  if (verified.some((z) => z.request.id === p.requestId)) {
+    settlePending(verified);
+    load();
+  }
 }
 function paintLive() {
   const badge = document.querySelector(".activity .live");
@@ -394,16 +565,39 @@ function paintLive() {
 }
 initTheme();
 initConnect();
-onSessionChange(() => render());
+onSessionChange(() => {
+  render();
+  renderPending();
+});
 $("#form").addEventListener("submit", flexIt);
-$("#c-minus").addEventListener("click", () => {
-  state.target = Math.min(board().length + 1, state.target + 1);
-  paintClaim();
+$("#pending").addEventListener("click", (e) => {
+  if (!e.target.closest("#pending-open"))
+    return;
+  const p = pendingFlex();
+  if (p && p.pubkey === session.pubkey)
+    showInvoice(p);
+  else
+    renderPending();
 });
-$("#c-plus").addEventListener("click", () => {
-  state.target = Math.max(1, state.target - 1);
-  paintClaim();
-});
+renderPending();
+setInterval(() => {
+  const line = document.querySelector("#pending");
+  if (!line || line.hidden)
+    return;
+  const p = pendingFlex();
+  const left = document.querySelector("#pending-left");
+  if (p && p.pubkey === session.pubkey && left)
+    left.textContent = `Expires in ${clockText(p.endsAt - now())}`;
+  else
+    renderPending();
+}, 1000);
+setInterval(() => {
+  if (!document.hidden)
+    checkPending();
+}, 1e4);
+$("#c-minus").addEventListener("click", () => stepAmount(false));
+$("#c-plus").addEventListener("click", () => stepAmount(true));
+loadPrice();
 $("#sort").addEventListener("change", (e) => {
   const value = e.target.value;
   const wantRange = value === "rank-all" ? "all" : "week";

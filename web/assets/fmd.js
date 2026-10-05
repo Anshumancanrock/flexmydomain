@@ -192,12 +192,25 @@ function tryNormaliseDomain(raw) {
   v = v.toLowerCase();
   if (v.endsWith("."))
     v = v.slice(0, -1);
-  while (v.startsWith("www.") && v.split(".").length > 2)
-    v = v.slice(4);
+  const parts = v.split(".");
+  let drop = 0;
+  while (parts[drop] === "www" && parts.length - drop > 2)
+    drop++;
+  if (drop > 0)
+    v = parts.slice(drop).join(".");
   if (v === "")
     return { ok: false, reason: "empty after normalisation" };
   if (v.includes(".."))
     return { ok: false, reason: "empty label" };
+  if ([...v].length > MAX_DOMAIN_LENGTH) {
+    return { ok: false, reason: `${[...v].length} characters exceeds the ${MAX_DOMAIN_LENGTH} limit` };
+  }
+  for (const label of v.split(".")) {
+    const points = [...label];
+    if (points.length > MAX_LABEL_LENGTH) {
+      return { ok: false, reason: `label "${points.slice(0, 20).join("")}…" exceeds ${MAX_LABEL_LENGTH} characters` };
+    }
+  }
   try {
     v = toASCII(v);
   } catch (err) {
@@ -2968,6 +2981,33 @@ function isEphemeral(kind) {
 function isAddressable(kind) {
   return kind >= 30000 && kind < 40000;
 }
+function matchFilter(filter, event) {
+  const list = (key) => Array.isArray(filter[key]) ? filter[key] : undefined;
+  if (list("ids") && !list("ids").includes(event.id))
+    return false;
+  if (list("authors") && !list("authors").includes(event.pubkey))
+    return false;
+  if (list("kinds") && !list("kinds").includes(event.kind))
+    return false;
+  if (typeof filter.since === "number" && event.created_at < filter.since)
+    return false;
+  if (typeof filter.until === "number" && event.created_at > filter.until)
+    return false;
+  for (const key of Object.keys(filter)) {
+    if (!/^#[a-zA-Z]$/.test(key))
+      continue;
+    const wanted = list(key);
+    if (!wanted)
+      continue;
+    const name = key.slice(1);
+    if (!event.tags.some((t) => t[0] === name && wanted.includes(t[1])))
+      return false;
+  }
+  return true;
+}
+function matchFilters(filters, event) {
+  return filters.some((f) => matchFilter(f, event));
+}
 
 // core/oracle/proof.ts
 var PROOF_VERSION = "fmd1";
@@ -3131,6 +3171,9 @@ async function createProof(params) {
     throw new Error("createProof: the signer changed the domain");
   return { domain, record: check.record, txt: encodeProofRecord(check.record), event };
 }
+function isValidIat(iat) {
+  return Number.isSafeInteger(iat) && iat >= 0 && iat <= 9999999999;
+}
 function assertIat(iat) {
   if (!Number.isSafeInteger(iat) || iat < 0) {
     throw new Error(`iat must be a non-negative integer of unix seconds, got ${JSON.stringify(iat)}`);
@@ -3183,15 +3226,16 @@ function verifyNip05(params) {
   if (!isHex32(params.pubkey))
     return { ok: false, reason: "pubkey is not 64 lowercase hex characters" };
   const names = namesForPubkey(params.document, params.pubkey);
-  if (names.length === 0) {
-    return { ok: false, reason: "no name in this document maps to that pubkey" };
+  if (!names.includes(ROOT_NAME)) {
+    return {
+      ok: false,
+      reason: names.length === 0 ? "no name in this document maps to that pubkey" : `the document maps ${names.map((n) => `${n}@${domain.domain}`).join(", ")} to that pubkey, but only _@${domain.domain} speaks for the domain`
+    };
   }
-  const ordered = names.includes(ROOT_NAME) ? [ROOT_NAME, ...names.filter((n) => n !== ROOT_NAME)] : names;
-  const best = ordered[0];
   return {
     ok: true,
-    names: ordered,
-    identifier: best === ROOT_NAME ? domain.domain : `${best}@${domain.domain}`
+    names: [ROOT_NAME, ...names.filter((n) => n !== ROOT_NAME)],
+    identifier: domain.domain
   };
 }
 function relayHints(document, pubkey) {
@@ -3248,7 +3292,7 @@ function rdapBaseUrls(bootstrap, domain) {
       }
     }
   }
-  return best.map((u) => u.endsWith("/") ? u : `${u}/`);
+  return best.filter((u) => /^https:\/\//i.test(u)).map((u) => u.endsWith("/") ? u : `${u}/`);
 }
 function rdapDomainUrl(baseUrl, domain) {
   const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
@@ -3321,7 +3365,7 @@ function findRegistrar(entities) {
           continue;
         const p = pid;
         if (typeof p.type === "string" && /iana/i.test(p.type) && p.identifier !== undefined) {
-          ianaId = String(p.identifier);
+          ianaId = String(p.identifier).trim();
         }
       }
     }
@@ -3352,24 +3396,42 @@ var REFUSING_STATUSES = [
 ];
 var WARNING_STATUSES = ["clienthold", "serverhold", "inactive", "pendingupdate"];
 var TRANSFER_LOCK_STATUS = "clienttransferprohibited";
+function isTransferLocked(statuses) {
+  return statuses.includes(TRANSFER_LOCK_STATUS) || statuses.includes("transferprohibited");
+}
 var PENDING_TRANSFER_STATUS = "pendingtransfer";
 function checkEligibility(params) {
   const facts = parseRdapDomain(params.response);
+  const findings = eligibilityFindings({ facts, now: params.now, domain: params.domain, bootstrap: params.bootstrap });
+  const days = (from) => from === undefined ? undefined : (params.now - from) / SECONDS_PER_DAY;
+  return {
+    listable: !findings.some((f) => f.level === "refuse"),
+    unlocked: !isTransferLocked(facts.statuses),
+    pendingTransfer: facts.statuses.includes(PENDING_TRANSFER_STATUS),
+    findings,
+    facts,
+    daysUntilExpiry: facts.expiration === undefined ? undefined : (facts.expiration - params.now) / SECONDS_PER_DAY,
+    daysSinceRegistration: days(facts.registration),
+    daysSinceTransfer: days(facts.lastTransfer)
+  };
+}
+function eligibilityFindings(params) {
+  const { facts } = params;
   const findings = [];
   const days = (from) => from === undefined ? undefined : (params.now - from) / SECONDS_PER_DAY;
-  const domain = tryNormaliseDomain(params.domain);
-  if (domain.ok && facts.domain && facts.domain !== domain.domain) {
+  const domain = params.domain === undefined ? undefined : tryNormaliseDomain(params.domain);
+  if (domain?.ok && facts.domain && facts.domain !== domain.domain) {
     findings.push({
       level: "refuse",
       code: "domain-mismatch",
       message: `the registry answered about ${facts.domain}, not ${domain.domain}`
     });
   }
-  if (params.bootstrap !== undefined && domain.ok && !tldHasRdap(params.bootstrap, domain.domain)) {
+  if (params.bootstrap !== undefined && domain?.ok && !tldHasRdap(params.bootstrap, domain.domain)) {
     findings.push({
       level: "refuse",
       code: "no-rdap",
-      message: `.${tldOf(domain.domain)} publishes no RDAP service, so nothing about this name can be verified`
+      message: `.${tldOf(domain.domain)} publishes no RDAP service over HTTPS, so nothing about this name can be verified`
     });
   }
   for (const status of REFUSING_STATUSES) {
@@ -3427,38 +3489,38 @@ function checkEligibility(params) {
       message: "the registry published no registration date, so age could not be checked"
     });
   }
-  const pendingTransfer = facts.statuses.includes(PENDING_TRANSFER_STATUS);
-  if (pendingTransfer) {
+  if (facts.statuses.includes(PENDING_TRANSFER_STATUS)) {
     findings.push({
       level: "warn",
       code: "pending-transfer",
       message: "a transfer is already underway on this name"
     });
   }
-  return {
-    listable: !findings.some((f) => f.level === "refuse"),
-    unlocked: !facts.statuses.includes(TRANSFER_LOCK_STATUS),
-    pendingTransfer,
-    findings,
-    facts,
-    daysUntilExpiry,
-    daysSinceRegistration,
-    daysSinceTransfer
-  };
+  return findings;
 }
-function fingerprintOf(facts) {
-  return { registrarIanaId: facts.registrarIanaId, nameservers: facts.nameservers.slice() };
+function rdapAnswerProblem(response, domain) {
+  if (typeof response !== "object" || response === null || Array.isArray(response)) {
+    return "the registry sent no domain object";
+  }
+  const r = response;
+  if (r.objectClassName !== undefined && r.objectClassName !== "domain") {
+    return `the registry sent a ${JSON.stringify(r.objectClassName)} object, not a domain`;
+  }
+  if (!Array.isArray(r.status))
+    return "the registry answer has no status list";
+  const truncated = [r.notices, r.remarks].some((list) => Array.isArray(list) && list.some((n) => typeof n === "object" && n !== null && /truncated due to (excessive load|unexplainable reasons)/i.test(String(n.type ?? ""))));
+  if (truncated)
+    return "the registry truncated its answer";
+  const wanted = tryNormaliseDomain(domain);
+  if (!wanted.ok)
+    return `${JSON.stringify(domain)} is not a domain`;
+  const echoed = parseRdapDomain(response).domain;
+  if (echoed !== wanted.domain)
+    return `the registry answered about ${echoed ?? "no name"}, not ${wanted.domain}`;
+  return;
 }
-function fingerprintMatches(observed, committed) {
-  if (committed.registrarIanaId && observed.registrarIanaId === committed.registrarIanaId)
-    return true;
-  if (committed.nameservers.length === 0)
-    return false;
-  const set = new Set(observed.nameservers);
-  return committed.nameservers.every((ns) => set.has(ns));
-}
-function snapshotHash(rawResponseText) {
-  return bytesToHex(sha256(utf8ToBytes(rawResponseText)));
+function snapshotHash(raw) {
+  return bytesToHex(sha256(typeof raw === "string" ? utf8ToBytes(raw) : raw));
 }
 
 // core/oracle/index.ts
@@ -4333,7 +4395,7 @@ function parseListing(event) {
       summary: tagValue(event, "summary") ?? "",
       description: event.content,
       status,
-      publishedAt: Number(tagValue(event, "published_at") ?? event.created_at),
+      publishedAt: numberTag(event, "published_at") ?? event.created_at,
       proof: { version: PROOF_VERSION, iat: Number(proofTag[1]), pubkey: event.pubkey, sig: proofTag[2] },
       rdapSnapshot: rdapTag && rdapTag.length >= 3 && /^[0-9a-f]{64}$/.test(rdapTag[1]) ? { hash: rdapTag[1], observedAt: Number(rdapTag[2]) } : undefined,
       registeredAt: numberTag(event, "fmd_created"),
@@ -4490,16 +4552,9 @@ function parseArbiterSet(event) {
     return;
   return event.tags.filter((t) => t[0] === "p" && isHex32(t[1])).map((t) => t[1]);
 }
-function arbiterIntersection(buyer, seller) {
-  if (buyer === undefined && seller === undefined)
-    return { arbiters: [], noArbiterPossible: true };
-  if (buyer === undefined)
-    return { arbiters: [...seller ?? []], noArbiterPossible: (seller ?? []).length === 0 };
-  if (seller === undefined)
-    return { arbiters: [...buyer], noArbiterPossible: buyer.length === 0 };
-  const sellerSet = new Set(seller);
-  const arbiters = buyer.filter((a) => sellerSet.has(a));
-  return { arbiters, noArbiterPossible: buyer.length === 0 && seller.length === 0 };
+function arbiterIntersection(buyer, seller, defaults = [], parties = []) {
+  const sellerSet = new Set(seller ?? defaults);
+  return { arbiters: [...new Set(buyer ?? defaults)].filter((a) => sellerSet.has(a) && !parties.includes(a)) };
 }
 function buildWatchlist(params) {
   const tags = [["d", WATCHLIST_D], ["title", "Domains I am watching"]];
@@ -6073,10 +6128,128 @@ function timingSafeEqual(a, b) {
     diff |= a[i] ^ b[i];
   return diff === 0;
 }
+// core/nostr/relays.ts
+var RELAY_LIST_KIND = 10002;
+function normaliseRelayUrl(raw) {
+  if (typeof raw !== "string")
+    return;
+  const trimmed = raw.trim();
+  if (trimmed === "")
+    return;
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return;
+  }
+  const protocol = url.protocol.toLowerCase();
+  if (protocol !== "wss:" && protocol !== "ws:")
+    return;
+  if (url.hostname === "")
+    return;
+  if (protocol === "wss:" && url.port === "443" || protocol === "ws:" && url.port === "80") {
+    url.port = "";
+  }
+  url.hash = "";
+  const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
+  return `${protocol}//${url.host.toLowerCase()}${path}${url.search}`;
+}
+function buildRelayList(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildRelayList: pubkey must be 64 lowercase hex characters");
+  const seen = new Set;
+  const tags = [];
+  for (const entry of params.relays) {
+    const url = normaliseRelayUrl(entry.url);
+    if (!url)
+      throw new Error(`buildRelayList: ${JSON.stringify(entry.url)} is not a relay URL`);
+    if (seen.has(url))
+      continue;
+    seen.add(url);
+    if (!entry.read && !entry.write)
+      continue;
+    if (entry.read && entry.write)
+      tags.push(["r", url]);
+    else
+      tags.push(["r", url, entry.write ? "write" : "read"]);
+  }
+  return { pubkey: params.pubkey, created_at: params.createdAt, kind: RELAY_LIST_KIND, tags, content: "" };
+}
+function parseRelayList(event) {
+  if (event.kind !== RELAY_LIST_KIND)
+    return [];
+  const byUrl = new Map;
+  for (const tag of event.tags) {
+    if (tag[0] !== "r")
+      continue;
+    const url = normaliseRelayUrl(tag[1]);
+    if (!url)
+      continue;
+    const marker = tag[2]?.toLowerCase();
+    const entry = {
+      url,
+      read: marker !== "write",
+      write: marker !== "read"
+    };
+    const existing = byUrl.get(url);
+    byUrl.set(url, existing ? { url, read: existing.read || entry.read, write: existing.write || entry.write } : entry);
+  }
+  return [...byUrl.values()];
+}
+var READ_FANOUT = 4;
+var WRITE_FANOUT = 5;
+function preferOwn(own, fallback, max) {
+  const mine = dedupe(own.map(normaliseRelayUrl).filter(isUrl));
+  if (mine.length > 0)
+    return mine.slice(0, max);
+  return dedupe(fallback.map(normaliseRelayUrl).filter(isUrl)).slice(0, max);
+}
+function writeRelaysFor(list, fallback, max = WRITE_FANOUT) {
+  return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max);
+}
+function readRelaysFor(list, fallback, max = READ_FANOUT) {
+  return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max);
+}
+function inboxRelaysFor(list, fallback, max = READ_FANOUT) {
+  return preferOwn(list.filter((r) => r.read).map((r) => r.url), fallback, max);
+}
+function planAuthorQuery(lists, authors, fallback, max = READ_FANOUT) {
+  const plan = new Map;
+  for (const author of authors) {
+    for (const relay of readRelaysFor(lists.get(author) ?? [], fallback, max)) {
+      const group = plan.get(relay);
+      if (group)
+        group.push(author);
+      else
+        plan.set(relay, [author]);
+    }
+  }
+  return plan;
+}
+function relayListFilter(pubkeys) {
+  return { kinds: [RELAY_LIST_KIND], authors: [...pubkeys] };
+}
+function isOwnRelayList(event, pubkey) {
+  return event.kind === RELAY_LIST_KIND && event.pubkey === pubkey && tagValue(event, "d") === undefined;
+}
+var isUrl = (u) => typeof u === "string";
+function dedupe(urls) {
+  const seen = new Set;
+  const out = [];
+  for (const url of urls) {
+    if (seen.has(url))
+      continue;
+    seen.add(url);
+    out.push(url);
+  }
+  return out;
+}
+
 // core/nostr/nip17.ts
 var CHAT_KIND = 14;
 var SEAL_KIND = 13;
 var GIFT_WRAP_KIND = 1059;
+var DM_RELAY_LIST_KIND = 10050;
 var MAX_TIMESTAMP_JITTER = 2 * 24 * 60 * 60;
 function buildRumor(params) {
   if (!isHex32(params.pubkey))
@@ -6110,6 +6283,9 @@ function giftWrap(params) {
     tags: [],
     content: encrypt(JSON.stringify(rumor), conversationKey(senderSecretKey, recipient), entropy.sealNonce)
   }, senderSecretKey);
+  return wrapSeal(sealed, recipient, entropy);
+}
+function wrapSeal(sealed, recipient, entropy) {
   const ephemeralPubkey = bytesToHex(schnorr.getPublicKey(entropy.ephemeralSecretKey));
   return signEvent({
     pubkey: ephemeralPubkey,
@@ -6119,18 +6295,30 @@ function giftWrap(params) {
     content: encrypt(JSON.stringify(sealed), conversationKey(entropy.ephemeralSecretKey, recipient), entropy.wrapNonce)
   }, entropy.ephemeralSecretKey);
 }
-function unwrap(wrap, recipientSecretKey) {
-  if (wrap.kind !== GIFT_WRAP_KIND)
-    return { ok: false, reason: `kind ${wrap.kind} is not ${GIFT_WRAP_KIND}` };
-  const outer = checkEvent(wrap);
-  if (!outer.ok)
-    return { ok: false, reason: `gift wrap: ${outer.reason}` };
-  let sealJson;
-  try {
-    sealJson = decrypt(wrap.content, conversationKey(recipientSecretKey, wrap.pubkey));
-  } catch (err) {
-    return { ok: false, reason: `gift wrap does not decrypt to this key: ${err.message}` };
+async function giftWrapWith(params) {
+  const { rumor, signer, recipient, entropy } = params;
+  if (!isHex32(recipient))
+    throw new Error("giftWrapWith: recipient must be 64 lowercase hex characters");
+  if (!signer.nip44)
+    throw new Error("giftWrapWith: this signer cannot encrypt private messages");
+  if (await signer.getPublicKey() !== rumor.pubkey) {
+    throw new Error("giftWrapWith: the rumor claims an author other than the signing key");
   }
+  const content = await signer.nip44.encrypt(recipient, JSON.stringify(rumor));
+  const sealed = await signer.signEvent({ pubkey: rumor.pubkey, created_at: entropy.sealCreatedAt, kind: SEAL_KIND, tags: [], content });
+  const checked = checkEvent(sealed);
+  if (!checked.ok || sealed.pubkey !== rumor.pubkey || sealed.kind !== SEAL_KIND) {
+    throw new Error("giftWrapWith: the signer returned a seal that does not verify");
+  }
+  return wrapSeal(sealed, recipient, entropy);
+}
+function outerProblem(wrap) {
+  if (wrap.kind !== GIFT_WRAP_KIND)
+    return `kind ${wrap.kind} is not ${GIFT_WRAP_KIND}`;
+  const outer = checkEvent(wrap);
+  return outer.ok ? undefined : `gift wrap: ${outer.reason}`;
+}
+function readSeal(sealJson) {
   let seal;
   try {
     seal = JSON.parse(sealJson);
@@ -6142,12 +6330,9 @@ function unwrap(wrap, recipientSecretKey) {
   const inner = checkEvent(seal);
   if (!inner.ok)
     return { ok: false, reason: `seal: ${inner.reason}` };
-  let rumorJson;
-  try {
-    rumorJson = decrypt(seal.content, conversationKey(recipientSecretKey, seal.pubkey));
-  } catch (err) {
-    return { ok: false, reason: `seal does not decrypt: ${err.message}` };
-  }
+  return { ok: true, seal };
+}
+function readRumor(seal, rumorJson) {
   let rumor;
   try {
     rumor = JSON.parse(rumorJson);
@@ -6160,16 +6345,236 @@ function unwrap(wrap, recipientSecretKey) {
   if ("sig" in rumor && rumor.sig !== undefined) {
     return { ok: false, reason: "a rumor must not be signed" };
   }
-  const expectedId = eventId(rumor);
+  let expectedId;
+  try {
+    expectedId = eventId(rumor);
+  } catch (err) {
+    return { ok: false, reason: `the message is malformed: ${err.message}` };
+  }
   if (rumor.id !== expectedId)
     return { ok: false, reason: "the message id does not cover its own content" };
   return { ok: true, rumor, sender: seal.pubkey, sealedAt: seal.created_at };
+}
+function unwrap(wrap, recipientSecretKey) {
+  const problem = outerProblem(wrap);
+  if (problem)
+    return { ok: false, reason: problem };
+  let sealJson;
+  try {
+    sealJson = decrypt(wrap.content, conversationKey(recipientSecretKey, wrap.pubkey));
+  } catch (err) {
+    return { ok: false, reason: `gift wrap does not decrypt to this key: ${err.message}` };
+  }
+  const sealed = readSeal(sealJson);
+  if (!sealed.ok)
+    return sealed;
+  let rumorJson;
+  try {
+    rumorJson = decrypt(sealed.seal.content, conversationKey(recipientSecretKey, sealed.seal.pubkey));
+  } catch (err) {
+    return { ok: false, reason: `seal does not decrypt: ${err.message}` };
+  }
+  return readRumor(sealed.seal, rumorJson);
+}
+async function unwrapWith(wrap, decryptFrom) {
+  const problem = outerProblem(wrap);
+  if (problem)
+    return { ok: false, reason: problem };
+  let sealJson;
+  try {
+    sealJson = await decryptFrom(wrap.pubkey, wrap.content);
+  } catch (err) {
+    return { ok: false, reason: `gift wrap does not decrypt to this key: ${err.message}` };
+  }
+  const sealed = readSeal(sealJson);
+  if (!sealed.ok)
+    return sealed;
+  let rumorJson;
+  try {
+    rumorJson = await decryptFrom(sealed.seal.pubkey, sealed.seal.content);
+  } catch (err) {
+    return { ok: false, reason: `seal does not decrypt: ${err.message}` };
+  }
+  return readRumor(sealed.seal, rumorJson);
 }
 function giftWrapFilter(recipient, since) {
   const filter = { kinds: [GIFT_WRAP_KIND], "#p": [recipient] };
   if (since !== undefined)
     filter.since = since - MAX_TIMESTAMP_JITTER;
   return filter;
+}
+function dmRelaysOf(event) {
+  if (event.kind !== DM_RELAY_LIST_KIND)
+    return [];
+  const urls = event.tags.filter((t) => t[0] === "relay").map((t) => normaliseRelayUrl(t[1])).filter((u) => u !== undefined);
+  return [...new Set(urls)];
+}
+function dmRelayListFilter(pubkeys) {
+  return { kinds: [DM_RELAY_LIST_KIND], authors: [...pubkeys] };
+}
+// core/nostr/nip42.ts
+var AUTH_KIND = 22242;
+var MAX_CHALLENGE = 1024;
+function buildAuthEvent(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildAuthEvent: pubkey must be 64 lowercase hex characters");
+  if (typeof params.challenge !== "string" || params.challenge === "" || params.challenge.length > MAX_CHALLENGE) {
+    throw new Error("buildAuthEvent: the relay sent no usable challenge");
+  }
+  if (!/^wss?:\/\//i.test(params.relay))
+    throw new Error("buildAuthEvent: the relay is not a websocket URL");
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: AUTH_KIND,
+    tags: [["relay", params.relay], ["challenge", params.challenge]],
+    content: ""
+  };
+}
+// core/nostr/escrow-chat.ts
+var ESCROW_CHAT_TAG = "fmd_escrow";
+var CHAT_CARD_TAG = "fmd_card";
+var MAX_CHAT_LENGTH = 2000;
+var CARD_LIMITS = { registrar: 100, account: 200, email: 254, code: 500, note: 1000 };
+var HIDDEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/;
+function chatRoleOf(parties, pubkey) {
+  return pubkey === parties.buyer ? "buyer" : pubkey === parties.seller ? "seller" : pubkey === parties.arbiter ? "arbiter" : undefined;
+}
+function keyOfRole(parties, role) {
+  return role === "buyer" ? parties.buyer : role === "seller" ? parties.seller : parties.arbiter;
+}
+function partiesProblem(p) {
+  if (!isHex32(p.id))
+    return "the escrow id is malformed";
+  for (const key of [p.buyer, p.seller, p.arbiter])
+    if (!isHex32(key))
+      return "a party's key is malformed";
+  if (new Set([p.buyer, p.seller, p.arbiter]).size !== 3)
+    return "the three keys must differ";
+  return;
+}
+function chatPartners(role) {
+  return role === "buyer" ? ["seller", "arbiter"] : role === "seller" ? ["buyer", "arbiter"] : ["buyer", "seller"];
+}
+function cardProblem(card, from, to) {
+  if (typeof card !== "object" || card === null || Array.isArray(card))
+    return "a card is an object";
+  const c = card;
+  const text = (k, required) => {
+    const v = c[k];
+    if (typeof v !== "string")
+      return `${k} is text`;
+    if (required && v.trim() === "")
+      return `${k} is empty`;
+    if (v.length > CARD_LIMITS[k])
+      return `${k} is at most ${CARD_LIMITS[k]} characters`;
+    if (HIDDEN.test(v) || k !== "note" && /[\t\n]/.test(v))
+      return `${k} has hidden characters`;
+    return;
+  };
+  if (c.kind === "transfer-to") {
+    if (from !== "buyer" || to !== "seller")
+      return "only the buyer tells the seller where to transfer the domain";
+    return text("registrar", false) ?? text("account", true) ?? text("email", false);
+  }
+  if (c.kind === "transfer-sent") {
+    if (from !== "seller" || to !== "buyer")
+      return "only the seller tells the buyer how the domain was sent";
+    if (c.method !== "push" && c.method !== "code")
+      return "the method is push or code";
+    return text("code", c.method === "code") ?? text("note", false);
+  }
+  return "unknown card";
+}
+var cardOf = (c) => c.kind === "transfer-to" ? { kind: c.kind, registrar: c.registrar.trim(), account: c.account.trim(), email: c.email.trim() } : { kind: c.kind, method: c.method, code: c.code.trim(), note: c.note.trim() };
+function buildEscrowMessage(params) {
+  const problem = partiesProblem(params.parties);
+  if (problem)
+    throw new Error(`buildEscrowMessage: ${problem}`);
+  const from = chatRoleOf(params.parties, params.sender);
+  const to = chatRoleOf(params.parties, params.recipient);
+  if (!from)
+    throw new Error("buildEscrowMessage: only the escrow's own keys write in its chats");
+  if (!to || to === from)
+    throw new Error("buildEscrowMessage: a message goes to one of the other two keys");
+  const text = typeof params.content === "string" ? params.content.trim() : "";
+  if (text === "")
+    throw new Error("buildEscrowMessage: the message is empty");
+  if (text.length > MAX_CHAT_LENGTH)
+    throw new Error(`buildEscrowMessage: a message is at most ${MAX_CHAT_LENGTH} characters`);
+  const tags = [[ESCROW_CHAT_TAG, params.parties.id]];
+  if (params.card) {
+    const bad = cardProblem(params.card, from, to);
+    if (bad)
+      throw new Error(`buildEscrowMessage: ${bad}`);
+    tags.push([CHAT_CARD_TAG, JSON.stringify(cardOf(params.card))]);
+  }
+  return buildRumor({
+    pubkey: params.sender,
+    recipient: params.recipient,
+    content: text,
+    createdAt: params.createdAt,
+    subject: `flexmydomain escrow ${params.parties.id.slice(0, 12)}`,
+    tags
+  });
+}
+function escrowChats(found, parties, reader) {
+  const me = chatRoleOf(parties, reader);
+  const chats = new Map;
+  if (partiesProblem(parties) || !me)
+    return new Map;
+  for (const partner of chatPartners(me))
+    chats.set(partner, new Map);
+  for (const { rumor, sender } of found) {
+    const from = chatRoleOf(parties, sender);
+    if (!from || rumor.pubkey !== sender || rumor.kind !== CHAT_KIND)
+      continue;
+    if (typeof rumor.content !== "string" || rumor.content.trim() === "" || rumor.content.length > MAX_CHAT_LENGTH)
+      continue;
+    if (!Number.isSafeInteger(rumor.created_at) || rumor.created_at < 0)
+      continue;
+    const named = rumor.tags.filter((t) => t[0] === ESCROW_CHAT_TAG);
+    if (named.length !== 1 || named[0][1] !== parties.id)
+      continue;
+    const ps = rumor.tags.filter((t) => t[0] === "p");
+    if (ps.length !== 1)
+      continue;
+    const to = chatRoleOf(parties, ps[0][1]);
+    if (!to || to === from || from !== me && to !== me)
+      continue;
+    const partner = from === me ? to : from;
+    let card;
+    const cards = rumor.tags.filter((t) => t[0] === CHAT_CARD_TAG);
+    if (cards.length === 1) {
+      try {
+        const parsed = JSON.parse(cards[0][1]);
+        if (!cardProblem(parsed, from, to))
+          card = cardOf(parsed);
+      } catch {}
+    }
+    chats.get(partner).set(rumor.id, {
+      id: rumor.id,
+      from,
+      to,
+      author: sender,
+      at: rumor.created_at,
+      text: rumor.content.trim(),
+      ...card ? { card } : {}
+    });
+  }
+  const sorted = new Map;
+  for (const [partner, messages] of chats) {
+    sorted.set(partner, [...messages.values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1)));
+  }
+  return sorted;
+}
+function latestCard(messages, kind) {
+  for (let i = messages.length - 1;i >= 0; i--) {
+    const card = messages[i].card;
+    if (card?.kind === kind)
+      return card;
+  }
+  return;
 }
 // core/escrow/tagged.ts
 var TAG_TAPLEAF = "TapLeaf";
@@ -6324,6 +6729,19 @@ function numsInternalKey() {
   return Uint8Array.from(NUMS_BYTES);
 }
 var CURVE_ORDER = secp256k1.Point.Fn.ORDER;
+var BINDING_TAG = "fmd/escrow-binding";
+function bindingInternalKey(binding) {
+  if (binding === undefined)
+    return numsInternalKey();
+  if (!(binding instanceof Uint8Array) || binding.length !== 32)
+    throw new Error("bindingInternalKey: expected 32 bytes");
+  const r = bytesToNumberBE2(taggedHash2(BINDING_TAG, binding));
+  if (r === 0n || r >= CURVE_ORDER)
+    throw new Error("bindingInternalKey: the binding gives an unusable scalar");
+  const H = schnorr.utils.lift_x(bytesToNumberBE2(NUMS_BYTES));
+  const P = H.add(secp256k1.Point.BASE.multiply(r)).toAffine();
+  return numberToBytesBE3(P.x, 32);
+}
 var NETWORK_HRP = Object.freeze({
   mainnet: "bc",
   testnet: "tb",
@@ -6383,7 +6801,8 @@ var ALLOWED_PARAMS = [
   "seller",
   "arbiter",
   "timeoutTo",
-  "timeoutBlocks"
+  "timeoutBlocks",
+  "binding"
 ];
 function validateParams(params) {
   if (params === null || typeof params !== "object") {
@@ -6418,7 +6837,14 @@ function validateParams(params) {
     throw new Error(`timeoutTo: must be 'buyer' or 'seller', got ${JSON.stringify(params.timeoutTo)}`);
   }
   assertTimeoutBlocks(params.timeoutBlocks);
-  return { buyer, seller, arbiter, timeoutTo: params.timeoutTo, timeoutBlocks: params.timeoutBlocks };
+  let binding;
+  if ("binding" in params && params.binding !== undefined) {
+    if (!(params.binding instanceof Uint8Array) || params.binding.length !== 32) {
+      throw new Error("binding: expected 32 bytes, the escrow id");
+    }
+    binding = copy(params.binding);
+  }
+  return { buyer, seller, arbiter, timeoutTo: params.timeoutTo, timeoutBlocks: params.timeoutBlocks, binding };
 }
 function leafNode(leaf) {
   return { kind: "leaf", leaf, hash: leaf.hash };
@@ -6524,7 +6950,8 @@ function buildTree(params) {
   const merkleRoot = root.hash;
   const paths = new Map;
   collectPaths(root, [], paths);
-  const { tweak, outputKey, parity } = deriveOutputKey(NUMS_BYTES, merkleRoot);
+  const internalKey = bindingInternalKey(p.binding);
+  const { tweak, outputKey, parity } = deriveOutputKey(internalKey, merkleRoot);
   const scriptPubKey = taprootScriptPubKey(outputKey);
   const leafList = drafts.map((d) => {
     const merklePath = paths.get(d.name);
@@ -6536,7 +6963,7 @@ function buildTree(params) {
       leafVersion: TAP_LEAF_VERSION,
       hash: d.hash,
       merklePath: freezeInPlace(merklePath),
-      controlBlock: concatBytes(Uint8Array.of(TAP_LEAF_VERSION | parity), NUMS_BYTES, ...merklePath),
+      controlBlock: concatBytes(Uint8Array.of(TAP_LEAF_VERSION | parity), internalKey, ...merklePath),
       scriptKeyOrder: freezeInPlace(d.scriptKeyOrder),
       signatureOrder: freezeInPlace(signatureOrder),
       witnessStack: freezeInPlace([
@@ -6560,13 +6987,14 @@ function buildTree(params) {
       seller: p.seller,
       ...p.arbiter ? { arbiter: p.arbiter } : {},
       timeoutTo: p.timeoutTo,
-      timeoutBlocks: p.timeoutBlocks
+      timeoutBlocks: p.timeoutBlocks,
+      ...p.binding ? { binding: p.binding } : {}
     }),
     leaves,
     leafList,
     branches,
     merkleRoot,
-    internalKey: numsInternalKey(),
+    internalKey: copy(internalKey),
     tweak,
     outputKey,
     parity,
@@ -6580,773 +7008,104 @@ function buildTree(params) {
 var CONTROL_BLOCK_MAX_NODES = 128;
 var CONTROL_BLOCK_MAX_SIZE = 33 + 32 * CONTROL_BLOCK_MAX_NODES;
 
-// core/nostr/escrow.ts
-var ESCROW_KIND = 30078;
-var ESCROW_D_PREFIX = "fmd:escrow:";
-var ESCROW_TOPIC = "flexmydomain";
-var ESCROW_VERSION = 1;
-function deriveEscrowId(params) {
-  const preimage = concatBytes(utf8ToBytes("fmd:escrow:v1"), hexToBytes(params.salt), params.buyer, params.seller, params.arbiter ?? new Uint8Array(32), utf8ToBytes(`${params.timeoutTo}:${params.timeoutBlocks}:${params.network}:${params.amountSats}:${normaliseDomain(params.domain)}`));
-  return bytesToHex(sha256(preimage)).slice(0, 32);
+// core/escrow/address.ts
+var base58check = createBase58check(sha256);
+var BASE58_VERSIONS = {
+  0: { type: "p2pkh", chain: "mainnet" },
+  5: { type: "p2sh", chain: "mainnet" },
+  111: { type: "p2pkh", chain: "test" },
+  196: { type: "p2sh", chain: "test" }
+};
+var HRP_CHAIN = new Map([
+  ["bc", "mainnet"],
+  ["tb", "test"],
+  ["bcrt", "regtest"]
+]);
+function stripUri(input) {
+  let s = input.trim();
+  if (/^bitcoin:/i.test(s))
+    s = s.slice("bitcoin:".length);
+  const query = s.indexOf("?");
+  return query === -1 ? s : s.slice(0, query);
 }
-function escrowAddress(params) {
-  const tree = buildTree({
-    buyer: params.buyer,
-    seller: params.seller,
-    arbiter: params.arbiter,
-    timeoutTo: params.timeoutTo,
-    timeoutBlocks: params.timeoutBlocks
-  });
-  return tree.addresses[params.network];
-}
-function buildEscrowEvent(params) {
-  if (!isHex32(params.pubkey))
-    throw new Error("buildEscrowEvent: pubkey must be 64 lowercase hex characters");
-  if (!/^[0-9a-f]{64}$/.test(params.salt))
-    throw new Error("buildEscrowEvent: salt must be 64 lowercase hex characters");
-  if (!Number.isSafeInteger(params.amountSats) || params.amountSats <= 0) {
-    throw new Error("buildEscrowEvent: amountSats must be a positive integer");
+function decodeSegwit(address) {
+  const asBech32 = bech32.decodeUnsafe(address, 90);
+  const asBech32m = bech32m.decodeUnsafe(address, 90);
+  const decoded = asBech32 ?? asBech32m;
+  if (!decoded)
+    return;
+  const chain2 = HRP_CHAIN.get(decoded.prefix);
+  if (!chain2)
+    throw new Error(`"${decoded.prefix}1…" is not a bitcoin address prefix; expected bc1, tb1 or bcrt1.`);
+  const [version, ...rest] = decoded.words;
+  if (version === undefined || version > 16)
+    throw new Error("That address has no valid witness version.");
+  const program = bech32.fromWordsUnsafe(rest);
+  if (!program)
+    throw new Error("That address has invalid padding, so it is corrupt or mistyped.");
+  if (version === 0) {
+    if (!asBech32)
+      throw new Error("A version 0 address must use the bech32 checksum; this one uses bech32m.");
+    if (program.length === 20)
+      return { type: "p2wpkh", chain: chain2, scriptPubKey: new Uint8Array([0, 20, ...program]) };
+    if (program.length === 32)
+      return { type: "p2wsh", chain: chain2, scriptPubKey: new Uint8Array([0, 32, ...program]) };
+    throw new Error(`A version 0 program is 20 or 32 bytes; this one is ${program.length}.`);
   }
-  const domain = normaliseDomain(params.domain);
-  const id = deriveEscrowId(params);
-  const address = escrowAddress(params);
-  const tags = [
-    ["d", ESCROW_D_PREFIX + id],
-    ["t", ESCROW_TOPIC],
-    ["fmd_domain", domain],
-    ["p", bytesToHex(params.buyer)],
-    ["p", bytesToHex(params.seller)]
-  ];
-  if (params.arbiter)
-    tags.push(["p", bytesToHex(params.arbiter)]);
-  if (params.listing)
-    tags.push(["a", params.listing]);
-  return {
-    pubkey: params.pubkey,
-    created_at: params.createdAt,
-    kind: ESCROW_KIND,
-    tags,
-    content: JSON.stringify({
-      v: ESCROW_VERSION,
-      id,
-      salt: params.salt,
-      buyer_x: bytesToHex(params.buyer),
-      seller_x: bytesToHex(params.seller),
-      arbiter_x: params.arbiter ? bytesToHex(params.arbiter) : null,
-      timeout_to: params.timeoutTo,
-      timeout_blocks: params.timeoutBlocks,
-      network: params.network,
-      address,
-      amount_sats: params.amountSats,
-      domain,
-      ...params.listing ? { listing: params.listing } : {},
-      ...params.funding ? { funding: params.funding } : {},
-      ...params.commitment ? { commitment: params.commitment } : {},
-      ...params.deadlines ? { deadlines: params.deadlines } : {},
-      ...params.rdapSnapshots?.length ? { rdap_snapshots: params.rdapSnapshots } : {},
-      ...params.settlementTxid ? { settlement_txid: params.settlementTxid } : {}
-    })
-  };
-}
-function parseEscrowEvent(event) {
-  if (event.kind !== ESCROW_KIND)
-    return { ok: false, reason: `kind ${event.kind} is not ${ESCROW_KIND}` };
-  const d = tagValue(event, "d");
-  if (!d || !d.startsWith(ESCROW_D_PREFIX)) {
-    return { ok: false, reason: `d tag ${JSON.stringify(d ?? null)} is not a ${ESCROW_D_PREFIX}* identifier` };
+  if (!asBech32m)
+    throw new Error("A version 1+ address must use the bech32m checksum (BIP-350); this one uses bech32.");
+  if (version === 1) {
+    if (program.length !== 32)
+      throw new Error(`A taproot program is 32 bytes; this one is ${program.length}.`);
+    return { type: "p2tr", chain: chain2, scriptPubKey: new Uint8Array([81, 32, ...program]) };
   }
-  let body;
+  throw new Error(`Witness version ${version} is not defined yet, so anyone could spend a payment to it. Use a bc1q or bc1p address.`);
+}
+function decodeBase58(address) {
+  let payload;
   try {
-    body = JSON.parse(event.content);
-  } catch (err) {
-    return { ok: false, reason: `content is not JSON: ${err.message}` };
+    payload = base58check.decode(address);
+  } catch {
+    return;
   }
-  const str = (k) => typeof body[k] === "string" ? body[k] : undefined;
-  const num2 = (k) => typeof body[k] === "number" && Number.isSafeInteger(body[k]) ? body[k] : undefined;
-  const salt = str("salt");
-  const buyer = str("buyer_x");
-  const seller = str("seller_x");
-  const arbiter = str("arbiter_x") ?? undefined;
-  const timeoutTo = body.timeout_to === "seller" ? "seller" : body.timeout_to === "buyer" ? "buyer" : undefined;
-  const timeoutBlocks = num2("timeout_blocks");
-  const network = str("network");
-  const address = str("address");
-  const amountSats = num2("amount_sats");
-  const domain = tryNormaliseDomain(body.domain);
-  if (!salt || !/^[0-9a-f]{64}$/.test(salt))
-    return { ok: false, reason: "no salt" };
-  if (!isHex32(buyer) || !isHex32(seller))
-    return { ok: false, reason: "buyer or seller key is malformed" };
-  if (arbiter !== undefined && !isHex32(arbiter))
-    return { ok: false, reason: "arbiter key is malformed" };
-  if (!timeoutTo)
-    return { ok: false, reason: "no timeout polarity" };
-  if (timeoutBlocks === undefined || timeoutBlocks < 1 || timeoutBlocks > 65535) {
-    return { ok: false, reason: "timeout_blocks is out of range" };
-  }
-  if (!network || !["mainnet", "testnet", "signet", "regtest"].includes(network)) {
-    return { ok: false, reason: `unknown network ${JSON.stringify(network ?? null)}` };
-  }
+  if (payload.length !== 21)
+    throw new Error("That base58 address does not carry a 20-byte hash.");
+  const kind = BASE58_VERSIONS[payload[0]];
+  if (!kind)
+    throw new Error(`Base58 version byte 0x${payload[0].toString(16).padStart(2, "0")} is not a bitcoin address.`);
+  const hash = payload.slice(1);
+  const scriptPubKey = kind.type === "p2pkh" ? new Uint8Array([118, 169, 20, ...hash, 136, 172]) : new Uint8Array([169, 20, ...hash, 135]);
+  return { type: kind.type, chain: kind.chain, scriptPubKey };
+}
+function decodeAddress(input) {
+  const address = stripUri(String(input));
   if (!address)
-    return { ok: false, reason: "no address" };
-  if (amountSats === undefined || amountSats <= 0)
-    return { ok: false, reason: "no amount" };
-  if (!domain.ok)
-    return { ok: false, reason: `domain: ${domain.reason}` };
-  const params = {
-    salt,
-    buyer: hexToBytes(buyer),
-    seller: hexToBytes(seller),
-    ...arbiter ? { arbiter: hexToBytes(arbiter) } : {},
-    timeoutTo,
-    timeoutBlocks,
-    network,
-    amountSats,
-    domain: domain.domain
-  };
-  let derived;
-  try {
-    derived = escrowAddress(params);
-  } catch (err) {
-    return { ok: false, reason: `the parameters do not produce a valid output: ${err.message}` };
+    throw new Error("Enter an address.");
+  const segwit = decodeSegwit(address);
+  if (segwit)
+    return segwit;
+  const legacy = decodeBase58(address);
+  if (legacy)
+    return legacy;
+  if (/^(bc|tb|bcrt)1/i.test(address)) {
+    throw new Error("That address fails its checksum: a character is wrong or missing. Copy it again from your wallet.");
   }
-  if (derived !== address) {
-    return {
-      ok: false,
-      reason: `the stated address is not the one these keys produce (derived ${derived}); do not fund it`
-    };
+  throw new Error("That is not a bitcoin address this page can verify. Copy it again from your wallet.");
+}
+function chainOf(network) {
+  return network === "mainnet" ? "mainnet" : network === "regtest" ? "regtest" : "test";
+}
+function addressToScript(input, network) {
+  const decoded = decodeAddress(input);
+  const want = chainOf(network);
+  const ok = decoded.chain === want || want === "regtest" && (decoded.type === "p2pkh" || decoded.type === "p2sh") && decoded.chain === "test";
+  if (!ok) {
+    const prefix = NETWORK_HRP[network];
+    throw new Error(`That is a ${decoded.chain === "test" ? "test-network" : decoded.chain} address, and this escrow is on ${network}. ` + `Use an address from a ${network} wallet (${prefix}1…).`);
   }
-  const id = deriveEscrowId(params);
-  if (d !== ESCROW_D_PREFIX + id) {
-    return { ok: false, reason: `the d tag does not match the id these parameters derive (${id})` };
-  }
-  const funding = body.funding;
-  const commitment = body.commitment;
-  const deadlines = body.deadlines ?? {};
-  return {
-    ok: true,
-    view: {
-      version: typeof body.v === "number" ? body.v : 0,
-      id,
-      author: event.pubkey,
-      salt,
-      buyer,
-      seller,
-      arbiter,
-      timeoutTo,
-      timeoutBlocks,
-      network,
-      address,
-      amountSats,
-      domain: domain.domain,
-      listing: str("listing"),
-      funding: funding && typeof funding.txid === "string" && /^[0-9a-f]{64}$/.test(funding.txid) ? {
-        txid: funding.txid,
-        vout: Number(funding.vout ?? 0),
-        amountSats: Number(funding.amount_sats ?? funding.amountSats ?? 0)
-      } : undefined,
-      commitment: commitment ? {
-        registrarIanaId: commitment.registrarIanaId ?? commitment.registrar_iana_id,
-        nameservers: Array.isArray(commitment.nameservers) ? commitment.nameservers : []
-      } : undefined,
-      deadlines: {
-        fundBy: deadlines.fundBy ?? deadlines.fund_by,
-        transferBy: deadlines.transferBy ?? deadlines.transfer_by,
-        respondBy: deadlines.respondBy ?? deadlines.respond_by
-      },
-      rdapSnapshots: Array.isArray(body.rdap_snapshots) ? body.rdap_snapshots.filter((h) => typeof h === "string") : [],
-      settlementTxid: str("settlement_txid"),
-      publishedAt: event.created_at,
-      event
-    }
-  };
-}
-function compareViews(views) {
-  if (views.length === 0)
-    return { agreed: true, disagreements: [], participants: [], strangers: [] };
-  const first = views[0];
-  const members = new Set([first.buyer, first.seller, ...first.arbiter ? [first.arbiter] : []]);
-  const participants = views.filter((v) => members.has(v.author));
-  const strangers = views.filter((v) => !members.has(v.author));
-  const latest = new Map;
-  for (const view of participants) {
-    const current2 = latest.get(view.author);
-    if (!current2 || view.publishedAt > current2.publishedAt)
-      latest.set(view.author, view);
-  }
-  const current = [...latest.values()];
-  const fields = [
-    ["address", (v) => v.address],
-    ["amount", (v) => String(v.amountSats)],
-    ["domain", (v) => v.domain],
-    ["buyer key", (v) => v.buyer],
-    ["seller key", (v) => v.seller],
-    ["arbiter key", (v) => v.arbiter ?? "none"],
-    ["timeout polarity", (v) => v.timeoutTo],
-    ["timelock", (v) => String(v.timeoutBlocks)],
-    ["network", (v) => v.network],
-    ["funding outpoint", (v) => v.funding ? `${v.funding.txid}:${v.funding.vout}` : "none"],
-    ["settlement txid", (v) => v.settlementTxid ?? "none"]
-  ];
-  const disagreements = [];
-  for (const [field, read] of fields) {
-    const seen = new Map;
-    for (const view of current) {
-      const value = read(view);
-      const authors = seen.get(value);
-      if (authors)
-        authors.push(view.author);
-      else
-        seen.set(value, [view.author]);
-    }
-    if (seen.size > 1) {
-      disagreements.push({
-        field,
-        values: [...seen.entries()].flatMap(([value, authors]) => authors.map((author) => ({ author, value })))
-      });
-    }
-  }
-  return {
-    agreed: disagreements.length === 0,
-    disagreements,
-    participants: current,
-    strangers,
-    newest: current.sort((a, b) => b.publishedAt - a.publishedAt)[0]
-  };
-}
-function deriveEscrowState(params) {
-  if (params.spent) {
-    return { state: "settled", reason: "the escrow output has been spent, so the trade is over one way or another" };
-  }
-  if (params.funded) {
-    if (params.transferPending) {
-      return { state: "transferring", reason: "the registry shows a transfer underway on this domain" };
-    }
-    return { state: "funded", reason: "a confirmed payment is sitting in the escrow output" };
-  }
-  const fundBy = params.view.deadlines.fundBy;
-  if (fundBy !== undefined && params.now !== undefined && params.now > fundBy) {
-    return { state: "expired", reason: "the funding deadline passed and nothing was paid" };
-  }
-  return { state: "open", reason: "published, and waiting to be funded" };
-}
-function escrowFilter(id) {
-  return { kinds: [ESCROW_KIND], "#d": [ESCROW_D_PREFIX + id] };
-}
-function escrowsForFilter(pubkeys) {
-  return { kinds: [ESCROW_KIND], "#p": [...pubkeys] };
-}
-// core/nostr/handshake.ts
-var INVITE_PREFIX = "fmdinv1";
-var REPLY_PREFIX = "fmdrep1";
-var HEX32 = /^[0-9a-f]{64}$/;
-var NETWORKS = ["mainnet", "testnet", "signet", "regtest"];
-function encode(prefix, value) {
-  return prefix + base64urlnopad.encode(new TextEncoder().encode(JSON.stringify(value)));
-}
-function decode(prefix, text) {
-  if (typeof text !== "string")
-    return { ok: false, reason: "not a string" };
-  const trimmed = text.trim().replace(/\s+/g, "");
-  if (!trimmed.startsWith(prefix)) {
-    return { ok: false, reason: `this should start with "${prefix}"` };
-  }
-  try {
-    const json = new TextDecoder().decode(base64urlnopad.decode(trimmed.slice(prefix.length)));
-    const value = JSON.parse(json);
-    if (typeof value !== "object" || value === null)
-      return { ok: false, reason: "not an object" };
-    return { ok: true, value };
-  } catch {
-    return { ok: false, reason: "it did not decode: a character is missing or wrong" };
-  }
-}
-function readCommitment(raw) {
-  if (typeof raw !== "object" || raw === null)
-    return;
-  const c = raw;
-  const nameservers = Array.isArray(c.nameservers) ? c.nameservers.filter((n) => typeof n === "string").map((n) => n.trim().toLowerCase()) : [];
-  const registrarIanaId = typeof c.registrarIanaId === "string" && c.registrarIanaId.trim() !== "" ? c.registrarIanaId.trim() : undefined;
-  if (!registrarIanaId && nameservers.length === 0)
-    return;
-  return { registrarIanaId, nameservers };
-}
-function encodeInvite(invite) {
-  if (!HEX32.test(invite.salt))
-    throw new Error("encodeInvite: salt must be 64 lowercase hex characters");
-  if (!HEX32.test(invite.initiatorKey))
-    throw new Error("encodeInvite: initiatorKey must be x-only hex");
-  if (invite.arbiter !== undefined && !HEX32.test(invite.arbiter)) {
-    throw new Error("encodeInvite: arbiter must be x-only hex");
-  }
-  if (!Number.isSafeInteger(invite.amountSats) || invite.amountSats <= 0) {
-    throw new Error("encodeInvite: amountSats must be a positive integer");
-  }
-  if (invite.initiatorRole === "buyer" && !invite.commitment) {
-    throw new Error("encodeInvite: a buyer must commit to where they will receive the domain");
-  }
-  return encode(INVITE_PREFIX, {
-    v: 1,
-    salt: invite.salt,
-    domain: normaliseDomain(invite.domain),
-    amountSats: invite.amountSats,
-    network: invite.network,
-    timeoutBlocks: invite.timeoutBlocks,
-    timeoutTo: invite.timeoutTo,
-    ...invite.arbiter ? { arbiter: invite.arbiter } : {},
-    initiatorRole: invite.initiatorRole,
-    initiatorKey: invite.initiatorKey,
-    ...invite.commitment ? { commitment: invite.commitment } : {}
-  });
-}
-function decodeInvite(text) {
-  const parsed = decode(INVITE_PREFIX, text);
-  if (!parsed.ok)
-    return parsed;
-  const v = parsed.value;
-  if (v.v !== 1)
-    return { ok: false, reason: `unsupported invite version ${String(v.v)}` };
-  if (typeof v.salt !== "string" || !HEX32.test(v.salt))
-    return { ok: false, reason: "the invite has no valid salt" };
-  if (typeof v.initiatorKey !== "string" || !HEX32.test(v.initiatorKey)) {
-    return { ok: false, reason: "the invite has no valid escrow key" };
-  }
-  if (v.arbiter !== undefined && (typeof v.arbiter !== "string" || !HEX32.test(v.arbiter))) {
-    return { ok: false, reason: "the arbiter key is malformed" };
-  }
-  const domain = tryNormaliseDomain(v.domain);
-  if (!domain.ok)
-    return { ok: false, reason: `domain: ${domain.reason}` };
-  const amountSats = Number(v.amountSats);
-  if (!Number.isSafeInteger(amountSats) || amountSats <= 0)
-    return { ok: false, reason: "the amount is invalid" };
-  if (!NETWORKS.includes(v.network))
-    return { ok: false, reason: "unknown network" };
-  const timeoutBlocks = Number(v.timeoutBlocks);
-  if (!Number.isInteger(timeoutBlocks) || timeoutBlocks < 1 || timeoutBlocks > 65535) {
-    return { ok: false, reason: "the timelock is out of range" };
-  }
-  if (v.timeoutTo !== "buyer" && v.timeoutTo !== "seller")
-    return { ok: false, reason: "no timeout polarity" };
-  if (v.initiatorRole !== "buyer" && v.initiatorRole !== "seller")
-    return { ok: false, reason: "no role" };
-  const commitment = readCommitment(v.commitment);
-  if (v.initiatorRole === "buyer" && !commitment) {
-    return { ok: false, reason: "the buyer did not say where they will receive the domain" };
-  }
-  return {
-    ok: true,
-    invite: {
-      salt: v.salt,
-      domain: domain.domain,
-      amountSats,
-      network: v.network,
-      timeoutBlocks,
-      timeoutTo: v.timeoutTo,
-      arbiter: typeof v.arbiter === "string" ? v.arbiter : undefined,
-      initiatorRole: v.initiatorRole,
-      initiatorKey: v.initiatorKey,
-      commitment
-    }
-  };
-}
-function encodeReply(reply) {
-  if (!HEX32.test(reply.joinerKey))
-    throw new Error("encodeReply: joinerKey must be x-only hex");
-  if (!HEX32.test(reply.salt))
-    throw new Error("encodeReply: salt must be 64 lowercase hex characters");
-  return encode(REPLY_PREFIX, {
-    v: 1,
-    salt: reply.salt,
-    joinerKey: reply.joinerKey,
-    ...reply.commitment ? { commitment: reply.commitment } : {}
-  });
-}
-function decodeReply(text, invite) {
-  const parsed = decode(REPLY_PREFIX, text);
-  if (!parsed.ok)
-    return parsed;
-  const v = parsed.value;
-  if (v.v !== 1)
-    return { ok: false, reason: `unsupported reply version ${String(v.v)}` };
-  if (typeof v.joinerKey !== "string" || !HEX32.test(v.joinerKey)) {
-    return { ok: false, reason: "the reply has no valid escrow key" };
-  }
-  if (v.salt !== invite.salt) {
-    return { ok: false, reason: "this reply answers a different escrow: the salts do not match" };
-  }
-  if (v.joinerKey === invite.initiatorKey) {
-    return { ok: false, reason: "the reply carries your own key back; ask them to join from the invite" };
-  }
-  if (invite.arbiter && v.joinerKey === invite.arbiter) {
-    return { ok: false, reason: "the reply carries the arbiter key, and each party needs its own" };
-  }
-  const commitment = readCommitment(v.commitment);
-  const joinerIsBuyer = invite.initiatorRole === "seller";
-  if (joinerIsBuyer && !commitment) {
-    return { ok: false, reason: "the buyer did not say where they will receive the domain" };
-  }
-  return { ok: true, reply: { joinerKey: v.joinerKey, salt: v.salt, commitment } };
-}
-function resolveHandshake(invite, reply) {
-  const buyerKey = invite.initiatorRole === "buyer" ? invite.initiatorKey : reply.joinerKey;
-  const sellerKey = invite.initiatorRole === "seller" ? invite.initiatorKey : reply.joinerKey;
-  const commitment = invite.initiatorRole === "buyer" ? invite.commitment : reply.commitment;
-  if (!commitment)
-    throw new Error("resolveHandshake: no transfer commitment from the buyer");
-  return {
-    salt: invite.salt,
-    domain: invite.domain,
-    amountSats: invite.amountSats,
-    network: invite.network,
-    timeoutBlocks: invite.timeoutBlocks,
-    timeoutTo: invite.timeoutTo,
-    arbiter: invite.arbiter,
-    buyerKey,
-    sellerKey,
-    commitment
-  };
-}
-// core/nostr/deletion.ts
-var DELETION_KIND = 5;
-function buildDeletion(params) {
-  if (!isHex32(params.pubkey))
-    throw new Error("buildDeletion: pubkey must be 64 lowercase hex characters");
-  if (params.events.length === 0)
-    throw new Error("buildDeletion: nothing to delete");
-  const tags = [];
-  const kinds = new Set;
-  for (const event of params.events) {
-    if (event.pubkey !== params.pubkey) {
-      throw new Error("buildDeletion: you can only request deletion of your own events");
-    }
-    if (event.kind >= 30000 && event.kind < 40000)
-      tags.push(["a", addressOf(event)]);
-    else
-      tags.push(["e", event.id]);
-    kinds.add(event.kind);
-  }
-  for (const kind of kinds)
-    tags.push(["k", String(kind)]);
-  return {
-    pubkey: params.pubkey,
-    created_at: params.createdAt,
-    kind: DELETION_KIND,
-    tags,
-    content: params.reason ?? ""
-  };
-}
-function parseDeletion(event) {
-  if (event.kind !== DELETION_KIND)
-    return;
-  return {
-    ids: event.tags.filter((t) => t[0] === "e" && t[1]).map((t) => t[1]),
-    addresses: event.tags.filter((t) => t[0] === "a" && t[1]).map((t) => t[1]),
-    reason: event.content
-  };
-}
-function applyDeletions(events, deletions) {
-  const byAuthorIds = new Map;
-  const byAuthorAddresses = new Map;
-  for (const request of deletions) {
-    const parsed = parseDeletion(request);
-    if (!parsed)
-      continue;
-    const ids = byAuthorIds.get(request.pubkey) ?? new Set;
-    for (const id of parsed.ids)
-      ids.add(id);
-    byAuthorIds.set(request.pubkey, ids);
-    const addresses = byAuthorAddresses.get(request.pubkey) ?? new Map;
-    for (const address of parsed.addresses) {
-      const previous = addresses.get(address);
-      addresses.set(address, previous === undefined ? request.created_at : Math.max(previous, request.created_at));
-    }
-    byAuthorAddresses.set(request.pubkey, addresses);
-  }
-  return events.filter((event) => {
-    if (byAuthorIds.get(event.pubkey)?.has(event.id))
-      return false;
-    const at = byAuthorAddresses.get(event.pubkey)?.get(addressOf(event));
-    return at === undefined || event.created_at > at;
-  });
-}
-function deletionFilter(authors) {
-  return { kinds: [DELETION_KIND], authors: [...authors] };
-}
-// core/nostr/relays.ts
-var RELAY_LIST_KIND = 10002;
-function normaliseRelayUrl(raw) {
-  if (typeof raw !== "string")
-    return;
-  const trimmed = raw.trim();
-  if (trimmed === "")
-    return;
-  let url;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    return;
-  }
-  const protocol = url.protocol.toLowerCase();
-  if (protocol !== "wss:" && protocol !== "ws:")
-    return;
-  if (url.hostname === "")
-    return;
-  if (protocol === "wss:" && url.port === "443" || protocol === "ws:" && url.port === "80") {
-    url.port = "";
-  }
-  url.hash = "";
-  const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
-  return `${protocol}//${url.host.toLowerCase()}${path}${url.search}`;
-}
-function buildRelayList(params) {
-  if (!isHex32(params.pubkey))
-    throw new Error("buildRelayList: pubkey must be 64 lowercase hex characters");
-  const seen = new Set;
-  const tags = [];
-  for (const entry of params.relays) {
-    const url = normaliseRelayUrl(entry.url);
-    if (!url)
-      throw new Error(`buildRelayList: ${JSON.stringify(entry.url)} is not a relay URL`);
-    if (seen.has(url))
-      continue;
-    seen.add(url);
-    if (!entry.read && !entry.write)
-      continue;
-    if (entry.read && entry.write)
-      tags.push(["r", url]);
-    else
-      tags.push(["r", url, entry.write ? "write" : "read"]);
-  }
-  return { pubkey: params.pubkey, created_at: params.createdAt, kind: RELAY_LIST_KIND, tags, content: "" };
-}
-function parseRelayList(event) {
-  if (event.kind !== RELAY_LIST_KIND)
-    return [];
-  const byUrl = new Map;
-  for (const tag of event.tags) {
-    if (tag[0] !== "r")
-      continue;
-    const url = normaliseRelayUrl(tag[1]);
-    if (!url)
-      continue;
-    const marker = tag[2]?.toLowerCase();
-    const entry = {
-      url,
-      read: marker !== "write",
-      write: marker !== "read"
-    };
-    const existing = byUrl.get(url);
-    byUrl.set(url, existing ? { url, read: existing.read || entry.read, write: existing.write || entry.write } : entry);
-  }
-  return [...byUrl.values()];
-}
-var READ_FANOUT = 4;
-var WRITE_FANOUT = 5;
-function preferOwn(own, fallback, max) {
-  const mine = dedupe(own.map(normaliseRelayUrl).filter(isUrl));
-  if (mine.length > 0)
-    return mine.slice(0, max);
-  return dedupe(fallback.map(normaliseRelayUrl).filter(isUrl)).slice(0, max);
-}
-function writeRelaysFor(list, fallback, max = WRITE_FANOUT) {
-  return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max);
-}
-function readRelaysFor(list, fallback, max = READ_FANOUT) {
-  return preferOwn(list.filter((r) => r.write).map((r) => r.url), fallback, max);
-}
-function inboxRelaysFor(list, fallback, max = READ_FANOUT) {
-  return preferOwn(list.filter((r) => r.read).map((r) => r.url), fallback, max);
-}
-function planAuthorQuery(lists, authors, fallback, max = READ_FANOUT) {
-  const plan = new Map;
-  for (const author of authors) {
-    for (const relay of readRelaysFor(lists.get(author) ?? [], fallback, max)) {
-      const group = plan.get(relay);
-      if (group)
-        group.push(author);
-      else
-        plan.set(relay, [author]);
-    }
-  }
-  return plan;
-}
-function relayListFilter(pubkeys) {
-  return { kinds: [RELAY_LIST_KIND], authors: [...pubkeys] };
-}
-function isOwnRelayList(event, pubkey) {
-  return event.kind === RELAY_LIST_KIND && event.pubkey === pubkey && tagValue(event, "d") === undefined;
-}
-var isUrl = (u) => typeof u === "string";
-function dedupe(urls) {
-  const seen = new Set;
-  const out = [];
-  for (const url of urls) {
-    if (seen.has(url))
-      continue;
-    seen.add(url);
-    out.push(url);
-  }
-  return out;
-}
-// core/nostr/portfolio.ts
-var PORTFOLIO_KIND = 30078;
-var PORTFOLIO_D = "fmd:portfolio";
-var PORTFOLIO_TOPIC = "flexmydomain";
-var PORTFOLIO_VERSION = 1;
-function buildPortfolio(params) {
-  if (!isHex32(params.pubkey))
-    throw new Error("buildPortfolio: pubkey must be 64 lowercase hex characters");
-  const seen = new Set;
-  const entries = params.entries.map((entry) => {
-    const domain = normaliseDomain(entry.domain);
-    if (seen.has(domain))
-      throw new Error(`buildPortfolio: ${domain} appears twice`);
-    seen.add(domain);
-    if (entry.source === "dns") {
-      if (entry.iat === undefined || !isHex64(entry.sig ?? "")) {
-        throw new Error(`buildPortfolio: the DNS entry for ${domain} has no proof attached`);
-      }
-      const digest = proofDigest({ domain, pubkey: params.pubkey, iat: entry.iat });
-      if (!verifyDigestSignature(entry.sig, digest, params.pubkey)) {
-        throw new Error(`buildPortfolio: the proof for ${domain} does not verify under this key`);
-      }
-    }
-    return { ...entry, domain };
-  });
-  entries.sort((a, b) => a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
-  return {
-    pubkey: params.pubkey,
-    created_at: params.createdAt,
-    kind: PORTFOLIO_KIND,
-    tags: [
-      ["d", PORTFOLIO_D],
-      ["t", PORTFOLIO_TOPIC]
-    ],
-    content: JSON.stringify({
-      v: PORTFOLIO_VERSION,
-      domains: entries.map((e) => ({
-        domain: e.domain,
-        source: e.source,
-        first_seen: e.firstSeen,
-        ...e.iat !== undefined ? { iat: e.iat } : {},
-        ...e.sig !== undefined ? { sig: e.sig } : {},
-        ...e.tagline ? { tagline: e.tagline } : {},
-        ...e.forSale ? { for_sale: true } : {}
-      }))
-    })
-  };
-}
-function parsePortfolio(event) {
-  if (event.kind !== PORTFOLIO_KIND)
-    return { ok: false, reason: `kind ${event.kind} is not ${PORTFOLIO_KIND}` };
-  if (tagValue(event, "d") !== PORTFOLIO_D) {
-    return { ok: false, reason: `d tag ${JSON.stringify(tagValue(event, "d") ?? null)} is not ${PORTFOLIO_D}` };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(event.content);
-  } catch (err) {
-    return { ok: false, reason: `content is not JSON: ${err.message}` };
-  }
-  if (typeof parsed !== "object" || parsed === null)
-    return { ok: false, reason: "content is not an object" };
-  const body = parsed;
-  const list = Array.isArray(body.domains) ? body.domains : [];
-  const entries = [];
-  const dropped = [];
-  for (const raw of list) {
-    const entry = readEntry(raw);
-    if ("reason" in entry)
-      dropped.push({ entry: raw, reason: entry.reason });
-    else
-      entries.push(entry.entry);
-  }
-  return {
-    ok: true,
-    portfolio: {
-      version: typeof body.v === "number" ? body.v : 0,
-      pubkey: event.pubkey,
-      entries,
-      event
-    },
-    dropped
-  };
-}
-function readEntry(raw) {
-  if (typeof raw !== "object" || raw === null)
-    return { reason: "not an object" };
-  const e = raw;
-  const domain = tryNormaliseDomain(e.domain);
-  if (!domain.ok)
-    return { reason: `domain: ${domain.reason}` };
-  const source = e.source === "nip05" ? "nip05" : "dns";
-  const iat = typeof e.iat === "number" && Number.isSafeInteger(e.iat) ? e.iat : undefined;
-  const sig = isHex64(e.sig) ? e.sig : undefined;
-  if (source === "dns" && (iat === undefined || sig === undefined)) {
-    return { reason: "a DNS entry with no proof attached" };
-  }
-  const firstSeen = typeof e.first_seen === "number" && Number.isSafeInteger(e.first_seen) ? e.first_seen : iat ?? 0;
-  return {
-    entry: {
-      domain: domain.domain,
-      source,
-      iat,
-      sig,
-      firstSeen,
-      tagline: typeof e.tagline === "string" ? e.tagline : undefined,
-      forSale: e.for_sale === true
-    }
-  };
-}
-function verifyPortfolio(portfolio) {
-  return portfolio.entries.map((entry) => {
-    if (entry.source === "nip05") {
-      return {
-        domain: entry.domain,
-        proven: false,
-        reason: "a NIP-05 proof carries no signature and can only be checked live"
-      };
-    }
-    if (entry.iat === undefined || entry.sig === undefined) {
-      return { domain: entry.domain, proven: false, reason: "no proof attached" };
-    }
-    const digest = proofDigest({ domain: entry.domain, pubkey: portfolio.pubkey, iat: entry.iat });
-    const proven = verifyDigestSignature(entry.sig, digest, portfolio.pubkey);
-    return {
-      domain: entry.domain,
-      proven,
-      reason: proven ? undefined : "signature does not verify under this portfolio key",
-      record: proven ? { version: PROOF_VERSION, iat: entry.iat, pubkey: portfolio.pubkey, sig: entry.sig } : undefined
-    };
-  });
-}
-function upsertEntry(entries, entry) {
-  const domain = normaliseDomain(entry.domain);
-  const existing = entries.find((e) => e.domain === domain);
-  const merged = {
-    ...entry,
-    domain,
-    firstSeen: existing ? Math.min(existing.firstSeen, entry.firstSeen) : entry.firstSeen
-  };
-  return [...entries.filter((e) => e.domain !== domain), merged].sort((a, b) => a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
-}
-function removeEntry(entries, domain) {
-  const d = normaliseDomain(domain);
-  return entries.filter((e) => e.domain !== d);
-}
-function portfolioFilter(pubkey) {
-  return { kinds: [PORTFOLIO_KIND], authors: [pubkey], "#d": [PORTFOLIO_D], limit: 1 };
+  return decoded.scriptPubKey;
 }
 
-// core/nostr/index.ts
-var DEFAULT_RELAYS = [
-  "wss://relay.damus.io",
-  "wss://nos.lol",
-  "wss://relay.primal.net",
-  "wss://nostr.oxtr.dev",
-  "wss://nostr.mom"
-];
 // core/escrow/tx.ts
 var SIGHASH_EPOCH = 0;
 var SIGHASH_DEFAULT = 0;
@@ -7442,230 +7201,7 @@ function vsize(tx) {
   const total = serializeSigned(tx).length;
   return Math.ceil((base * 3 + total) / 4);
 }
-// core/escrow/address.ts
-var base58check = createBase58check(sha256);
-var BASE58_VERSIONS = {
-  0: { type: "p2pkh", chain: "mainnet" },
-  5: { type: "p2sh", chain: "mainnet" },
-  111: { type: "p2pkh", chain: "test" },
-  196: { type: "p2sh", chain: "test" }
-};
-var HRP_CHAIN = { bc: "mainnet", tb: "test", bcrt: "regtest" };
-function stripUri(input) {
-  let s = input.trim();
-  if (/^bitcoin:/i.test(s))
-    s = s.slice("bitcoin:".length);
-  const query = s.indexOf("?");
-  return query === -1 ? s : s.slice(0, query);
-}
-function decodeSegwit(address) {
-  const asBech32 = bech32.decodeUnsafe(address, 90);
-  const asBech32m = bech32m.decodeUnsafe(address, 90);
-  const decoded = asBech32 ?? asBech32m;
-  if (!decoded)
-    return;
-  const chain2 = HRP_CHAIN[decoded.prefix];
-  if (!chain2)
-    throw new Error(`"${decoded.prefix}1…" is not a bitcoin address prefix; expected bc1, tb1 or bcrt1.`);
-  const [version, ...rest] = decoded.words;
-  if (version === undefined || version > 16)
-    throw new Error("That address has no valid witness version.");
-  const program = bech32.fromWordsUnsafe(rest);
-  if (!program)
-    throw new Error("That address has invalid padding, so it is corrupt or mistyped.");
-  if (version === 0) {
-    if (!asBech32)
-      throw new Error("A version 0 address must use the bech32 checksum; this one uses bech32m.");
-    if (program.length === 20)
-      return { type: "p2wpkh", chain: chain2, scriptPubKey: new Uint8Array([0, 20, ...program]) };
-    if (program.length === 32)
-      return { type: "p2wsh", chain: chain2, scriptPubKey: new Uint8Array([0, 32, ...program]) };
-    throw new Error(`A version 0 program is 20 or 32 bytes; this one is ${program.length}.`);
-  }
-  if (!asBech32m)
-    throw new Error("A version 1+ address must use the bech32m checksum (BIP-350); this one uses bech32.");
-  if (version === 1) {
-    if (program.length !== 32)
-      throw new Error(`A taproot program is 32 bytes; this one is ${program.length}.`);
-    return { type: "p2tr", chain: chain2, scriptPubKey: new Uint8Array([81, 32, ...program]) };
-  }
-  throw new Error(`Witness version ${version} is not defined yet, so anyone could spend a payment to it. Use a bc1q or bc1p address.`);
-}
-function decodeBase58(address) {
-  let payload;
-  try {
-    payload = base58check.decode(address);
-  } catch {
-    return;
-  }
-  if (payload.length !== 21)
-    throw new Error("That base58 address does not carry a 20-byte hash.");
-  const kind = BASE58_VERSIONS[payload[0]];
-  if (!kind)
-    throw new Error(`Base58 version byte 0x${payload[0].toString(16).padStart(2, "0")} is not a bitcoin address.`);
-  const hash = payload.slice(1);
-  const scriptPubKey = kind.type === "p2pkh" ? new Uint8Array([118, 169, 20, ...hash, 136, 172]) : new Uint8Array([169, 20, ...hash, 135]);
-  return { type: kind.type, chain: kind.chain, scriptPubKey };
-}
-function decodeAddress(input) {
-  const address = stripUri(String(input));
-  if (!address)
-    throw new Error("Enter an address.");
-  const segwit = decodeSegwit(address);
-  if (segwit)
-    return segwit;
-  const legacy = decodeBase58(address);
-  if (legacy)
-    return legacy;
-  if (/^(bc|tb|bcrt)1/i.test(address)) {
-    throw new Error("That address fails its checksum: a character is wrong or missing. Copy it again from your wallet.");
-  }
-  throw new Error("That is not a bitcoin address this page can verify. Copy it again from your wallet.");
-}
-function chainOf(network) {
-  return network === "mainnet" ? "mainnet" : network === "regtest" ? "regtest" : "test";
-}
-function addressToScript(input, network) {
-  const decoded = decodeAddress(input);
-  const want = chainOf(network);
-  const ok = decoded.chain === want || want === "regtest" && (decoded.type === "p2pkh" || decoded.type === "p2sh") && decoded.chain === "test";
-  if (!ok) {
-    const prefix = NETWORK_HRP[network];
-    throw new Error(`That is a ${decoded.chain === "test" ? "test-network" : decoded.chain} address, and this escrow is on ${network}. ` + `Use an address from a ${network} wallet (${prefix}1…).`);
-  }
-  return decoded.scriptPubKey;
-}
-// core/escrow/recovery.ts
-var RECOVERY_PREFIX = "fmdrec1";
-var VERSION = 1;
-var CHECKSUM_BYTES = 4;
-var HAS_ARBITER = 1;
-var TIMEOUT_TO_SELLER = 2;
-var HAS_FUNDING = 4;
-function encodeRecovery(recovery) {
-  assertKey(recovery.secretKey, 32, "secretKey");
-  assertKey(recovery.buyer, 32, "buyer");
-  assertKey(recovery.seller, 32, "seller");
-  if (recovery.arbiter)
-    assertKey(recovery.arbiter, 32, "arbiter");
-  if (!Number.isInteger(recovery.timeoutBlocks) || recovery.timeoutBlocks < 1 || recovery.timeoutBlocks > 65535) {
-    throw new Error(`encodeRecovery: timeoutBlocks must be 1..65535, got ${recovery.timeoutBlocks}`);
-  }
-  let flags = 0;
-  if (recovery.arbiter)
-    flags |= HAS_ARBITER;
-  if (recovery.timeoutTo === "seller")
-    flags |= TIMEOUT_TO_SELLER;
-  if (recovery.funding)
-    flags |= HAS_FUNDING;
-  const parts = [
-    Uint8Array.of(VERSION, flags),
-    Uint8Array.of(recovery.timeoutBlocks >>> 8 & 255, recovery.timeoutBlocks & 255),
-    recovery.secretKey,
-    recovery.buyer,
-    recovery.seller
-  ];
-  if (recovery.arbiter)
-    parts.push(recovery.arbiter);
-  if (recovery.funding) {
-    if (!/^[0-9a-f]{64}$/.test(recovery.funding.txid)) {
-      throw new Error("encodeRecovery: the funding txid must be 64 lowercase hex characters");
-    }
-    parts.push(hexToBytes(recovery.funding.txid), u322(recovery.funding.vout), u64(recovery.funding.amountSats));
-  }
-  const payload = concatBytes(...parts);
-  const checksum2 = sha256(payload).subarray(0, CHECKSUM_BYTES);
-  return RECOVERY_PREFIX + base64urlnopad.encode(concatBytes(payload, checksum2));
-}
-function decodeRecovery(text) {
-  if (typeof text !== "string")
-    return { ok: false, reason: "not a string" };
-  const trimmed = text.trim().replace(/\s+/g, "");
-  if (!trimmed.startsWith(RECOVERY_PREFIX)) {
-    return { ok: false, reason: `a recovery string starts with "${RECOVERY_PREFIX}"` };
-  }
-  let bytes;
-  try {
-    bytes = base64urlnopad.decode(trimmed.slice(RECOVERY_PREFIX.length));
-  } catch {
-    return { ok: false, reason: "the string is not valid base64url; check for a mistyped character" };
-  }
-  if (bytes.length < 2 + 2 + 32 * 3 + CHECKSUM_BYTES)
-    return { ok: false, reason: "too short to be a recovery string" };
-  const payload = bytes.subarray(0, bytes.length - CHECKSUM_BYTES);
-  const checksum2 = bytes.subarray(bytes.length - CHECKSUM_BYTES);
-  const expected = sha256(payload).subarray(0, CHECKSUM_BYTES);
-  if (bytesToHex(checksum2) !== bytesToHex(expected)) {
-    return { ok: false, reason: "the checksum does not match: a character is wrong or missing" };
-  }
-  const version = payload[0];
-  if (version !== VERSION)
-    return { ok: false, reason: `unsupported recovery version ${version}` };
-  const flags = payload[1];
-  const timeoutBlocks = payload[2] << 8 | payload[3];
-  let at = 4;
-  const take = (n) => {
-    const slice = payload.subarray(at, at + n);
-    at += n;
-    return slice;
-  };
-  const secretKey = take(32);
-  const buyer = take(32);
-  const seller = take(32);
-  const arbiter = flags & HAS_ARBITER ? take(32) : undefined;
-  let funding;
-  if (flags & HAS_FUNDING) {
-    if (payload.length - at < 32 + 4 + 8)
-      return { ok: false, reason: "the funding outpoint is truncated" };
-    const txid2 = bytesToHex(take(32));
-    const voutBytes = take(4);
-    const amountBytes = take(8);
-    const vout = voutBytes[0] | voutBytes[1] << 8 | voutBytes[2] << 16 | voutBytes[3] << 24;
-    let amountSats = 0n;
-    for (let i = 7;i >= 0; i--)
-      amountSats = amountSats << 8n | BigInt(amountBytes[i]);
-    funding = { txid: txid2, vout: vout >>> 0, amountSats };
-  }
-  if (at !== payload.length)
-    return { ok: false, reason: "the recovery string has trailing bytes" };
-  return {
-    ok: true,
-    recovery: {
-      version,
-      secretKey,
-      buyer,
-      seller,
-      arbiter,
-      timeoutTo: flags & TIMEOUT_TO_SELLER ? "seller" : "buyer",
-      timeoutBlocks,
-      ...funding ? { funding } : {}
-    }
-  };
-}
-function rebuildFromRecovery(recovery) {
-  const pubkey = schnorr.getPublicKey(recovery.secretKey);
-  const hex = bytesToHex(pubkey);
-  const role = hex === bytesToHex(recovery.buyer) ? "buyer" : hex === bytesToHex(recovery.seller) ? "seller" : recovery.arbiter && hex === bytesToHex(recovery.arbiter) ? "arbiter" : undefined;
-  if (!role) {
-    throw new Error("rebuildFromRecovery: the key in this string is not one of the keys in this escrow: " + "the string is for a different escrow, or it is damaged");
-  }
-  return {
-    tree: buildTree({
-      buyer: recovery.buyer,
-      seller: recovery.seller,
-      arbiter: recovery.arbiter,
-      timeoutTo: recovery.timeoutTo,
-      timeoutBlocks: recovery.timeoutBlocks
-    }),
-    role,
-    pubkey
-  };
-}
-function assertKey(bytes, length, name) {
-  if (!(bytes instanceof Uint8Array) || bytes.length !== length) {
-    throw new Error(`encodeRecovery: ${name} must be ${length} bytes`);
-  }
-}
+
 // core/escrow/spend.ts
 function buildSpend(params) {
   const { tree, leaf, outpoint } = params;
@@ -7675,10 +7211,15 @@ function buildSpend(params) {
     const scriptPubKey = d.scriptPubKey ?? (d.outputKey ? p2trScript(d.outputKey) : undefined);
     if (!scriptPubKey)
       throw new Error("buildSpend: every destination needs an output key or a scriptPubKey");
+    if (bytesToHex(scriptPubKey) === bytesToHex(tree.scriptPubKey)) {
+      throw new Error("buildSpend: that is the escrow address itself; pay out to an address you control");
+    }
     if (d.amountSats <= 0n)
       throw new Error("buildSpend: a destination amount must be positive");
-    if (d.amountSats < 330n)
-      throw new Error(`buildSpend: ${d.amountSats} sats is below the P2TR dust limit of 330`);
+    const dust = dustThreshold(scriptPubKey);
+    if (d.amountSats < dust) {
+      throw new Error(`buildSpend: ${d.amountSats} sats is below the dust limit of ${dust} for this kind of address`);
+    }
     return { amountSats: d.amountSats, scriptPubKey };
   });
   const total = outputs.reduce((sum, o) => sum + o.amountSats, 0n);
@@ -7693,6 +7234,13 @@ function buildSpend(params) {
     sequence: leaf.sequence
   };
   return { version: tree.txVersion, inputs: [input], outputs, lockTime: params.lockTime ?? 0 };
+}
+function dustThreshold(scriptPubKey) {
+  const length = scriptPubKey.length;
+  const outputSize = 8 + (length < 253 ? 1 : 3) + length;
+  const witnessProgram = length >= 4 && length <= 42 && (scriptPubKey[0] === 0 || scriptPubKey[0] >= 81 && scriptPubKey[0] <= 96) && scriptPubKey[1] + 2 === length;
+  const inputSize = witnessProgram ? 32 + 4 + 1 + Math.floor(107 / 4) + 4 : 32 + 4 + 1 + 107 + 4;
+  return BigInt((outputSize + inputSize) * 3);
 }
 function feeOf(tx, finalised, leaf) {
   const input = tx.inputs.reduce((sum, i) => sum + i.amountSats, 0n);
@@ -7786,144 +7334,1411 @@ function spendWith(params) {
   }
   return finaliseSpend({ tree: params.tree, leaf: params.leaf, tx, signatures });
 }
-// core/escrow/transfer.ts
-var MIN_POLL_GAP_SECONDS = 1800;
-var REQUIRED_AGREEING_POLLS = 2;
-function classify(observation, commitment) {
-  const { facts } = observation;
-  if (fingerprintMatches({ registrarIanaId: facts.registrarIanaId, nameservers: facts.nameservers }, commitment)) {
-    return "transferred";
+
+// core/escrow/settle.ts
+var PROPOSER = Object.freeze({ release: "seller", refund: "buyer" });
+var SETTLEMENT_LEAVES = Object.freeze({
+  release: Object.freeze(["A", "B"]),
+  refund: Object.freeze(["A", "C"])
+});
+var MAX_FEE_RATE = 1000;
+var OUTPOINT = /^([0-9a-f]{64}):(\d{1,10})$/;
+function settlementProblem(raw, signed = true) {
+  if (typeof raw !== "object" || raw === null)
+    return "not an object";
+  const s = raw;
+  if (s.kind !== "release" && s.kind !== "refund")
+    return "kind is neither release nor refund";
+  if (!SETTLEMENT_LEAVES[s.kind].includes(s.leaf))
+    return `a ${s.kind} can't use leaf ${String(s.leaf)}`;
+  if (typeof s.outpoint !== "string" || !OUTPOINT.test(s.outpoint) || Number(s.outpoint.split(":")[1]) > 4294967295) {
+    return "outpoint is not txid:vout";
   }
-  if (facts.statuses.includes(PENDING_TRANSFER_STATUS))
-    return "pending";
-  if (facts.statuses.includes(TRANSFER_LOCK_STATUS))
-    return "locked";
-  return "unlocked";
+  if (typeof s.dest !== "string" || s.dest.length === 0 || s.dest.length > 120)
+    return "no destination address";
+  if (!Number.isSafeInteger(s.fee) || s.fee < 1)
+    return "fee is not a positive whole number of sats";
+  if (signed && (typeof s.sig !== "string" || !/^[0-9a-f]{128}$/.test(s.sig)))
+    return "signature is not 64 bytes of hex";
+  return;
 }
-function confirm(observations, commitment, state) {
-  const supporting = observations.filter((o) => classify(o, commitment) === state).sort((a, b) => a.at - b.at);
-  if (supporting.length < REQUIRED_AGREEING_POLLS)
-    return { confirmed: false, evidence: [] };
-  for (let i = 0;i < supporting.length; i++) {
-    for (let j = i + 1;j < supporting.length; j++) {
-      if (supporting[j].at - supporting[i].at >= MIN_POLL_GAP_SECONDS) {
-        return {
-          confirmed: true,
-          since: supporting[i].at,
-          evidence: [supporting[i].snapshotHash, supporting[j].snapshotHash]
-        };
-      }
+function settlementKey(s) {
+  return `${s.kind}:${s.leaf}:${s.outpoint}:${s.dest}:${s.fee}`;
+}
+function signersOf(leaf) {
+  return leaf === "A" ? ["buyer", "seller"] : leaf === "B" ? ["seller", "arbiter"] : ["buyer", "arbiter"];
+}
+function settlementTx(params) {
+  const { tree, settlement, value } = params;
+  const problem = settlementProblem(settlement, false);
+  if (problem)
+    throw new Error(`settlementTx: ${problem}`);
+  const leaf = tree.leaves[settlement.leaf];
+  if (!leaf)
+    throw new Error(`settlementTx: this escrow has no leaf ${settlement.leaf}`);
+  const fee = BigInt(settlement.fee);
+  if (fee >= value)
+    throw new Error(`settlementTx: a fee of ${fee} sats leaves nothing of the ${value} in the escrow`);
+  const [txid2, vout] = settlement.outpoint.split(":");
+  return buildSpend({
+    tree,
+    leaf,
+    outpoint: { txid: txid2, vout: Number(vout), amountSats: value },
+    destinations: [{ scriptPubKey: addressToScript(settlement.dest, params.network), amountSats: value - fee }]
+  });
+}
+function settlementFee(params) {
+  if (!Number.isFinite(params.rate) || params.rate <= 0 || params.rate > MAX_FEE_RATE) {
+    throw new Error(`settlementFee: ${params.rate} sat/vB is outside 0..${MAX_FEE_RATE}`);
+  }
+  const draft = settlementTx({ ...params, settlement: { ...params.settlement, fee: 1 } });
+  const { vbytes } = feeOf(draft, false, params.tree.leaves[params.settlement.leaf]);
+  return Math.ceil(params.rate * vbytes);
+}
+function signSettlement(params) {
+  const role = roleOf(params.tree, schnorr.getPublicKey(params.secretKey));
+  if (!role || !signersOf(params.settlement.leaf).includes(role)) {
+    throw new Error(`signSettlement: this key is not one of leaf ${params.settlement.leaf}'s two signers`);
+  }
+  const tx = settlementTx(params);
+  const sig = signSpend({ tx, leaf: params.tree.leaves[params.settlement.leaf], secretKey: params.secretKey, auxRand: params.auxRand });
+  const { kind, leaf, outpoint, dest, fee } = params.settlement;
+  return { kind, leaf, outpoint, dest, fee, sig: bytesToHex(sig) };
+}
+function verifySettlement(params) {
+  try {
+    if (settlementProblem(params.signed))
+      return false;
+    if (!signersOf(params.signed.leaf).includes(params.role))
+      return false;
+    const pubkey = params.tree.params[params.role];
+    if (!pubkey)
+      return false;
+    return verifySpendSignature({
+      tx: settlementTx({ ...params, settlement: params.signed }),
+      leaf: params.tree.leaves[params.signed.leaf],
+      signature: hexToBytes(params.signed.sig),
+      pubkey
+    });
+  } catch {
+    return false;
+  }
+}
+function completeSettlement(params) {
+  const signatures = {};
+  for (const role of signersOf(params.settlement.leaf)) {
+    const sig = params.signatures[role];
+    if (sig === undefined || !/^[0-9a-f]{128}$/.test(sig)) {
+      throw new Error(`completeSettlement: leaf ${params.settlement.leaf} needs the ${role}'s signature`);
+    }
+    signatures[role] = hexToBytes(sig);
+  }
+  const { hex, txid: txid2, vbytes } = finaliseSpend({
+    tree: params.tree,
+    leaf: params.tree.leaves[params.settlement.leaf],
+    tx: settlementTx(params),
+    signatures
+  });
+  return { hex, txid: txid2, vbytes };
+}
+function collectSettlements(params) {
+  const board = new Map;
+  for (const { role, sigs } of params.sources) {
+    for (const signed of sigs) {
+      if (signed.outpoint !== params.outpoint)
+        continue;
+      if (!verifySettlement({ tree: params.tree, signed, value: params.value, network: params.network, role }))
+        continue;
+      const { kind, leaf, outpoint, dest, fee } = signed;
+      const key = settlementKey(signed);
+      const entry = board.get(key) ?? { settlement: { kind, leaf, outpoint, dest, fee }, sigs: {}, complete: false };
+      entry.sigs[role] = signed.sig;
+      entry.complete = signersOf(leaf).every((r) => entry.sigs[r] !== undefined);
+      board.set(key, entry);
     }
   }
-  return { confirmed: false, evidence: [] };
+  return [...board.values()];
 }
-function deriveTransferState(params) {
-  const observations = [...params.observations].sort((a, b) => a.at - b.at);
-  if (observations.length === 0) {
-    return { state: "unknown", confirmed: false, evidence: [], reason: "the registry has not been polled yet" };
+function proposalOf(board, kind, leaf) {
+  return board.find((e) => e.settlement.kind === kind && e.settlement.leaf === leaf && e.sigs[PROPOSER[kind]] !== undefined);
+}
+function leafOfWitness(tree, witness) {
+  const stack = witness.length >= 2 && witness[witness.length - 1].startsWith("50") ? witness.slice(0, -1) : witness;
+  if (stack.length < 2)
+    return;
+  const script = stack[stack.length - 2];
+  return tree.leafList.find((l) => bytesToHex(l.script) === script)?.name;
+}
+function roleOf(tree, pubkey) {
+  const hex = bytesToHex(pubkey);
+  if (hex === bytesToHex(tree.params.buyer))
+    return "buyer";
+  if (hex === bytesToHex(tree.params.seller))
+    return "seller";
+  if (tree.params.arbiter && hex === bytesToHex(tree.params.arbiter))
+    return "arbiter";
+  return;
+}
+
+// core/nostr/escrow.ts
+var ESCROW_KIND = 30078;
+var ESCROW_D_PREFIX = "fmd:escrow:";
+var RULING_D_PREFIX = "fmd:ruling:";
+var ESCROW_TOPIC = "flexmydomain";
+var ESCROW_VERSION = 5;
+var MAX_SIGS = 8;
+var MAX_CLAIM_TIME = 4294967295;
+var MAX_REASON = 2000;
+function deriveEscrowId(params) {
+  if (!/^[0-9a-f]{64}$/.test(params.salt))
+    throw new Error("deriveEscrowId: salt must be 64 lowercase hex characters");
+  const preimage = concatBytes(utf8ToBytes("fmd:escrow:v5"), hexToBytes(params.salt), params.buyer, params.seller, params.arbiter, utf8ToBytes(`buyer:${params.timeoutBlocks}:${params.deliverBlocks}:${params.network}:` + `${params.amountSats}:${normaliseDomain(params.domain)}:`));
+  return bytesToHex(sha256(preimage));
+}
+function escrowAddress(params) {
+  return escrowTree(params).addresses[params.network];
+}
+function escrowTree(params) {
+  return buildTree({
+    buyer: params.buyer,
+    seller: params.seller,
+    arbiter: params.arbiter,
+    timeoutTo: "buyer",
+    timeoutBlocks: params.timeoutBlocks,
+    binding: hexToBytes(deriveEscrowId(params))
+  });
+}
+function roleIn(pubkey, keys) {
+  return pubkey === keys.buyer ? "buyer" : pubkey === keys.seller ? "seller" : pubkey === keys.arbiter ? "arbiter" : undefined;
+}
+function checkProgress(role, claims, sigs) {
+  const stated = Object.keys(claims).filter((k) => claims[k] !== undefined);
+  if (role !== "buyer" && role !== "seller") {
+    if (stated.length || sigs.length)
+      return "only the buyer and the seller state progress in a view";
+    return;
   }
-  const transferred = confirm(observations, params.commitment, "transferred");
-  if (transferred.confirmed) {
-    const after = observations.filter((o) => o.at > transferred.since);
-    const latest2 = after.slice(-REQUIRED_AGREEING_POLLS);
-    const movedBack = latest2.length >= REQUIRED_AGREEING_POLLS && latest2.every((o) => classify(o, params.commitment) !== "transferred") && latest2[latest2.length - 1].at - latest2[0].at >= MIN_POLL_GAP_SECONDS;
-    if (movedBack) {
+  const allowed = role === "seller" ? ["sent", "cancelled", "disputed"] : ["received", "disputed"];
+  const wrong = stated.find((k) => !allowed.includes(k));
+  if (wrong)
+    return `the ${role} can't claim "${wrong}"`;
+  for (const claim of stated.map((k) => claims[k])) {
+    if (!Number.isSafeInteger(claim.at) || claim.at < 0)
+      return "a claim has no time";
+    if (claim.at > MAX_CLAIM_TIME)
+      return "a claim's time is out of range";
+    if ("reason" in claim && (typeof claim.reason !== "string" || claim.reason.length > MAX_REASON)) {
+      return `a reason is text of at most ${MAX_REASON} characters`;
+    }
+  }
+  if (sigs.length > MAX_SIGS)
+    return `a view carries at most ${MAX_SIGS} signatures`;
+  for (const sig of sigs) {
+    const problem = settlementProblem(sig);
+    if (problem)
+      return `signature: ${problem}`;
+    if (!signersOf(sig.leaf).includes(role)) {
+      return `the ${role} can't sign leaf ${sig.leaf}`;
+    }
+  }
+  return;
+}
+function buildEscrowEvent(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildEscrowEvent: pubkey must be 64 lowercase hex characters");
+  if (!Number.isSafeInteger(params.amountSats) || params.amountSats <= 0) {
+    throw new Error("buildEscrowEvent: amountSats must be a positive integer");
+  }
+  if (!Number.isInteger(params.deliverBlocks) || params.deliverBlocks < 1 || params.deliverBlocks > 65535) {
+    throw new Error("buildEscrowEvent: deliverBlocks must be 1..65535");
+  }
+  const domain = normaliseDomain(params.domain);
+  const id = deriveEscrowId(params);
+  const address = escrowAddress(params);
+  const keys = { buyer: bytesToHex(params.buyer), seller: bytesToHex(params.seller), arbiter: bytesToHex(params.arbiter) };
+  const role = roleIn(params.pubkey, keys);
+  const claims = params.claims ?? {};
+  const sigs = params.sigs ?? [];
+  const problem = checkProgress(role, claims, sigs);
+  if (problem)
+    throw new Error(`buildEscrowEvent: ${problem}`);
+  const tags = [
+    ["d", ESCROW_D_PREFIX + id],
+    ["t", ESCROW_TOPIC],
+    ["fmd_domain", domain],
+    ["p", keys.buyer],
+    ["p", keys.seller],
+    ["p", keys.arbiter]
+  ];
+  if (params.listing)
+    tags.push(["a", params.listing]);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: ESCROW_KIND,
+    tags,
+    content: JSON.stringify({
+      v: ESCROW_VERSION,
+      id,
+      salt: params.salt,
+      buyer_x: keys.buyer,
+      seller_x: keys.seller,
+      arbiter_x: keys.arbiter,
+      timeout_to: "buyer",
+      timeout_blocks: params.timeoutBlocks,
+      deliver_blocks: params.deliverBlocks,
+      network: params.network,
+      address,
+      amount_sats: params.amountSats,
+      domain,
+      ...params.listing ? { listing: params.listing } : {},
+      ...params.deadlines?.fundBy !== undefined ? { deadlines: { fund_by: params.deadlines.fundBy } } : {},
+      ...claims.sent ? { sent: { at: claims.sent.at } } : {},
+      ...claims.cancelled ? { cancelled: { at: claims.cancelled.at, reason: claims.cancelled.reason } } : {},
+      ...claims.received ? { received: { at: claims.received.at } } : {},
+      ...claims.disputed ? { disputed: { at: claims.disputed.at, reason: claims.disputed.reason } } : {},
+      ...sigs.length ? { sigs: sigs.map(({ kind, leaf, outpoint, dest, fee, sig }) => ({ kind, leaf, outpoint, dest, fee, sig })) } : {}
+    })
+  };
+}
+function parseEscrowEvent(event) {
+  if (event.kind !== ESCROW_KIND)
+    return { ok: false, reason: `kind ${event.kind} is not ${ESCROW_KIND}` };
+  if (event.tags.filter((t) => t[0] === "d").length !== 1)
+    return { ok: false, reason: "a view must have exactly one d tag" };
+  const d = tagValue(event, "d");
+  if (!d || !d.startsWith(ESCROW_D_PREFIX)) {
+    return { ok: false, reason: `d tag ${JSON.stringify(d ?? null)} is not a ${ESCROW_D_PREFIX}* identifier` };
+  }
+  let body;
+  try {
+    body = JSON.parse(event.content);
+  } catch (err) {
+    return { ok: false, reason: `content is not JSON: ${err.message}` };
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return { ok: false, reason: "content is not an object" };
+  if (body.v === 1 || body.v === 2 || body.v === 3 || body.v === 4) {
+    return {
+      ok: false,
+      reason: body.v === 4 ? "this escrow was opened with the earlier flow, where the arbiter held the domain, and this page no longer runs it" : `this view uses the version ${body.v} format, from an earlier version of the escrow; open a new escrow`
+    };
+  }
+  if (body.v !== ESCROW_VERSION)
+    return { ok: false, reason: `unsupported view version ${JSON.stringify(body.v ?? null)}` };
+  const str = (k) => typeof body[k] === "string" ? body[k] : undefined;
+  const num2 = (k) => typeof body[k] === "number" && Number.isSafeInteger(body[k]) ? body[k] : undefined;
+  const blocks = (k) => {
+    const n = num2(k);
+    return n !== undefined && n >= 1 && n <= 65535 ? n : undefined;
+  };
+  const salt = str("salt");
+  const buyer = str("buyer_x");
+  const seller = str("seller_x");
+  const arbiter = str("arbiter_x");
+  const timeoutBlocks = blocks("timeout_blocks");
+  const deliverBlocks = blocks("deliver_blocks");
+  const network = str("network");
+  const address = str("address");
+  const amountSats = num2("amount_sats");
+  const domain = tryNormaliseDomain(body.domain);
+  if (!salt || !/^[0-9a-f]{64}$/.test(salt))
+    return { ok: false, reason: "no salt" };
+  if (!isHex32(buyer) || !isHex32(seller))
+    return { ok: false, reason: "buyer or seller key is malformed" };
+  if (!isHex32(arbiter))
+    return { ok: false, reason: "no arbiter key, and this escrow needs one" };
+  if (body.timeout_to !== "buyer")
+    return { ok: false, reason: "the timeout must refund the buyer" };
+  if (timeoutBlocks === undefined)
+    return { ok: false, reason: "timeout_blocks is out of range" };
+  if (deliverBlocks === undefined)
+    return { ok: false, reason: "the transfer window is out of range" };
+  if (!network || !["mainnet", "testnet", "signet", "regtest"].includes(network)) {
+    return { ok: false, reason: `unknown network ${JSON.stringify(network ?? null)}` };
+  }
+  if (!address)
+    return { ok: false, reason: "no address" };
+  if (amountSats === undefined || amountSats <= 0)
+    return { ok: false, reason: "no amount" };
+  if (!domain.ok)
+    return { ok: false, reason: `domain: ${domain.reason}` };
+  for (const gone of ["registrar", "custody_account", "deliver_to", "return_to", "deliver_to_enc", "return_to_enc", "forward_blocks"]) {
+    if (body[gone] !== undefined)
+      return { ok: false, reason: `"${gone}" is not part of a version ${ESCROW_VERSION} escrow` };
+  }
+  const params = {
+    salt,
+    buyer: hexToBytes(buyer),
+    seller: hexToBytes(seller),
+    arbiter: hexToBytes(arbiter),
+    timeoutBlocks,
+    deliverBlocks,
+    network,
+    amountSats,
+    domain: domain.domain
+  };
+  const id = deriveEscrowId(params);
+  if (d !== ESCROW_D_PREFIX + id) {
+    return { ok: false, reason: `the d tag does not match the id these parameters derive (${id})` };
+  }
+  let derived;
+  try {
+    derived = escrowAddress(params);
+  } catch (err) {
+    return { ok: false, reason: `the parameters do not produce a valid output: ${err.message}` };
+  }
+  if (derived !== address) {
+    const unbound = buildTree({
+      buyer: params.buyer,
+      seller: params.seller,
+      arbiter: params.arbiter,
+      timeoutTo: "buyer",
+      timeoutBlocks
+    }).addresses[network];
+    return {
+      ok: false,
+      reason: unbound === address ? "this escrow was opened by an older version of the page, before addresses were bound to the escrow id, " + "and this page no longer reads it; do not fund it. If it is funded, the buyer takes the timeout refund with recover.html" : `the stated address is not the one these terms produce (derived ${derived}); do not fund it`
+    };
+  }
+  const role = roleIn(event.pubkey, { buyer, seller, arbiter });
+  const claims = {};
+  for (const name of ["sent", "cancelled", "received", "disputed"]) {
+    const value = body[name];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      return { ok: false, reason: `${name} is not an object` };
+    const { at, reason } = value;
+    claims[name] = name === "cancelled" || name === "disputed" ? { at, reason: reason ?? "" } : { at };
+  }
+  for (const old of ["pushed", "dispute"]) {
+    if (body[old] !== undefined)
+      return { ok: false, reason: `"${old}" is not a claim in this version` };
+  }
+  const sigs = body.sigs === undefined ? [] : body.sigs;
+  if (!Array.isArray(sigs))
+    return { ok: false, reason: "sigs is not a list" };
+  const problem = checkProgress(role, claims, sigs);
+  if (problem)
+    return { ok: false, reason: problem };
+  const deadlines = body.deadlines ?? {};
+  const fundBy = Number.isSafeInteger(deadlines.fund_by) ? deadlines.fund_by : undefined;
+  return {
+    ok: true,
+    view: {
+      version: ESCROW_VERSION,
+      id,
+      author: event.pubkey,
+      role,
+      salt,
+      buyer,
+      seller,
+      arbiter,
+      timeoutTo: "buyer",
+      timeoutBlocks,
+      deliverBlocks,
+      network,
+      address,
+      amountSats,
+      domain: domain.domain,
+      listing: str("listing"),
+      deadlines: { fundBy },
+      claims,
+      sigs: sigs.map(({ kind, leaf, outpoint, dest, fee, sig }) => ({ kind, leaf, outpoint, dest, fee, sig })),
+      publishedAt: event.created_at,
+      event
+    }
+  };
+}
+function compareViews(views, id) {
+  const participants = views.filter((v) => v.id === id && (v.role === "buyer" || v.role === "seller"));
+  const strangers = views.filter((v) => !participants.includes(v));
+  const latest = new Map;
+  for (const view of participants) {
+    const current2 = latest.get(view.author);
+    if (!current2 || view.publishedAt > current2.publishedAt || view.publishedAt === current2.publishedAt && view.event.id < current2.event.id) {
+      latest.set(view.author, view);
+    }
+  }
+  const current = [...latest.values()];
+  const fields = [
+    ["address", (v) => v.address],
+    ["amount", (v) => String(v.amountSats)],
+    ["domain", (v) => v.domain],
+    ["buyer key", (v) => v.buyer],
+    ["seller key", (v) => v.seller],
+    ["arbiter key", (v) => v.arbiter],
+    ["timelock", (v) => String(v.timeoutBlocks)],
+    ["transfer window", (v) => String(v.deliverBlocks)],
+    ["network", (v) => v.network]
+  ];
+  const disagreements = [];
+  for (const [field, read] of fields) {
+    const seen = new Map;
+    for (const view of current) {
+      const value = read(view);
+      const authors = seen.get(value);
+      if (authors)
+        authors.push(view.author);
+      else
+        seen.set(value, [view.author]);
+    }
+    if (seen.size > 1) {
+      disagreements.push({
+        field,
+        values: [...seen.entries()].flatMap(([value, authors]) => authors.map((author) => ({ author, value })))
+      });
+    }
+  }
+  return {
+    agreed: disagreements.length === 0,
+    disagreements,
+    participants: current,
+    strangers,
+    buyerView: current.find((v) => v.role === "buyer"),
+    sellerView: current.find((v) => v.role === "seller")
+  };
+}
+function buildRuling(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildRuling: pubkey must be 64 lowercase hex characters");
+  const problem = rulingProblem(params);
+  if (problem)
+    throw new Error(`buildRuling: ${problem}`);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: ESCROW_KIND,
+    tags: [
+      ["d", RULING_D_PREFIX + params.id],
+      ["t", ESCROW_TOPIC],
+      ["fmd_escrow", params.id],
+      ...params.parties.filter(isHex32).map((p) => ["p", p])
+    ],
+    content: JSON.stringify({
+      v: 1,
+      escrow: params.id,
+      decision: params.decision,
+      reason: params.reason,
+      ...params.settlement ? { settlement: params.settlement } : {},
+      ...params.txid ? { txid: params.txid } : {}
+    })
+  };
+}
+function rulingProblem(r) {
+  if (!isHex32(r.id))
+    return "the escrow id is malformed";
+  if (r.decision !== "release" && r.decision !== "refund")
+    return "the decision is neither release nor refund";
+  if (typeof r.reason !== "string" || r.reason.trim() === "" || r.reason.length > MAX_REASON) {
+    return `a ruling gives its reason, in at most ${MAX_REASON} characters`;
+  }
+  if (r.settlement !== undefined) {
+    const problem = settlementProblem(r.settlement);
+    if (problem)
+      return `settlement: ${problem}`;
+    const s = r.settlement;
+    const leaf = r.decision === "release" ? "B" : "C";
+    if (s.kind !== r.decision || s.leaf !== leaf)
+      return `a ${r.decision} ruling co-signs leaf ${leaf}`;
+  }
+  if (r.txid !== undefined && !isHex32(r.txid))
+    return "the txid is malformed";
+  return;
+}
+function parseRuling(event) {
+  if (event.kind !== ESCROW_KIND)
+    return { ok: false, reason: `kind ${event.kind} is not ${ESCROW_KIND}` };
+  if (event.tags.filter((t) => t[0] === "d").length !== 1)
+    return { ok: false, reason: "a ruling must have exactly one d tag" };
+  const d = tagValue(event, "d");
+  if (!d?.startsWith(RULING_D_PREFIX))
+    return { ok: false, reason: "not a ruling" };
+  let body;
+  try {
+    body = JSON.parse(event.content);
+  } catch {
+    return { ok: false, reason: "content is not JSON" };
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return { ok: false, reason: "content is not an object" };
+  if (body.v !== 1)
+    return { ok: false, reason: `unsupported ruling version ${JSON.stringify(body.v ?? null)}` };
+  const ruling = { id: body.escrow, decision: body.decision, reason: body.reason, settlement: body.settlement, txid: body.txid };
+  const problem = rulingProblem(ruling);
+  if (problem)
+    return { ok: false, reason: problem };
+  if (d !== RULING_D_PREFIX + ruling.id)
+    return { ok: false, reason: "the d tag names another escrow" };
+  const s = ruling.settlement;
+  return {
+    ok: true,
+    ruling: {
+      id: ruling.id,
+      author: event.pubkey,
+      decision: ruling.decision,
+      reason: ruling.reason,
+      ...s ? { settlement: { kind: s.kind, leaf: s.leaf, outpoint: s.outpoint, dest: s.dest, fee: s.fee, sig: s.sig } } : {},
+      ...ruling.txid ? { txid: ruling.txid } : {},
+      publishedAt: event.created_at,
+      event
+    }
+  };
+}
+function escrowFilters(id, authors = []) {
+  const base = {
+    kinds: [ESCROW_KIND],
+    "#d": [ESCROW_D_PREFIX + id, RULING_D_PREFIX + id]
+  };
+  const known = authors.filter(isHex32);
+  return known.length ? [base, { ...base, authors: [...new Set(known)] }] : [base];
+}
+function escrowsForFilter(pubkeys) {
+  return { kinds: [ESCROW_KIND], "#p": [...pubkeys] };
+}
+// core/escrow/trade.ts
+var SITE_RULES = Object.freeze({
+  mainnet: Object.freeze({ timeoutBlocks: 4320, deliverBlocks: 1008 }),
+  testnet: Object.freeze({ timeoutBlocks: 144, deliverBlocks: 12 }),
+  signet: Object.freeze({ timeoutBlocks: 144, deliverBlocks: 12 }),
+  regtest: Object.freeze({ timeoutBlocks: 144, deliverBlocks: 12 })
+});
+var MIN_ARBITER_BLOCKS = 72;
+function rulesProblem(rules) {
+  for (const [name, blocks] of Object.entries(rules)) {
+    if (!Number.isInteger(blocks) || blocks < 1 || blocks > 65535)
+      return `${name} must be 1..65535 blocks`;
+  }
+  if (rules.timeoutBlocks - rules.deliverBlocks < MIN_ARBITER_BLOCKS) {
+    return `the timeout leaves under ${MIN_ARBITER_BLOCKS} blocks after the transfer deadline, so a dispute could be outrun`;
+  }
+  return;
+}
+function deadlines(fundingHeight, rules) {
+  return { deliverBy: fundingHeight + rules.deliverBlocks, timeoutAt: fundingHeight + rules.timeoutBlocks };
+}
+function arbiterRule(facts) {
+  const d = deadlines(facts.fundingHeight, facts.rules);
+  const timedOut = facts.tip + 1 >= d.timeoutAt;
+  const { seller, buyer, tip } = facts;
+  const verdict = (action, stage, reason) => ({ action, reason, stage, deadlines: d, timedOut });
+  if (buyer.received)
+    return verdict("release", "received", "the buyer confirmed the domain is in their account");
+  if (seller.cancelled)
+    return verdict("refund", "cancelled", "the seller cancelled the sale");
+  if (buyer.disputed || seller.disputed) {
+    const who = buyer.disputed && seller.disputed ? "both sides" : buyer.disputed ? "the buyer" : "the seller";
+    return verdict("decide", "disputed", `${who} asked the arbiter to decide, on the registry's record and what each side shows`);
+  }
+  if (seller.sent) {
+    return verdict("wait", "transferred", "the seller says the domain is on its way to the buyer, who confirms once it has arrived");
+  }
+  if (tip >= d.deliverBy) {
+    return verdict("refund", "late", `the seller did not say the domain was transferred before block ${d.deliverBy}`);
+  }
+  return verdict("wait", "awaiting-transfer", `the seller transfers the domain to the buyer before block ${d.deliverBy}`);
+}
+
+// core/nostr/handshake.ts
+var HANDSHAKE_KIND = 20078;
+var INVITE_PREFIX = "fmdinv5";
+var REPLY_PREFIX = "fmdrep5";
+var INVITE_TOPIC = "fmd-invite";
+var REPLY_TOPIC = "fmd-reply";
+var VERSION = 5;
+var HEX32 = /^[0-9a-f]{64}$/;
+var NETWORKS = ["mainnet", "testnet", "signet", "regtest"];
+function encode(prefix, topic, event) {
+  if (event.kind !== HANDSHAKE_KIND || !event.tags.some((t) => t[0] === "t" && t[1] === topic)) {
+    throw new Error(`encode: that is not a signed ${topic}`);
+  }
+  return prefix + base64urlnopad.encode(new TextEncoder().encode(JSON.stringify(event)));
+}
+function decode(prefix, topic, text) {
+  if (typeof text !== "string")
+    return { ok: false, reason: "not a string" };
+  const trimmed = text.trim().replace(/\s+/g, "");
+  if (/^fmd(inv|rep)[1234]/.test(trimmed)) {
+    return { ok: false, reason: "this comes from an older version of the escrow; ask for a new invite" };
+  }
+  if (!trimmed.startsWith(prefix)) {
+    return { ok: false, reason: `this should start with "${prefix}"` };
+  }
+  let value;
+  try {
+    value = JSON.parse(new TextDecoder().decode(base64urlnopad.decode(trimmed.slice(prefix.length))));
+  } catch {
+    return { ok: false, reason: "it did not decode: a character is missing or wrong" };
+  }
+  const checked = checkEvent(value);
+  if (!checked.ok)
+    return { ok: false, reason: `its signature does not check out (${checked.reason})` };
+  const event = checked.event;
+  if (event.kind !== HANDSHAKE_KIND || !event.tags.some((t) => t[0] === "t" && t[1] === topic)) {
+    return { ok: false, reason: `this is not an escrow ${topic === INVITE_TOPIC ? "invite" : "reply"}` };
+  }
+  let body;
+  try {
+    body = JSON.parse(event.content);
+  } catch {
+    return { ok: false, reason: "its content is not JSON" };
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return { ok: false, reason: "not an object" };
+  return { ok: true, event, body };
+}
+function inviteProblem(v, sender) {
+  if (typeof v.salt !== "string" || !HEX32.test(v.salt))
+    return "the invite has no valid salt";
+  if (typeof v.initiatorKey !== "string" || !HEX32.test(v.initiatorKey))
+    return "the invite has no valid escrow key";
+  if (typeof v.arbiter !== "string" || !HEX32.test(v.arbiter))
+    return "the invite names no valid arbiter key";
+  if (v.arbiter === v.initiatorKey)
+    return "the invite's own escrow key is also its arbiter";
+  if (typeof v.to !== "string" || !HEX32.test(v.to))
+    return "the invite does not say who it is for";
+  if (v.to === sender)
+    return "the invite is addressed to its own sender";
+  const domain = tryNormaliseDomain(v.domain);
+  if (!domain.ok)
+    return `domain: ${domain.reason}`;
+  if (!Number.isSafeInteger(v.amountSats) || v.amountSats <= 0)
+    return "the amount is not a positive whole number of sats";
+  if (!NETWORKS.includes(v.network))
+    return "unknown network";
+  const rules = rulesProblem({ timeoutBlocks: v.timeoutBlocks, deliverBlocks: v.deliverBlocks });
+  if (rules)
+    return rules;
+  if (v.initiatorRole !== "buyer" && v.initiatorRole !== "seller")
+    return "no role";
+  return;
+}
+function buildInvite(invite, params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildInvite: pubkey must be 64 lowercase hex characters");
+  const problem = inviteProblem(invite, params.pubkey);
+  if (problem)
+    throw new Error(`buildInvite: ${problem}`);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: HANDSHAKE_KIND,
+    tags: [
+      ["t", INVITE_TOPIC],
+      ["p", invite.to]
+    ],
+    content: JSON.stringify({
+      v: VERSION,
+      salt: invite.salt,
+      domain: normaliseDomain(invite.domain),
+      amountSats: invite.amountSats,
+      network: invite.network,
+      timeoutBlocks: invite.timeoutBlocks,
+      deliverBlocks: invite.deliverBlocks,
+      arbiter: invite.arbiter,
+      initiatorRole: invite.initiatorRole,
+      initiatorKey: invite.initiatorKey,
+      to: invite.to
+    })
+  };
+}
+function encodeInvite(event) {
+  return encode(INVITE_PREFIX, INVITE_TOPIC, event);
+}
+function decodeInvite(text) {
+  const parsed = decode(INVITE_PREFIX, INVITE_TOPIC, text);
+  if (!parsed.ok)
+    return parsed;
+  const v = parsed.body;
+  if (v.v !== VERSION)
+    return { ok: false, reason: `unsupported invite version ${String(v.v)}` };
+  const problem = inviteProblem(v, parsed.event.pubkey);
+  if (problem)
+    return { ok: false, reason: problem };
+  return {
+    ok: true,
+    from: parsed.event.pubkey,
+    id: parsed.event.id,
+    invite: {
+      salt: v.salt,
+      domain: normaliseDomain(v.domain),
+      amountSats: v.amountSats,
+      network: v.network,
+      timeoutBlocks: v.timeoutBlocks,
+      deliverBlocks: v.deliverBlocks,
+      arbiter: v.arbiter,
+      initiatorRole: v.initiatorRole,
+      initiatorKey: v.initiatorKey,
+      to: v.to
+    }
+  };
+}
+function buildReply(reply, params) {
+  const { invite } = params.invite;
+  if (params.pubkey !== invite.to)
+    throw new Error("buildReply: this invite is for a different key");
+  const problem = replyProblem(reply, invite);
+  if (problem)
+    throw new Error(`buildReply: ${problem}`);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: HANDSHAKE_KIND,
+    tags: [
+      ["t", REPLY_TOPIC],
+      ["e", params.invite.id],
+      ["p", params.invite.from]
+    ],
+    content: JSON.stringify({
+      v: VERSION,
+      invite: params.invite.id,
+      joinerKey: reply.joinerKey
+    })
+  };
+}
+function encodeReply(event) {
+  return encode(REPLY_PREFIX, REPLY_TOPIC, event);
+}
+function replyProblem(reply, invite) {
+  if (typeof reply.joinerKey !== "string" || !HEX32.test(reply.joinerKey))
+    return "the reply has no valid escrow key";
+  if (reply.joinerKey === invite.initiatorKey)
+    return "the reply carries your own key back; ask them to join from the invite";
+  if (reply.joinerKey === invite.arbiter)
+    return "the reply carries the arbiter key, and each party needs its own";
+  return;
+}
+function decodeReply(text, signed) {
+  const parsed = decode(REPLY_PREFIX, REPLY_TOPIC, text);
+  if (!parsed.ok)
+    return parsed;
+  const v = parsed.body;
+  if (v.v !== VERSION)
+    return { ok: false, reason: `unsupported reply version ${String(v.v)}` };
+  if (v.invite !== signed.id) {
+    return { ok: false, reason: "this reply answers a different invite; send them the current link" };
+  }
+  if (parsed.event.pubkey !== signed.invite.to) {
+    return { ok: false, reason: "this reply is signed by someone other than the person the invite is for" };
+  }
+  const reply = { joinerKey: typeof v.joinerKey === "string" ? v.joinerKey : "" };
+  const problem = replyProblem(reply, signed.invite);
+  if (problem)
+    return { ok: false, reason: problem };
+  return { ok: true, reply, from: parsed.event.pubkey };
+}
+function resolveHandshake(invite, reply) {
+  const buyerKey = invite.initiatorRole === "buyer" ? invite.initiatorKey : reply.joinerKey;
+  const sellerKey = invite.initiatorRole === "seller" ? invite.initiatorKey : reply.joinerKey;
+  return {
+    salt: invite.salt,
+    domain: invite.domain,
+    amountSats: invite.amountSats,
+    network: invite.network,
+    timeoutBlocks: invite.timeoutBlocks,
+    deliverBlocks: invite.deliverBlocks,
+    arbiter: invite.arbiter,
+    buyerKey,
+    sellerKey
+  };
+}
+function termsProblem(terms, rules) {
+  if (!isHex32(terms.arbiter))
+    return "every escrow here has an arbiter, and these terms name none";
+  if (terms.timeoutBlocks !== rules.timeoutBlocks) {
+    return `the timelock is ${terms.timeoutBlocks} blocks, and this site uses ${rules.timeoutBlocks}`;
+  }
+  if (terms.deliverBlocks !== rules.deliverBlocks) {
+    return `the transfer window is ${terms.deliverBlocks} blocks, and this site uses ${rules.deliverBlocks}`;
+  }
+  return;
+}
+// core/nostr/deletion.ts
+var DELETION_KIND = 5;
+function buildDeletion(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildDeletion: pubkey must be 64 lowercase hex characters");
+  if (params.events.length === 0)
+    throw new Error("buildDeletion: nothing to delete");
+  const tags = [];
+  const kinds = new Set;
+  for (const event of params.events) {
+    if (event.pubkey !== params.pubkey) {
+      throw new Error("buildDeletion: you can only request deletion of your own events");
+    }
+    if (event.kind >= 30000 && event.kind < 40000)
+      tags.push(["a", addressOf(event)]);
+    else
+      tags.push(["e", event.id]);
+    kinds.add(event.kind);
+  }
+  for (const kind of kinds)
+    tags.push(["k", String(kind)]);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: DELETION_KIND,
+    tags,
+    content: params.reason ?? ""
+  };
+}
+function parseDeletion(event) {
+  if (event.kind !== DELETION_KIND)
+    return;
+  return {
+    ids: event.tags.filter((t) => t[0] === "e" && t[1]).map((t) => t[1]),
+    addresses: event.tags.filter((t) => t[0] === "a" && t[1]).map((t) => t[1]),
+    reason: event.content
+  };
+}
+function applyDeletions(events, deletions) {
+  const byAuthorIds = new Map;
+  const byAuthorAddresses = new Map;
+  for (const request of deletions) {
+    const parsed = parseDeletion(request);
+    if (!parsed)
+      continue;
+    const ids = byAuthorIds.get(request.pubkey) ?? new Set;
+    for (const id of parsed.ids)
+      ids.add(id);
+    byAuthorIds.set(request.pubkey, ids);
+    const addresses = byAuthorAddresses.get(request.pubkey) ?? new Map;
+    for (const address of parsed.addresses) {
+      const previous = addresses.get(address);
+      addresses.set(address, previous === undefined ? request.created_at : Math.max(previous, request.created_at));
+    }
+    byAuthorAddresses.set(request.pubkey, addresses);
+  }
+  return events.filter((event) => {
+    if (byAuthorIds.get(event.pubkey)?.has(event.id))
+      return false;
+    const at = byAuthorAddresses.get(event.pubkey)?.get(addressOf(event));
+    return at === undefined || event.created_at > at;
+  });
+}
+function deletionFilter(authors) {
+  return { kinds: [DELETION_KIND], authors: [...authors] };
+}
+// core/escrow/recovery.ts
+var RECOVERY_PREFIX = "fmdrec1";
+var VERSION2 = 1;
+var CHECKSUM_BYTES = 4;
+var HAS_ARBITER = 1;
+var TIMEOUT_TO_SELLER = 2;
+var HAS_FUNDING = 4;
+var HAS_BINDING = 8;
+function encodeRecovery(recovery) {
+  assertKey(recovery.secretKey, 32, "secretKey");
+  assertKey(recovery.buyer, 32, "buyer");
+  assertKey(recovery.seller, 32, "seller");
+  if (recovery.arbiter)
+    assertKey(recovery.arbiter, 32, "arbiter");
+  if (recovery.binding)
+    assertKey(recovery.binding, 32, "binding");
+  if (!Number.isInteger(recovery.timeoutBlocks) || recovery.timeoutBlocks < 1 || recovery.timeoutBlocks > 65535) {
+    throw new Error(`encodeRecovery: timeoutBlocks must be 1..65535, got ${recovery.timeoutBlocks}`);
+  }
+  let flags = 0;
+  if (recovery.arbiter)
+    flags |= HAS_ARBITER;
+  if (recovery.timeoutTo === "seller")
+    flags |= TIMEOUT_TO_SELLER;
+  if (recovery.funding)
+    flags |= HAS_FUNDING;
+  if (recovery.binding)
+    flags |= HAS_BINDING;
+  const parts = [
+    Uint8Array.of(VERSION2, flags),
+    Uint8Array.of(recovery.timeoutBlocks >>> 8 & 255, recovery.timeoutBlocks & 255),
+    recovery.secretKey,
+    recovery.buyer,
+    recovery.seller
+  ];
+  if (recovery.arbiter)
+    parts.push(recovery.arbiter);
+  if (recovery.binding)
+    parts.push(recovery.binding);
+  if (recovery.funding) {
+    if (!/^[0-9a-f]{64}$/.test(recovery.funding.txid)) {
+      throw new Error("encodeRecovery: the funding txid must be 64 lowercase hex characters");
+    }
+    parts.push(hexToBytes(recovery.funding.txid), u322(recovery.funding.vout), u64(recovery.funding.amountSats));
+  }
+  const payload = concatBytes(...parts);
+  const checksum2 = sha256(payload).subarray(0, CHECKSUM_BYTES);
+  return RECOVERY_PREFIX + base64urlnopad.encode(concatBytes(payload, checksum2));
+}
+function decodeRecovery(text) {
+  if (typeof text !== "string")
+    return { ok: false, reason: "not a string" };
+  const trimmed = text.trim().replace(/\s+/g, "");
+  if (!trimmed.startsWith(RECOVERY_PREFIX)) {
+    return { ok: false, reason: `a recovery string starts with "${RECOVERY_PREFIX}"` };
+  }
+  let bytes;
+  try {
+    bytes = base64urlnopad.decode(trimmed.slice(RECOVERY_PREFIX.length));
+  } catch {
+    return { ok: false, reason: "the string is not valid base64url; check for a mistyped character" };
+  }
+  if (bytes.length < 2 + 2 + 32 * 3 + CHECKSUM_BYTES)
+    return { ok: false, reason: "too short to be a recovery string" };
+  const payload = bytes.subarray(0, bytes.length - CHECKSUM_BYTES);
+  const checksum2 = bytes.subarray(bytes.length - CHECKSUM_BYTES);
+  const expected = sha256(payload).subarray(0, CHECKSUM_BYTES);
+  if (bytesToHex(checksum2) !== bytesToHex(expected)) {
+    return { ok: false, reason: "the checksum does not match: a character is wrong or missing" };
+  }
+  const version = payload[0];
+  if (version !== VERSION2)
+    return { ok: false, reason: `unsupported recovery version ${version}` };
+  const flags = payload[1];
+  if (flags & ~(HAS_ARBITER | TIMEOUT_TO_SELLER | HAS_FUNDING | HAS_BINDING)) {
+    return { ok: false, reason: "this string uses a newer format than this page understands" };
+  }
+  const timeoutBlocks = payload[2] << 8 | payload[3];
+  let at = 4;
+  const take = (n) => {
+    const slice = payload.subarray(at, at + n);
+    at += n;
+    return slice;
+  };
+  const secretKey = take(32);
+  const buyer = take(32);
+  const seller = take(32);
+  const arbiter = flags & HAS_ARBITER ? take(32) : undefined;
+  if (flags & HAS_BINDING && payload.length - at < 32)
+    return { ok: false, reason: "the escrow binding is truncated" };
+  const binding = flags & HAS_BINDING ? take(32) : undefined;
+  let funding;
+  if (flags & HAS_FUNDING) {
+    if (payload.length - at < 32 + 4 + 8)
+      return { ok: false, reason: "the funding outpoint is truncated" };
+    const txid2 = bytesToHex(take(32));
+    const voutBytes = take(4);
+    const amountBytes = take(8);
+    const vout = voutBytes[0] | voutBytes[1] << 8 | voutBytes[2] << 16 | voutBytes[3] << 24;
+    let amountSats = 0n;
+    for (let i = 7;i >= 0; i--)
+      amountSats = amountSats << 8n | BigInt(amountBytes[i]);
+    funding = { txid: txid2, vout: vout >>> 0, amountSats };
+  }
+  if (at !== payload.length)
+    return { ok: false, reason: "the recovery string has trailing bytes" };
+  return {
+    ok: true,
+    recovery: {
+      version,
+      secretKey,
+      buyer,
+      seller,
+      arbiter,
+      timeoutTo: flags & TIMEOUT_TO_SELLER ? "seller" : "buyer",
+      timeoutBlocks,
+      ...binding ? { binding } : {},
+      ...funding ? { funding } : {}
+    }
+  };
+}
+function rebuildFromRecovery(recovery) {
+  const pubkey = schnorr.getPublicKey(recovery.secretKey);
+  const hex = bytesToHex(pubkey);
+  const role = hex === bytesToHex(recovery.buyer) ? "buyer" : hex === bytesToHex(recovery.seller) ? "seller" : recovery.arbiter && hex === bytesToHex(recovery.arbiter) ? "arbiter" : undefined;
+  if (!role) {
+    throw new Error("rebuildFromRecovery: the key in this string is not one of the keys in this escrow: " + "the string is for a different escrow, or it is damaged");
+  }
+  return {
+    tree: buildTree({
+      buyer: recovery.buyer,
+      seller: recovery.seller,
+      arbiter: recovery.arbiter,
+      timeoutTo: recovery.timeoutTo,
+      timeoutBlocks: recovery.timeoutBlocks,
+      ...recovery.binding ? { binding: recovery.binding } : {}
+    }),
+    role,
+    pubkey
+  };
+}
+function assertKey(bytes, length, name) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== length) {
+    throw new Error(`encodeRecovery: ${name} must be ${length} bytes`);
+  }
+}
+
+// core/nostr/keybackup.ts
+var KEY_BACKUP_KIND = 30078;
+var KEY_BACKUP_D_PREFIX = "fmd:key:";
+var KEY_BACKUP_VERSION = 1;
+var SLOT_TAG = utf8ToBytes("fmd/key-backup-slot");
+var SLOT = /^[0-9a-f]{32}$/;
+var ALT = "An encrypted flexmydomain escrow key backup";
+var PAYLOAD = /^[A-Za-z0-9+/]+={0,2}$/;
+var MAX_PAYLOAD = 4096;
+function keyBackupSlot(escrowSecret) {
+  if (escrowSecret.length !== 32)
+    throw new Error("keyBackupSlot: an escrow key is 32 bytes");
+  return bytesToHex(sha256(concatBytes(SLOT_TAG, escrowSecret))).slice(0, 32);
+}
+function keyBackupPlaintext(backup) {
+  const problem = backupProblem(backup);
+  if (problem)
+    throw new Error(`keyBackupPlaintext: ${problem}`);
+  const { v, recovery, id, role, domain, amountSats, network, at } = backup;
+  return JSON.stringify({ v, recovery, id, role, domain, amountSats, network, at });
+}
+function buildKeyBackup(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildKeyBackup: pubkey must be 64 lowercase hex characters");
+  if (!SLOT.test(params.slot))
+    throw new Error("buildKeyBackup: the slot must be 32 lowercase hex characters");
+  if (!looksEncrypted(params.ciphertext))
+    throw new Error("buildKeyBackup: the content must be a NIP-44 payload");
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: KEY_BACKUP_KIND,
+    tags: [
+      ["d", KEY_BACKUP_D_PREFIX + params.slot],
+      ["alt", ALT]
+    ],
+    content: params.ciphertext
+  };
+}
+var looksEncrypted = (content) => typeof content === "string" && content.length >= 132 && content.length <= MAX_PAYLOAD && PAYLOAD.test(content);
+function isKeyBackup(event) {
+  if (event.kind !== KEY_BACKUP_KIND || !Array.isArray(event.tags) || event.tags.length !== 2)
+    return false;
+  const [d, alt] = event.tags;
+  return d?.length === 2 && d[0] === "d" && typeof d[1] === "string" && d[1].startsWith(KEY_BACKUP_D_PREFIX) && SLOT.test(d[1].slice(KEY_BACKUP_D_PREFIX.length)) && alt?.length === 2 && alt[0] === "alt" && alt[1] === ALT && looksEncrypted(event.content);
+}
+function keyBackupFilter(pubkey) {
+  return { kinds: [KEY_BACKUP_KIND], authors: [pubkey], limit: 200 };
+}
+function backupProblem(b) {
+  if (b.v !== KEY_BACKUP_VERSION)
+    return `unknown backup version ${String(b.v)}`;
+  if (typeof b.recovery !== "string")
+    return "no recovery string";
+  if (typeof b.id !== "string" || !/^[0-9a-f]{64}$/.test(b.id))
+    return "no escrow id";
+  if (b.role !== "buyer" && b.role !== "seller")
+    return "the role is neither buyer nor seller";
+  if (typeof b.domain !== "string" || b.domain.length === 0 || b.domain.length > 253)
+    return "no domain";
+  if (!Number.isSafeInteger(b.amountSats) || b.amountSats <= 0)
+    return "no amount";
+  if (typeof b.network !== "string" || !/^[a-z]{1,16}$/.test(b.network))
+    return "no network";
+  if (!Number.isSafeInteger(b.at) || b.at < 0)
+    return "no time";
+  const decoded = decodeRecovery(b.recovery);
+  if (!decoded.ok)
+    return `the recovery string doesn't read: ${decoded.reason}`;
+  const binding = decoded.recovery.binding;
+  if (!binding || bytesToHex(binding) !== b.id)
+    return "the recovery string isn't bound to this escrow id";
+  return;
+}
+function parseKeyBackup(plaintext) {
+  let raw;
+  try {
+    raw = JSON.parse(plaintext);
+  } catch {
+    return { ok: false, reason: "not JSON" };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return { ok: false, reason: "not an object" };
+  const b = raw;
+  const problem = backupProblem(b);
+  if (problem)
+    return { ok: false, reason: problem };
+  return {
+    ok: true,
+    backup: { v: 1, recovery: b.recovery, id: b.id, role: b.role, domain: b.domain, amountSats: b.amountSats, network: b.network, at: b.at }
+  };
+}
+function draftProblem(d) {
+  if (d.v !== KEY_BACKUP_VERSION)
+    return `unknown backup version ${String(d.v)}`;
+  if (d.draft !== true)
+    return "not a draft";
+  if (typeof d.key !== "string" || !/^[0-9a-f]{64}$/.test(d.key))
+    return "no key";
+  let pubkey;
+  try {
+    pubkey = bytesToHex(schnorr.getPublicKey(hexToBytes(d.key)));
+  } catch {
+    return "the key is not a valid key";
+  }
+  const invite = decodeInvite(d.invite);
+  if (!invite.ok)
+    return `the invite doesn't read: ${invite.reason}`;
+  const i = invite.invite;
+  if (i.initiatorKey !== pubkey)
+    return "the key isn't the one the invite names";
+  if (d.role !== i.initiatorRole)
+    return "the role isn't the invite's";
+  if (d.domain !== i.domain || d.amountSats !== i.amountSats || d.network !== i.network)
+    return "the terms aren't the invite's";
+  if (!Number.isSafeInteger(d.at) || d.at < 0)
+    return "no time";
+  return;
+}
+function draftBackupPlaintext(draft) {
+  const problem = draftProblem(draft);
+  if (problem)
+    throw new Error(`draftBackupPlaintext: ${problem}`);
+  const { v, invite, key, role, domain, amountSats, network, at } = draft;
+  return JSON.stringify({ v, draft: true, invite, key, role, domain, amountSats, network, at });
+}
+function parseDraftBackup(plaintext) {
+  let raw;
+  try {
+    raw = JSON.parse(plaintext);
+  } catch {
+    return { ok: false, reason: "not JSON" };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return { ok: false, reason: "not an object" };
+  const d = raw;
+  const problem = draftProblem(d);
+  if (problem)
+    return { ok: false, reason: problem };
+  return {
+    ok: true,
+    draft: { v: 1, draft: true, invite: d.invite, key: d.key, role: d.role, domain: d.domain, amountSats: d.amountSats, network: d.network, at: d.at }
+  };
+}
+// core/nostr/portfolio.ts
+var PORTFOLIO_KIND = 30078;
+var PORTFOLIO_D = "fmd:portfolio";
+var PORTFOLIO_TOPIC = "flexmydomain";
+var PORTFOLIO_VERSION = 1;
+var FIRST_REGISTRATION = 479692800;
+function buildPortfolio(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildPortfolio: pubkey must be 64 lowercase hex characters");
+  const seen = new Set;
+  const entries = params.entries.map((entry) => {
+    const domain = normaliseDomain(entry.domain);
+    if (seen.has(domain))
+      throw new Error(`buildPortfolio: ${domain} appears twice`);
+    seen.add(domain);
+    if (entry.source === "dns") {
+      if (entry.iat === undefined || !isHex64(entry.sig ?? "")) {
+        throw new Error(`buildPortfolio: the DNS entry for ${domain} has no proof attached`);
+      }
+      const digest = proofDigest({ domain, pubkey: params.pubkey, iat: entry.iat });
+      if (!verifyDigestSignature(entry.sig, digest, params.pubkey)) {
+        throw new Error(`buildPortfolio: the proof for ${domain} does not verify under this key`);
+      }
+    }
+    return { ...entry, domain };
+  });
+  entries.sort((a, b) => a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: PORTFOLIO_KIND,
+    tags: [
+      ["d", PORTFOLIO_D],
+      ["t", PORTFOLIO_TOPIC]
+    ],
+    content: JSON.stringify({
+      v: PORTFOLIO_VERSION,
+      domains: entries.map((e) => ({
+        domain: e.domain,
+        source: e.source,
+        first_seen: e.firstSeen,
+        ...e.iat !== undefined ? { iat: e.iat } : {},
+        ...e.sig !== undefined ? { sig: e.sig } : {},
+        ...e.tagline ? { tagline: e.tagline } : {},
+        ...e.forSale ? { for_sale: true } : {}
+      }))
+    })
+  };
+}
+function parsePortfolio(event) {
+  if (event.kind !== PORTFOLIO_KIND)
+    return { ok: false, reason: `kind ${event.kind} is not ${PORTFOLIO_KIND}` };
+  if (tagValue(event, "d") !== PORTFOLIO_D) {
+    return { ok: false, reason: `d tag ${JSON.stringify(tagValue(event, "d") ?? null)} is not ${PORTFOLIO_D}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(event.content);
+  } catch (err) {
+    return { ok: false, reason: `content is not JSON: ${err.message}` };
+  }
+  if (typeof parsed !== "object" || parsed === null)
+    return { ok: false, reason: "content is not an object" };
+  const body = parsed;
+  const list = Array.isArray(body.domains) ? body.domains : [];
+  const entries = [];
+  const dropped = [];
+  if (!Array.isArray(body.domains))
+    dropped.push({ entry: body.domains ?? null, reason: "no domains list" });
+  for (const raw of list) {
+    const entry = readEntry(raw, event.created_at);
+    if ("reason" in entry)
+      dropped.push({ entry: raw, reason: entry.reason });
+    else
+      entries.push(entry.entry);
+  }
+  return {
+    ok: true,
+    portfolio: {
+      version: typeof body.v === "number" ? body.v : 0,
+      pubkey: event.pubkey,
+      entries,
+      event
+    },
+    dropped
+  };
+}
+function readEntry(raw, createdAt) {
+  if (typeof raw !== "object" || raw === null)
+    return { reason: "not an object" };
+  const e = raw;
+  const domain = tryNormaliseDomain(e.domain);
+  if (!domain.ok)
+    return { reason: `domain: ${domain.reason}` };
+  if (e.source !== undefined && e.source !== "dns" && e.source !== "nip05") {
+    return { reason: `unknown proof source ${String(JSON.stringify(e.source)).slice(0, 40)}` };
+  }
+  const source = e.source === "nip05" ? "nip05" : "dns";
+  if (e.iat !== undefined && !isValidIat(e.iat))
+    return { reason: "iat is not a timestamp a proof record can carry" };
+  const iat = isValidIat(e.iat) ? e.iat : undefined;
+  const sig = isHex64(e.sig) ? e.sig : undefined;
+  if (source === "dns" && (iat === undefined || sig === undefined)) {
+    return { reason: "a DNS entry with no proof attached" };
+  }
+  const plausible = (t) => Number.isSafeInteger(t) && t >= FIRST_REGISTRATION && t <= createdAt;
+  const firstSeen = [e.first_seen, iat].find(plausible) ?? createdAt;
+  return {
+    entry: {
+      domain: domain.domain,
+      source,
+      iat,
+      sig,
+      firstSeen,
+      tagline: typeof e.tagline === "string" ? e.tagline : undefined,
+      forSale: e.for_sale === true
+    }
+  };
+}
+function verifyPortfolio(portfolio) {
+  return portfolio.entries.map((entry) => {
+    if (entry.source === "nip05") {
       return {
-        state: "reverted",
-        confirmed: true,
-        since: latest2[0].at,
-        evidence: latest2.map((o) => o.snapshotHash),
-        reason: "the registry showed the transfer completed and now does not: the name moved back. " + "This is a dispute, not a failure: the buyer may hold both the domain and a claim on the money."
+        domain: entry.domain,
+        proven: false,
+        reason: "a NIP-05 proof carries no signature and can only be checked live"
       };
     }
-    return {
-      state: "transferred",
-      confirmed: true,
-      since: transferred.since,
-      evidence: transferred.evidence,
-      reason: "the registry shows the name where the buyer committed to receive it"
-    };
-  }
-  for (const [state, reason] of [
-    ["pending", "a transfer is underway; this is the point of no return"],
-    ["unlocked", "the transfer lock is off, so the name can be transferred"],
-    ["locked", "clientTransferProhibited is present, so the name cannot move yet"]
-  ]) {
-    const result = confirm(observations, params.commitment, state);
-    if (result.confirmed)
-      return { state, confirmed: true, since: result.since, evidence: result.evidence, reason };
-  }
-  const latest = classify(observations[observations.length - 1], params.commitment);
-  return {
-    state: "unknown",
-    confirmed: false,
-    evidence: observations.map((o) => o.snapshotHash),
-    reason: `the last poll suggests "${latest}", but ${REQUIRED_AGREEING_POLLS} agreeing polls at least ` + `${MIN_POLL_GAP_SECONDS / 60} minutes apart are required before anything moves on it`
-  };
-}
-function transferAllowed(verdict) {
-  return verdict.confirmed && (verdict.state === "unlocked" || verdict.state === "pending");
-}
-function registrantActed(params) {
-  const sorted = [...params.observations].sort((a, b) => a.at - b.at);
-  const states = sorted.map((o) => classify(o, params.commitment));
-  const open = (s) => s === "unlocked" || s === "pending";
-  let lockedAt;
-  let lockEvidence = [];
-  search:
-    for (let i = 0;i < sorted.length; i++) {
-      if (states[i] !== "locked")
-        continue;
-      for (let j = i + 1;j < sorted.length; j++) {
-        if (states[j] === "locked" && sorted[j].at - sorted[i].at >= MIN_POLL_GAP_SECONDS) {
-          lockedAt = sorted[j].at;
-          lockEvidence = [sorted[i].snapshotHash, sorted[j].snapshotHash];
-          break search;
-        }
-      }
+    if (entry.iat === undefined || entry.sig === undefined) {
+      return { domain: entry.domain, proven: false, reason: "no proof attached" };
     }
-  if (lockedAt === undefined) {
+    const digest = proofDigest({ domain: entry.domain, pubkey: portfolio.pubkey, iat: entry.iat });
+    const proven = verifyDigestSignature(entry.sig, digest, portfolio.pubkey);
     return {
-      acted: false,
-      evidence: [],
-      reason: `the registry has not yet been seen with the transfer lock on ` + `(${REQUIRED_AGREEING_POLLS} readings at least ${MIN_POLL_GAP_SECONDS / 60} minutes apart)`
+      domain: entry.domain,
+      proven,
+      reason: proven ? undefined : "signature does not verify under this portfolio key",
+      record: proven ? { version: PROOF_VERSION, iat: entry.iat, pubkey: portfolio.pubkey, sig: entry.sig } : undefined
     };
-  }
-  const latestLocked = states[states.length - 1] === "locked";
-  for (let k = 0;k < sorted.length && !latestLocked; k++) {
-    if (sorted[k].at <= lockedAt || !open(states[k]))
-      continue;
-    for (let l = k + 1;l < sorted.length; l++) {
-      if (open(states[l]) && sorted[l].at - sorted[k].at >= MIN_POLL_GAP_SECONDS) {
-        return {
-          acted: true,
-          lockedAt,
-          unlockedAt: sorted[k].at,
-          evidence: [...lockEvidence, sorted[k].snapshotHash, sorted[l].snapshotHash],
-          reason: "the registry showed the transfer lock on, then off: a change only the registrant can make"
-        };
-      }
+  });
+}
+function upsertEntry(entries, entry) {
+  const domain = normaliseDomain(entry.domain);
+  const existing = entries.find((e) => e.domain === domain);
+  const merged = {
+    ...entry,
+    domain,
+    firstSeen: existing ? Math.min(existing.firstSeen, entry.firstSeen) : entry.firstSeen
+  };
+  return [...entries.filter((e) => e.domain !== domain), merged].sort((a, b) => a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+}
+function removeEntry(entries, domain) {
+  const d = normaliseDomain(domain);
+  return entries.filter((e) => e.domain !== d);
+}
+function portfolioFilter(pubkey) {
+  return { kinds: [PORTFOLIO_KIND], authors: [pubkey], "#d": [PORTFOLIO_D], limit: 1 };
+}
+
+// core/nostr/index.ts
+var DEFAULT_RELAYS = [
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://relay.primal.net",
+  "wss://nostr.oxtr.dev",
+  "wss://nostr.mom"
+];
+// core/escrow/registrar.ts
+var SPACESHIP_IANA_ID = "3862";
+var TRANSFER_LOCK_DAYS2 = 60;
+var BLOCKING_STATUSES = ["pendingtransfer", "pendingdelete", "redemptionperiod", "pendingrestore", "pendingrenew"];
+function normaliseAccount(raw) {
+  if (typeof raw !== "string")
+    return;
+  const account = raw.trim();
+  return /^[\x21-\x7e]{1,254}$/.test(account) ? account : undefined;
+}
+function registrarFindings(facts, now) {
+  const findings = [];
+  for (const status of BLOCKING_STATUSES) {
+    if (facts.statuses.includes(status)) {
+      findings.push({ level: "refuse", code: `status:${status}`, message: `the registry shows status ${status}` });
     }
   }
-  return {
-    acted: false,
-    lockedAt,
-    evidence: lockEvidence,
-    reason: latestLocked ? "the registry shows the transfer lock on; it has to be seen off before anything is paid" : `the lock has been seen on; it has not yet been seen off in ${REQUIRED_AGREEING_POLLS} readings ` + `at least ${MIN_POLL_GAP_SECONDS / 60} minutes apart`
-  };
-}
-function fundable(params) {
-  return params.verdict.confirmed && params.verdict.state === "unlocked" && registrantActed(params).acted;
-}
-function releasable(verdict) {
-  return verdict.confirmed && verdict.state === "transferred";
-}
-function buildCommitment(params) {
-  const nameservers = [...params.nameservers ?? []].map((n) => n.trim().toLowerCase().replace(/\.$/, "")).filter((n) => n !== "").sort();
-  if (!params.registrarIanaId && nameservers.length === 0) {
-    throw new Error("buildCommitment: a commitment needs a registrar IANA id or at least one nameserver; " + "without one the transfer could never be shown to have completed");
+  if (facts.statuses.includes("serverupdateprohibited")) {
+    findings.push({
+      level: "warn",
+      code: "status:serverupdateprohibited",
+      message: "the registry has the name update-locked, which can stop it changing hands; the seller should check with the registrar first"
+    });
   }
-  return { registrarIanaId: params.registrarIanaId, nameservers, committedAt: params.committedAt };
+  if (["clienttransferprohibited", "servertransferprohibited", "transferprohibited"].some((s) => facts.statuses.includes(s))) {
+    findings.push({
+      level: "warn",
+      code: "status:transferprohibited",
+      message: "the domain is transfer-locked: a push to another account at the same registrar usually works anyway, and a move to another registrar needs the seller to unlock it first"
+    });
+  }
+  for (const status of ["clienthold", "serverhold"]) {
+    if (facts.statuses.includes(status)) {
+      findings.push({ level: "warn", code: `status:${status}`, message: `the registry shows status ${status}, so the domain does not resolve` });
+    }
+  }
+  const since = (t) => t === undefined ? undefined : (now - t) / SECONDS_PER_DAY;
+  const young = [since(facts.registration), since(facts.lastTransfer)].filter((d) => d !== undefined && d >= 0 && d < TRANSFER_LOCK_DAYS2);
+  if (young.length) {
+    findings.push({
+      level: "warn",
+      code: "recent-change",
+      message: `the domain was registered or moved between registrars ${Math.floor(Math.min(...young))} days ago, so for ${TRANSFER_LOCK_DAYS2} days it can't move to another registrar: a push to the buyer's account at the same registrar still works`
+    });
+  }
+  if (facts.expiration === undefined) {
+    findings.push({ level: "warn", code: "no-expiry", message: "the registry published no expiration date" });
+  } else {
+    const days = (facts.expiration - now) / SECONDS_PER_DAY;
+    if (days < 0) {
+      findings.push({ level: "refuse", code: "expired", message: `the domain expired ${Math.floor(-days)} days ago` });
+    } else if (days < MIN_EXPIRY_DAYS) {
+      findings.push({
+        level: "refuse",
+        code: "expiring",
+        message: `the domain expires in ${Math.floor(days)} days; renew it before selling, so the buyer doesn't inherit the deadline`
+      });
+    }
+  }
+  return findings;
 }
 // core/escrow/index.ts
 function describeTree(tree) {
@@ -7973,11 +8788,15 @@ async function lookupTxtVia(provider, name, options = {}) {
       return { provider: provider.name, records: [], status: undefined, dnssec: false, observedAt, raw, error: `HTTP ${response.status}` };
     }
     const body = JSON.parse(raw);
-    const records = (body.Answer ?? []).filter((a) => a.type === TXT_TYPE && typeof a.data === "string").map((a) => unquoteTxt(a.data));
+    const status = typeof body.Status === "number" ? body.Status : undefined;
+    if (status !== 0 && status !== 3) {
+      return { provider: provider.name, records: [], status, dnssec: false, observedAt, raw, error: `DNS status ${status ?? "missing"}` };
+    }
+    const records = (Array.isArray(body.Answer) ? body.Answer : []).filter((a) => a?.type === TXT_TYPE && typeof a.data === "string").map((a) => unquoteTxt(a.data));
     return {
       provider: provider.name,
       records,
-      status: typeof body.Status === "number" ? body.Status : undefined,
+      status,
       dnssec: body.AD === true,
       observedAt,
       raw
@@ -8009,10 +8828,11 @@ async function lookupTxt(name, options = {}) {
       counts.set(record, (counts.get(record) ?? 0) + 1);
     }
   }
+  const complete = answering.length === observations.length && observations.length > 0;
   const agreed = [];
   const disputed = [];
   for (const [record, count] of counts) {
-    if (count === answering.length && answering.length > 0)
+    if (complete && count === answering.length)
       agreed.push(record);
     else
       disputed.push(record);
@@ -8023,6 +8843,7 @@ async function lookupTxt(name, options = {}) {
     agreed: agreed.sort(),
     disputed: disputed.sort(),
     answered: answering.length > 0,
+    complete,
     dnssec: answering.length > 0 && answering.every((o) => o.dnssec)
   };
 }
@@ -8063,11 +8884,13 @@ async function fetchRdapDomainAt(baseUrl, domain, options = {}) {
     const response = await fetch(url, {
       headers: { accept: "application/rdap+json, application/json" },
       signal: options.signal,
-      credentials: "omit"
+      credentials: "omit",
+      cache: "no-store"
     });
-    const raw = await response.text();
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const raw = new TextDecoder().decode(bytes);
     if (!response.ok) {
-      return { domain, url, ok: false, status: response.status, raw, hash: snapshotHash(raw), observedAt };
+      return { domain, url, ok: false, status: response.status, raw, hash: snapshotHash(bytes), observedAt };
     }
     return {
       domain,
@@ -8076,7 +8899,7 @@ async function fetchRdapDomainAt(baseUrl, domain, options = {}) {
       status: response.status,
       response: JSON.parse(raw),
       raw,
-      hash: snapshotHash(raw),
+      hash: snapshotHash(bytes),
       observedAt
     };
   } catch (err) {
@@ -8094,7 +8917,7 @@ async function fetchRdapDomain(domain, options = {}) {
       ok: false,
       status: undefined,
       observedAt,
-      error: "this TLD publishes no RDAP service",
+      error: "this TLD publishes no RDAP service over HTTPS",
       bootstrap,
       supported: false
     };
@@ -8110,8 +8933,73 @@ async function fetchRdapDomain(domain, options = {}) {
   }
   return { ...last, bootstrap, supported: true };
 }
+async function readDomain(domain, options = {}) {
+  const snapshot = await fetchRdapDomain(domain, options);
+  if (!snapshot.supported) {
+    return { ok: false, reason: "this TLD publishes no RDAP service over HTTPS, so its registrar cannot be checked", final: true };
+  }
+  if (snapshot.status === 404)
+    return { ok: false, reason: "the registry says this domain is not registered", final: true };
+  if (!snapshot.ok || snapshot.raw === undefined) {
+    return { ok: false, reason: snapshot.error ?? `the registry did not answer (HTTP ${snapshot.status ?? "none"})` };
+  }
+  const problem = rdapAnswerProblem(snapshot.response, domain);
+  if (problem)
+    return { ok: false, reason: problem };
+  return { ok: true, facts: parseRdapDomain(snapshot.response), hash: snapshot.hash ?? snapshotHash(snapshot.raw) };
+}
 // net/relay.ts
 var DEFAULT_TIMEOUT_MS = 6000;
+var warmMs = 0;
+var warm = new Map;
+function keepConnectionsWarm(ms) {
+  warmMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  if (warmMs === 0) {
+    for (const [relay, held] of [...warm]) {
+      warm.delete(relay);
+      clearTimeout(held.timer);
+      closeQuietly(held.socket);
+    }
+  }
+}
+function closeQuietly(socket) {
+  try {
+    socket.close();
+  } catch {}
+}
+function park(relay, socket) {
+  if (warmMs === 0 || socket.readyState !== WebSocket.OPEN || warm.has(relay)) {
+    closeQuietly(socket);
+    return;
+  }
+  const drop = () => {
+    if (warm.get(relay)?.socket !== socket)
+      return;
+    clearTimeout(warm.get(relay).timer);
+    warm.delete(relay);
+  };
+  socket.onopen = null;
+  socket.onmessage = null;
+  socket.onerror = drop;
+  socket.onclose = drop;
+  const timer = setTimeout(() => {
+    drop();
+    closeQuietly(socket);
+  }, warmMs);
+  warm.set(relay, { socket, timer });
+}
+function takeWarm(relay) {
+  const held = warm.get(relay);
+  if (!held)
+    return;
+  warm.delete(relay);
+  clearTimeout(held.timer);
+  if (held.socket.readyState !== WebSocket.OPEN) {
+    closeQuietly(held.socket);
+    return;
+  }
+  return held.socket;
+}
 async function queryRelays(relays, filters, options = {}) {
   const byId = new Map;
   await Promise.all(relays.map(async (relay) => {
@@ -8129,19 +9017,47 @@ async function queryRelays(relays, filters, options = {}) {
 async function queryRelay(relay, filters, options = {}) {
   return (await queryRelayDetailed(relay, filters, options)).events;
 }
-function queryRelayDetailed(relay, filters, options = {}) {
+function queryRelayDetailed(relay, filters, options = {}, fresh = false) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   const subId = `fmd-${Math.random().toString(36).slice(2, 10)}`;
   return new Promise((resolve, reject) => {
+    const reused = fresh || options.auth ? undefined : takeWarm(relay);
     let socket;
     try {
-      socket = new WebSocket(relay);
+      socket = reused ?? new WebSocket(relay);
     } catch (err) {
       reject(err);
       return;
     }
+    let heard = false;
     const events = [];
     let settled = false;
+    let challenge2;
+    let authId;
+    let authOk = false;
+    let closedForAuth = false;
+    let retried = false;
+    const request = () => socket.send(JSON.stringify(["REQ", subId, ...filters]));
+    const authenticate = async () => {
+      if (!options.auth || challenge2 === undefined || authId !== undefined)
+        return;
+      let signed;
+      try {
+        signed = await options.auth(relay, challenge2);
+      } catch {
+        signed = undefined;
+      }
+      if (settled)
+        return;
+      if (!signed) {
+        if (closedForAuth)
+          finish();
+        return;
+      }
+      authId = signed.id;
+      socket.send(JSON.stringify(["AUTH", signed]));
+    };
     const finish = (error, complete = false) => {
       if (settled)
         return;
@@ -8151,19 +9067,30 @@ function queryRelayDetailed(relay, filters, options = {}) {
       try {
         if (socket.readyState === WebSocket.OPEN)
           socket.send(JSON.stringify(["CLOSE", subId]));
-        socket.close();
+        if (!error && complete && !options.auth)
+          park(relay, socket);
+        else
+          socket.close();
       } catch {}
       if (error)
         reject(error);
       else
         resolve({ events, complete });
     };
+    const retry = () => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      closeQuietly(socket);
+      queryRelayDetailed(relay, filters, { ...options, timeoutMs: Math.max(1, deadline - Date.now()) }, true).then(resolve, reject);
+    };
     const onAbort = () => finish(new Error("aborted"));
     options.signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => finish(), timeoutMs);
-    socket.onopen = () => socket.send(JSON.stringify(["REQ", subId, ...filters]));
-    socket.onerror = () => finish(new Error(`${relay}: connection failed`));
-    socket.onclose = () => finish();
+    socket.onerror = () => reused && !heard ? retry() : finish(new Error(`${relay}: connection failed`));
+    socket.onclose = () => reused && !heard ? retry() : finish();
     socket.onmessage = (message) => {
       let frame;
       try {
@@ -8174,11 +9101,30 @@ function queryRelayDetailed(relay, filters, options = {}) {
       if (!Array.isArray(frame))
         return;
       const [type, id, payload] = frame;
+      if (type === "AUTH" && typeof id === "string") {
+        challenge2 = id;
+        authenticate();
+        return;
+      }
+      if (type === "OK" && authId !== undefined && id === authId) {
+        authOk = payload === true;
+        if (closedForAuth) {
+          if (authOk && !retried) {
+            retried = true;
+            closedForAuth = false;
+            request();
+          } else {
+            finish();
+          }
+        }
+        return;
+      }
       if (id !== subId)
         return;
+      heard = true;
       if (type === "EVENT") {
         const checked = checkEvent(payload);
-        if (checked.ok) {
+        if (checked.ok && matchFilters(filters, checked.event)) {
           events.push(checked.event);
           if (options.limit !== undefined && events.length >= options.limit)
             finish(undefined, true);
@@ -8187,9 +9133,29 @@ function queryRelayDetailed(relay, filters, options = {}) {
       }
       if (type === "EOSE")
         finish(undefined, true);
-      if (type === "CLOSED")
+      if (type === "CLOSED") {
+        if (typeof payload === "string" && payload.startsWith("auth-required:") && options.auth && !retried) {
+          if (authOk) {
+            retried = true;
+            request();
+          } else {
+            closedForAuth = true;
+            authenticate();
+          }
+          return;
+        }
         finish();
+      }
     };
+    if (reused) {
+      try {
+        request();
+      } catch {
+        retry();
+      }
+    } else {
+      socket.onopen = request;
+    }
   });
 }
 async function publishToRelays(relays, event, options = {}) {
@@ -8221,7 +9187,27 @@ function publishToRelay(relay, event, options = {}) {
       resolve(result);
     };
     const timer = setTimeout(() => finish({ relay, ok: false, message: "timed out" }), timeoutMs);
-    socket.onopen = () => socket.send(JSON.stringify(["EVENT", event]));
+    let challenge2;
+    let authId;
+    let refused;
+    const send = () => socket.send(JSON.stringify(["EVENT", event]));
+    const authenticate = async () => {
+      if (!options.auth || challenge2 === undefined || authId !== undefined)
+        return;
+      const signed = await options.auth(relay, challenge2).catch(() => {
+        return;
+      });
+      if (settled)
+        return;
+      if (!signed) {
+        if (refused)
+          finish(refused);
+        return;
+      }
+      authId = signed.id;
+      socket.send(JSON.stringify(["AUTH", signed]));
+    };
+    socket.onopen = send;
     socket.onerror = () => finish({ relay, ok: false, message: "connection failed" });
     socket.onclose = () => finish({ relay, ok: false, message: "closed before acknowledging" });
     socket.onmessage = (message) => {
@@ -8234,9 +9220,31 @@ function publishToRelay(relay, event, options = {}) {
       if (!Array.isArray(frame))
         return;
       const [type, id, ok, reason] = frame;
+      if (type === "AUTH" && typeof id === "string") {
+        challenge2 = id;
+        if (refused)
+          authenticate();
+        return;
+      }
+      if (type === "OK" && authId !== undefined && id === authId) {
+        if (ok === true && refused) {
+          refused = undefined;
+          send();
+        } else if (refused) {
+          finish(refused);
+        }
+        return;
+      }
       if (type !== "OK" || id !== event.id)
         return;
-      finish({ relay, ok: ok === true, message: typeof reason === "string" && reason !== "" ? reason : undefined });
+      const result = { relay, ok: ok === true, message: typeof reason === "string" && reason !== "" ? reason : undefined };
+      if (!result.ok && options.auth && authId === undefined && result.message?.startsWith("auth-required:")) {
+        refused = result;
+        if (challenge2 !== undefined)
+          authenticate();
+        return;
+      }
+      finish(result);
     };
   });
 }
@@ -8324,8 +9332,49 @@ var EXPLORERS = Object.freeze({
   testnet: "https://mempool.space/testnet4",
   regtest: "http://localhost:3002"
 });
+var TXID = /^[0-9a-f]{64}$/;
+var HEX = /^(?:[0-9a-f]{2})*$/;
+var MAX_HISTORY_PAGES = 20;
+function readOutput(txid2, vout, value, status) {
+  if (typeof txid2 !== "string" || !TXID.test(txid2))
+    throw new Error("chain: the API sent a malformed txid");
+  if (!Number.isSafeInteger(vout) || vout < 0)
+    throw new Error("chain: the API sent a malformed output index");
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new Error("chain: the API sent a malformed amount");
+  return {
+    txid: txid2,
+    vout,
+    valueSats: BigInt(value),
+    ...readStatus(status)
+  };
+}
+function readStatus(status) {
+  const s = typeof status === "object" && status !== null ? status : {};
+  return {
+    confirmed: s.confirmed === true,
+    blockHeight: Number.isSafeInteger(s.block_height) ? s.block_height : undefined
+  };
+}
+function count(value) {
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new Error("chain: the API sent a malformed transaction count");
+  return value;
+}
 function chainApi(network, base = CHAIN_APIS[network]) {
   const get = async (path) => fetch(`${base}${path}`, { credentials: "omit", headers: { accept: "application/json, text/plain" } });
+  const json = async (path, what) => {
+    const response = await get(path);
+    if (!response.ok)
+      throw new Error(`chain: ${what} request failed (HTTP ${response.status})`);
+    return response.json();
+  };
+  const list = async (path, what) => {
+    const body = await json(path, what);
+    if (!Array.isArray(body))
+      throw new Error(`chain: the ${what} answer is not a list`);
+    return body;
+  };
   return {
     network,
     base,
@@ -8334,20 +9383,76 @@ function chainApi(network, base = CHAIN_APIS[network]) {
       const response = await get("/blocks/tip/height");
       if (!response.ok)
         throw new Error(`chain: tip height request failed (HTTP ${response.status})`);
-      return Number(await response.text());
+      const text = (await response.text()).trim();
+      const height = /^\d{1,9}$/.test(text) ? Number(text) : NaN;
+      if (!Number.isSafeInteger(height))
+        throw new Error("chain: the API sent a malformed tip height");
+      return height;
     },
     async utxos(address) {
       const response = await get(`/address/${encodeURIComponent(address)}/utxo`);
       if (!response.ok)
         throw new Error(`chain: utxo request failed (HTTP ${response.status})`);
       const body = await response.json();
-      return body.map((u) => ({
-        txid: u.txid,
-        vout: u.vout,
-        valueSats: BigInt(u.value),
-        confirmed: u.status.confirmed,
-        blockHeight: u.status.block_height
-      }));
+      if (!Array.isArray(body))
+        throw new Error("chain: the utxo answer is not a list");
+      return body.map((u) => readOutput(u.txid, u.vout, u.value, u.status));
+    },
+    async activity(address) {
+      const a = encodeURIComponent(address);
+      const stats = await json(`/address/${a}`, "address");
+      const confirmedCount = count(stats?.chain_stats?.tx_count);
+      const mempoolCount = count(stats?.mempool_stats?.tx_count);
+      const txs = new Map;
+      const confirmed = (tx) => readStatus(tx.status).confirmed;
+      const confirmedRead = () => [...txs.values()].filter(confirmed).length;
+      const add = (tx) => {
+        if (typeof tx?.txid !== "string" || !TXID.test(tx.txid))
+          throw new Error("chain: the API sent a malformed txid");
+        const known = txs.get(tx.txid);
+        if (known && (confirmed(known) || !confirmed(tx)))
+          return false;
+        txs.set(tx.txid, tx);
+        return true;
+      };
+      if (mempoolCount > 0)
+        for (const tx of await list(`/address/${a}/txs/mempool`, "mempool history"))
+          add(tx);
+      let after = "";
+      for (let page = 0;page < MAX_HISTORY_PAGES && confirmedRead() < confirmedCount; page++) {
+        const batch = await list(`/address/${a}/txs/chain${after}`, "history");
+        let fresh = 0;
+        for (const tx of batch)
+          if (add(tx))
+            fresh++;
+        if (fresh === 0)
+          break;
+        after = `/${batch[batch.length - 1].txid}`;
+      }
+      const complete = confirmedRead() >= confirmedCount && txs.size - confirmedRead() >= mempoolCount;
+      const outputs = new Map;
+      const spends = new Map;
+      for (const tx of txs.values()) {
+        for (const [index, out] of (Array.isArray(tx.vout) ? tx.vout : []).entries()) {
+          if (out?.scriptpubkey_address !== address)
+            continue;
+          const output = readOutput(tx.txid, index, out.value, tx.status);
+          outputs.set(`${output.txid}:${output.vout}`, output);
+        }
+        for (const input of Array.isArray(tx.vin) ? tx.vin : []) {
+          if (input?.prevout?.scriptpubkey_address !== address)
+            continue;
+          if (typeof input.txid !== "string" || !TXID.test(input.txid) || !Number.isSafeInteger(input.vout)) {
+            throw new Error("chain: the API sent a malformed input");
+          }
+          const witness = Array.isArray(input.witness) && input.witness.every((w) => typeof w === "string" && HEX.test(w)) ? input.witness : [];
+          spends.set(`${input.txid}:${input.vout}`, { txid: tx.txid, ...readStatus(tx.status), witness });
+        }
+      }
+      return {
+        outputs: [...outputs.entries()].map(([outpoint, output]) => ({ ...output, spentBy: spends.get(outpoint) })),
+        complete
+      };
     },
     async transaction(txid2) {
       const response = await get(`/tx/${txid2}`);
@@ -8386,7 +9491,10 @@ function chainApi(network, base = CHAIN_APIS[network]) {
         if (!response.ok)
           throw new Error(String(response.status));
         const body = await response.json();
-        return body.halfHourFee ?? 2;
+        const rate = body.halfHourFee;
+        if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0)
+          throw new Error("no usable rate");
+        return rate;
       } catch {
         return network === "mainnet" ? 10 : 2;
       }
@@ -8417,37 +9525,63 @@ function findFunding(utxos, requiredSats, minConfirmations = 1, tipHeight) {
   return { funded: true, utxo: chosen };
 }
 // net/outbox.ts
+var RETRY_UNSURE_MS = 30000;
+function canonical(urls) {
+  return [...new Set(urls.map((u) => normaliseRelayUrl(u) ?? u))];
+}
+
 class RelayDirectory {
   fallback;
+  quorum;
   lists = new Map;
   pending = new Map;
-  constructor(fallback = DEFAULT_RELAYS) {
+  unsure = new Map;
+  constructor(fallback = DEFAULT_RELAYS, quorum = Math.min(3, Math.ceil(fallback.length / 2))) {
     this.fallback = fallback;
+    this.quorum = quorum;
   }
   known(pubkey) {
     return this.lists.get(pubkey);
   }
+  certain(pubkey) {
+    return this.lists.has(pubkey) && !this.unsure.has(pubkey);
+  }
   absorb(events) {
     for (const event of newestPerAddress(events)) {
       const entries = parseRelayList(event);
-      if (entries.length > 0)
+      if (entries.length > 0) {
         this.lists.set(event.pubkey, entries);
+        this.unsure.delete(event.pubkey);
+      }
     }
   }
   async resolve(pubkeys, options = {}) {
-    const missing = [...new Set(pubkeys)].filter((p) => !this.lists.has(p) && !this.pending.has(p));
+    const stale = (p) => {
+      const at = this.unsure.get(p);
+      return at !== undefined && (options.retryUnsure === true || Date.now() - at > RETRY_UNSURE_MS);
+    };
+    const missing = [...new Set(pubkeys)].filter((p) => (!this.lists.has(p) || stale(p)) && !this.pending.has(p));
     if (missing.length > 0) {
-      const request = queryRelays(this.fallback, [relayListFilter(missing)], { timeoutMs: 4000, ...options }).then((events) => {
+      let finished = 0;
+      const request = queryRelays(this.fallback, [relayListFilter(missing)], {
+        timeoutMs: options.timeoutMs ?? 4000,
+        onRelayDone: (_relay, _count, _error, complete) => {
+          if (complete)
+            finished++;
+        }
+      }).catch(() => []).then((events) => {
         this.absorb(events);
-        for (const pubkey of missing)
-          if (!this.lists.has(pubkey))
-            this.lists.set(pubkey, []);
+        const sure = finished >= this.quorum;
+        for (const pubkey of missing) {
+          if ((this.lists.get(pubkey)?.length ?? 0) > 0 && !this.unsure.has(pubkey))
+            continue;
+          this.lists.set(pubkey, []);
+          if (sure)
+            this.unsure.delete(pubkey);
+          else
+            this.unsure.set(pubkey, Date.now());
+        }
         return events;
-      }).catch(() => {
-        for (const pubkey of missing)
-          if (!this.lists.has(pubkey))
-            this.lists.set(pubkey, []);
-        return [];
       });
       for (const pubkey of missing) {
         this.pending.set(pubkey, request.then(() => this.lists.get(pubkey) ?? []));
@@ -8469,12 +9603,39 @@ class RelayDirectory {
   }
 }
 async function publishOutbox(directory, event, options = {}) {
-  await directory.resolve([event.pubkey]);
-  const relays = [...new Set([...directory.writeRelays(event.pubkey), ...options.extraRelays ?? []])];
-  return publishToRelays(relays, event);
+  await directory.resolve([event.pubkey], { retryUnsure: true });
+  const before = directory.writeRelays(event.pubkey);
+  const named = event.kind === RELAY_LIST_KIND ? writeRelaysFor(parseRelayList(event), []) : [];
+  const relays = canonical([...before, ...named, ...options.extraRelays ?? []]);
+  const results = await publishToRelays(relays, event);
+  if (event.kind === RELAY_LIST_KIND && results.some((r) => r.ok))
+    directory.absorb([event]);
+  return results;
+}
+async function readOwn(directory, pubkey, filters, options = {}) {
+  await directory.resolve([pubkey], { retryUnsure: true }).catch(() => {
+    return;
+  });
+  const own = (directory.known(pubkey) ?? []).filter((r) => r.write).map((r) => r.url);
+  const asked = canonical([...own.length ? own : directory.fallback, ...options.extraRelays ?? []]);
+  const finished = new Set;
+  const events = await queryRelays(asked, filters, {
+    timeoutMs: options.timeoutMs ?? 6000,
+    onRelayDone: (relay, _count, _error, complete) => {
+      if (complete)
+        finished.add(relay);
+    }
+  }).catch(() => []);
+  const unanswered = asked.filter((r) => !finished.has(r));
+  return {
+    events: events.filter((e) => e.pubkey === pubkey),
+    complete: directory.certain(pubkey) && unanswered.length === 0,
+    answered: finished.size,
+    unanswered
+  };
 }
 async function queryOutbox(directory, authors, filter, options = {}) {
-  const lists = await directory.resolve(authors, options);
+  const lists = await directory.resolve(authors, { timeoutMs: options.timeoutMs });
   const plan = planAuthorQuery(lists, authors, directory.fallback);
   const byId = new Map;
   await Promise.all([...plan.entries()].map(async ([relay, group]) => {
@@ -8495,7 +9656,7 @@ function lightningAddressUrl(address) {
   return `https://${match[2]}/.well-known/lnurlp/${match[1]}`;
 }
 async function fetchLnurlPay(addressOrUrl, options = {}) {
-  const url = addressOrUrl.startsWith("http") ? addressOrUrl : lightningAddressUrl(addressOrUrl);
+  const url = /^https?:\/\//i.test(addressOrUrl.trim()) ? addressOrUrl.trim() : lightningAddressUrl(addressOrUrl);
   if (!url)
     return { ok: false, reason: `${JSON.stringify(addressOrUrl)} is not a lightning address` };
   let body;
@@ -8552,9 +9713,14 @@ async function requestZapInvoice(params) {
     const body = await response.json();
     if (body.status === "ERROR")
       return { ok: false, reason: String(body.reason ?? "the provider refused") };
-    if (typeof body.pr !== "string" || body.pr === "")
+    const pr = typeof body.pr === "string" ? body.pr.trim() : "";
+    if (pr === "")
       return { ok: false, reason: "the provider returned no invoice" };
-    return { ok: true, invoice: body.pr };
+    const amount = bolt11AmountMsats(pr);
+    if (amount !== params.amountMsats) {
+      return { ok: false, reason: `the provider's invoice is for ${amount ?? "an unstated amount of"} msats, not the ${params.amountMsats} asked for` };
+    }
+    return { ok: true, invoice: pr };
   } catch (err) {
     return { ok: false, reason: err.message };
   }
@@ -8565,7 +9731,8 @@ async function zapperKeyFor(lightningAddress, options = {}) {
     return zapperKeys.get(lightningAddress);
   const result = await fetchLnurlPay(lightningAddress, options);
   const key = result.ok && result.info.allowsNostr ? result.info.nostrPubkey : undefined;
-  zapperKeys.set(lightningAddress, key);
+  if (result.ok)
+    zapperKeys.set(lightningAddress, key);
   return key;
 }
 function clearZapperKeyCache() {
@@ -8576,12 +9743,11 @@ async function checkDomainProof(params) {
   const domain = normaliseDomain(params.domain);
   const checkedAt = params.now ?? Math.floor(Date.now() / 1000);
   const lookup = await lookupTxt(proofRecordName(domain), { signal: params.signal, now: checkedAt });
-  const dns = verifyProofRecords({
-    domain,
-    pubkey: params.pubkey,
-    records: lookup.agreed,
-    now: checkedAt
-  });
+  const silent = lookup.observations.filter((o) => o.error !== undefined);
+  const dns = lookup.complete ? verifyProofRecords({ domain, pubkey: params.pubkey, records: lookup.agreed, now: checkedAt }) : {
+    ok: false,
+    reason: silent.length ? `not checked, ${silent.map((o) => `${o.provider} did not answer (${o.error})`).join(" and ")}` : "not checked, no resolver was asked"
+  };
   let nip05;
   let url;
   if (!dns.ok && !params.dnsOnly) {
@@ -8593,7 +9759,7 @@ async function checkDomainProof(params) {
     domain,
     pubkey: params.pubkey,
     status: combineProofs({ domain, pubkey: params.pubkey, dns, nip05 }),
-    answered: lookup.answered,
+    answered: lookup.complete,
     dnssec: lookup.dnssec,
     lookup,
     dns,
@@ -8605,8 +9771,18 @@ async function checkDomainProof(params) {
 async function checkRegistry(params) {
   const domain = normaliseDomain(params.domain);
   const checkedAt = params.now ?? Math.floor(Date.now() / 1000);
-  const snapshot = await fetchRdapDomain(domain, { ...params, now: checkedAt });
-  if (!snapshot.supported || !snapshot.ok) {
+  let snapshot;
+  try {
+    snapshot = await fetchRdapDomain(domain, { ...params, now: checkedAt });
+  } catch (err) {
+    return {
+      domain,
+      snapshot: { domain, url: "", ok: false, status: undefined, observedAt: checkedAt, error: err.message },
+      supported: true,
+      checkedAt
+    };
+  }
+  if (!snapshot.supported || !snapshot.ok || rdapAnswerProblem(snapshot.response, domain)) {
     return { domain, snapshot, supported: snapshot.supported, checkedAt };
   }
   return {
@@ -8625,37 +9801,6 @@ async function checkRegistry(params) {
 async function checkDomain(params) {
   const [proof, registry] = await Promise.all([checkDomainProof(params), checkRegistry(params)]);
   return { proof, registry };
-}
-// net/transfer.ts
-async function observe(params) {
-  const snapshot = await fetchRdapDomain(params.domain, {
-    bootstrap: params.bootstrap,
-    signal: params.signal,
-    now: params.now
-  });
-  if (!snapshot.supported) {
-    return { reason: "this TLD publishes no RDAP service, so a transfer cannot be verified here" };
-  }
-  if (!snapshot.ok || snapshot.raw === undefined) {
-    return { reason: snapshot.error ?? `the registry did not answer (HTTP ${snapshot.status ?? "none"})` };
-  }
-  return {
-    raw: snapshot.raw,
-    observation: {
-      at: params.now,
-      snapshotHash: snapshot.hash ?? snapshotHash(snapshot.raw),
-      facts: parseRdapDomain(snapshot.response)
-    }
-  };
-}
-function record(history, observation, max = 200) {
-  if (history.some((o) => o.at === observation.at))
-    return [...history];
-  const next = [...history, observation].sort((a, b) => a.at - b.at);
-  if (next.length <= max)
-    return next;
-  const keepHead = Math.floor(max / 2);
-  return [...next.slice(0, keepHead), ...next.slice(next.length - (max - keepHead))];
 }
 // client/messages.ts
 function wrapEntropy(now) {
@@ -8688,7 +9833,13 @@ function readMessages(wraps, recipientSecretKey) {
   const messages = [];
   let unreadable = 0;
   for (const wrap of wraps) {
-    const out = unwrap(wrap, recipientSecretKey);
+    let out;
+    try {
+      out = unwrap(wrap, recipientSecretKey);
+    } catch {
+      unreadable++;
+      continue;
+    }
     if (out.ok)
       messages.push({ rumor: out.rumor, sender: out.sender, sealedAt: out.sealedAt, wrap });
     else
@@ -8698,7 +9849,683 @@ function readMessages(wraps, recipientSecretKey) {
   return { messages, unreadable };
 }
 function canSealWith(signer) {
-  return Boolean(signer?.secretKey);
+  return Boolean(signer?.secretKey || signer?.nip44);
+}
+function wrapForEach(rumor, senderSecretKey, recipients, now) {
+  return [...new Set(recipients)].map((recipient) => giftWrap({ rumor, senderSecretKey, recipient, entropy: wrapEntropy(now) }));
+}
+async function wrapForEachWith(rumor, signer, recipients, now) {
+  const out = [];
+  for (const recipient of new Set(recipients))
+    out.push(await giftWrapWith({ rumor, signer, recipient, entropy: wrapEntropy(now) }));
+  return out;
+}
+async function readMessagesWith(wraps, signer) {
+  const nip44 = signer.nip44;
+  if (!nip44)
+    return { messages: [], unreadable: wraps.length };
+  const messages = [];
+  let unreadable = 0;
+  for (const wrap of wraps) {
+    const out = await unwrapWith(wrap, (peer, payload) => nip44.decrypt(peer, payload)).catch(() => ({ ok: false, reason: "" }));
+    if (out.ok)
+      messages.push({ rumor: out.rumor, sender: out.sender, sealedAt: out.sealedAt, wrap });
+    else
+      unreadable++;
+  }
+  messages.sort((a, b) => b.rumor.created_at - a.rumor.created_at);
+  return { messages, unreadable };
+}
+// node_modules/uqr/dist/index.mjs
+var QrCodeDataType = /* @__PURE__ */ ((QrCodeDataType2) => {
+  QrCodeDataType2[QrCodeDataType2["Border"] = -1] = "Border";
+  QrCodeDataType2[QrCodeDataType2["Data"] = 0] = "Data";
+  QrCodeDataType2[QrCodeDataType2["Function"] = 1] = "Function";
+  QrCodeDataType2[QrCodeDataType2["Position"] = 2] = "Position";
+  QrCodeDataType2[QrCodeDataType2["Timing"] = 3] = "Timing";
+  QrCodeDataType2[QrCodeDataType2["Alignment"] = 4] = "Alignment";
+  return QrCodeDataType2;
+})(QrCodeDataType || {});
+var LOW = [0, 1];
+var MEDIUM = [1, 0];
+var QUARTILE = [2, 3];
+var HIGH = [3, 2];
+var EccMap = {
+  L: LOW,
+  M: MEDIUM,
+  Q: QUARTILE,
+  H: HIGH
+};
+var NUMERIC_REGEX = /^\d*$/;
+var ALPHANUMERIC_REGEX = /^[A-Z0-9 $%*+./:-]*$/;
+var ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+var MIN_VERSION = 1;
+var MAX_VERSION = 40;
+var PENALTY_N1 = 3;
+var PENALTY_N2 = 3;
+var PENALTY_N3 = 40;
+var PENALTY_N4 = 10;
+var ECC_CODEWORDS_PER_BLOCK = [
+  [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+  [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+  [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+  [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
+];
+var NUM_ERROR_CORRECTION_BLOCKS = [
+  [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+  [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
+  [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
+  [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81]
+];
+
+class QrCode {
+  constructor(version, ecc, dataCodewords, msk) {
+    this.version = version;
+    this.ecc = ecc;
+    if (version < MIN_VERSION || version > MAX_VERSION)
+      throw new RangeError("Version value out of range");
+    if (msk < -1 || msk > 7)
+      throw new RangeError("Mask value out of range");
+    this.size = version * 4 + 17;
+    const row = Array.from({ length: this.size }).fill(false);
+    for (let i = 0;i < this.size; i++) {
+      this.modules.push(row.slice());
+      this.types.push(row.map(() => 0));
+    }
+    this.drawFunctionPatterns();
+    const allCodewords = this.addEccAndInterleave(dataCodewords);
+    this.drawCodewords(allCodewords);
+    if (msk === -1) {
+      let minPenalty = 1e9;
+      for (let i = 0;i < 8; i++) {
+        this.applyMask(i);
+        this.drawFormatBits(i);
+        const penalty = this.getPenaltyScore();
+        if (penalty < minPenalty) {
+          msk = i;
+          minPenalty = penalty;
+        }
+        this.applyMask(i);
+      }
+    }
+    this.mask = msk;
+    this.applyMask(msk);
+    this.drawFormatBits(msk);
+  }
+  size;
+  mask;
+  modules = [];
+  types = [];
+  getModule(x, y) {
+    return x >= 0 && x < this.size && y >= 0 && y < this.size && this.modules[y][x];
+  }
+  drawFunctionPatterns() {
+    for (let i = 0;i < this.size; i++) {
+      this.setFunctionModule(6, i, i % 2 === 0, QrCodeDataType.Timing);
+      this.setFunctionModule(i, 6, i % 2 === 0, QrCodeDataType.Timing);
+    }
+    this.drawFinderPattern(3, 3);
+    this.drawFinderPattern(this.size - 4, 3);
+    this.drawFinderPattern(3, this.size - 4);
+    const alignPatPos = this.getAlignmentPatternPositions();
+    const numAlign = alignPatPos.length;
+    for (let i = 0;i < numAlign; i++) {
+      for (let j = 0;j < numAlign; j++) {
+        if (!(i === 0 && j === 0 || i === 0 && j === numAlign - 1 || i === numAlign - 1 && j === 0))
+          this.drawAlignmentPattern(alignPatPos[i], alignPatPos[j]);
+      }
+    }
+    this.drawFormatBits(0);
+    this.drawVersion();
+  }
+  drawFormatBits(mask) {
+    const data = this.ecc[1] << 3 | mask;
+    let rem = data;
+    for (let i = 0;i < 10; i++)
+      rem = rem << 1 ^ (rem >>> 9) * 1335;
+    const bits = (data << 10 | rem) ^ 21522;
+    for (let i = 0;i <= 5; i++)
+      this.setFunctionModule(8, i, getBit(bits, i));
+    this.setFunctionModule(8, 7, getBit(bits, 6));
+    this.setFunctionModule(8, 8, getBit(bits, 7));
+    this.setFunctionModule(7, 8, getBit(bits, 8));
+    for (let i = 9;i < 15; i++)
+      this.setFunctionModule(14 - i, 8, getBit(bits, i));
+    for (let i = 0;i < 8; i++)
+      this.setFunctionModule(this.size - 1 - i, 8, getBit(bits, i));
+    for (let i = 8;i < 15; i++)
+      this.setFunctionModule(8, this.size - 15 + i, getBit(bits, i));
+    this.setFunctionModule(8, this.size - 8, true);
+  }
+  drawVersion() {
+    if (this.version < 7)
+      return;
+    let rem = this.version;
+    for (let i = 0;i < 12; i++)
+      rem = rem << 1 ^ (rem >>> 11) * 7973;
+    const bits = this.version << 12 | rem;
+    for (let i = 0;i < 18; i++) {
+      const color = getBit(bits, i);
+      const a = this.size - 11 + i % 3;
+      const b = Math.floor(i / 3);
+      this.setFunctionModule(a, b, color);
+      this.setFunctionModule(b, a, color);
+    }
+  }
+  drawFinderPattern(x, y) {
+    for (let dy = -4;dy <= 4; dy++) {
+      for (let dx = -4;dx <= 4; dx++) {
+        const dist = Math.max(Math.abs(dx), Math.abs(dy));
+        const xx = x + dx;
+        const yy = y + dy;
+        if (xx >= 0 && xx < this.size && yy >= 0 && yy < this.size)
+          this.setFunctionModule(xx, yy, dist !== 2 && dist !== 4, QrCodeDataType.Position);
+      }
+    }
+  }
+  drawAlignmentPattern(x, y) {
+    for (let dy = -2;dy <= 2; dy++) {
+      for (let dx = -2;dx <= 2; dx++) {
+        this.setFunctionModule(x + dx, y + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1, QrCodeDataType.Alignment);
+      }
+    }
+  }
+  setFunctionModule(x, y, isDark, type = QrCodeDataType.Function) {
+    this.modules[y][x] = isDark;
+    this.types[y][x] = type;
+  }
+  addEccAndInterleave(data) {
+    const ver = this.version;
+    const ecl = this.ecc;
+    if (data.length !== getNumDataCodewords(ver, ecl))
+      throw new RangeError("Invalid argument");
+    const numBlocks = NUM_ERROR_CORRECTION_BLOCKS[ecl[0]][ver];
+    const blockEccLen = ECC_CODEWORDS_PER_BLOCK[ecl[0]][ver];
+    const rawCodewords = Math.floor(getNumRawDataModules(ver) / 8);
+    const numShortBlocks = numBlocks - rawCodewords % numBlocks;
+    const shortBlockLen = Math.floor(rawCodewords / numBlocks);
+    const blocks = [];
+    const rsDiv = reedSolomonComputeDivisor(blockEccLen);
+    for (let i = 0, k = 0;i < numBlocks; i++) {
+      const dat = data.slice(k, k + shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1));
+      k += dat.length;
+      const ecc = reedSolomonComputeRemainder(dat, rsDiv);
+      if (i < numShortBlocks)
+        dat.push(0);
+      blocks.push(dat.concat(ecc));
+    }
+    const result = [];
+    for (let i = 0;i < blocks[0].length; i++) {
+      blocks.forEach((block, j) => {
+        if (i !== shortBlockLen - blockEccLen || j >= numShortBlocks)
+          result.push(block[i]);
+      });
+    }
+    return result;
+  }
+  drawCodewords(data) {
+    if (data.length !== Math.floor(getNumRawDataModules(this.version) / 8))
+      throw new RangeError("Invalid argument");
+    let i = 0;
+    for (let right = this.size - 1;right >= 1; right -= 2) {
+      if (right === 6)
+        right = 5;
+      for (let vert = 0;vert < this.size; vert++) {
+        for (let j = 0;j < 2; j++) {
+          const x = right - j;
+          const upward = (right + 1 & 2) === 0;
+          const y = upward ? this.size - 1 - vert : vert;
+          if (!this.types[y][x] && i < data.length * 8) {
+            this.modules[y][x] = getBit(data[i >>> 3], 7 - (i & 7));
+            i++;
+          }
+        }
+      }
+    }
+  }
+  applyMask(mask) {
+    if (mask < 0 || mask > 7)
+      throw new RangeError("Mask value out of range");
+    for (let y = 0;y < this.size; y++) {
+      for (let x = 0;x < this.size; x++) {
+        let invert2;
+        switch (mask) {
+          case 0:
+            invert2 = (x + y) % 2 === 0;
+            break;
+          case 1:
+            invert2 = y % 2 === 0;
+            break;
+          case 2:
+            invert2 = x % 3 === 0;
+            break;
+          case 3:
+            invert2 = (x + y) % 3 === 0;
+            break;
+          case 4:
+            invert2 = (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
+            break;
+          case 5:
+            invert2 = x * y % 2 + x * y % 3 === 0;
+            break;
+          case 6:
+            invert2 = (x * y % 2 + x * y % 3) % 2 === 0;
+            break;
+          case 7:
+            invert2 = ((x + y) % 2 + x * y % 3) % 2 === 0;
+            break;
+          default:
+            throw new Error("Unreachable");
+        }
+        if (!this.types[y][x] && invert2)
+          this.modules[y][x] = !this.modules[y][x];
+      }
+    }
+  }
+  getPenaltyScore() {
+    let result = 0;
+    for (let y = 0;y < this.size; y++) {
+      let runColor = false;
+      let runX = 0;
+      const runHistory = [0, 0, 0, 0, 0, 0, 0];
+      for (let x = 0;x < this.size; x++) {
+        if (this.modules[y][x] === runColor) {
+          runX++;
+          if (runX === 5)
+            result += PENALTY_N1;
+          else if (runX > 5)
+            result++;
+        } else {
+          this.finderPenaltyAddHistory(runX, runHistory);
+          if (!runColor)
+            result += this.finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+          runColor = this.modules[y][x];
+          runX = 1;
+        }
+      }
+      result += this.finderPenaltyTerminateAndCount(runColor, runX, runHistory) * PENALTY_N3;
+    }
+    for (let x = 0;x < this.size; x++) {
+      let runColor = false;
+      let runY = 0;
+      const runHistory = [0, 0, 0, 0, 0, 0, 0];
+      for (let y = 0;y < this.size; y++) {
+        if (this.modules[y][x] === runColor) {
+          runY++;
+          if (runY === 5)
+            result += PENALTY_N1;
+          else if (runY > 5)
+            result++;
+        } else {
+          this.finderPenaltyAddHistory(runY, runHistory);
+          if (!runColor)
+            result += this.finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+          runColor = this.modules[y][x];
+          runY = 1;
+        }
+      }
+      result += this.finderPenaltyTerminateAndCount(runColor, runY, runHistory) * PENALTY_N3;
+    }
+    for (let y = 0;y < this.size - 1; y++) {
+      for (let x = 0;x < this.size - 1; x++) {
+        const color = this.modules[y][x];
+        if (color === this.modules[y][x + 1] && color === this.modules[y + 1][x] && color === this.modules[y + 1][x + 1]) {
+          result += PENALTY_N2;
+        }
+      }
+    }
+    let dark = 0;
+    for (const row of this.modules)
+      dark = row.reduce((sum, color) => sum + (color ? 1 : 0), dark);
+    const total = this.size * this.size;
+    const k = Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1;
+    result += k * PENALTY_N4;
+    return result;
+  }
+  getAlignmentPatternPositions() {
+    if (this.version === 1) {
+      return [];
+    } else {
+      const numAlign = Math.floor(this.version / 7) + 2;
+      const step = this.version === 32 ? 26 : Math.ceil((this.version * 4 + 4) / (numAlign * 2 - 2)) * 2;
+      const result = [6];
+      for (let pos = this.size - 7;result.length < numAlign; pos -= step)
+        result.splice(1, 0, pos);
+      return result;
+    }
+  }
+  finderPenaltyCountPatterns(runHistory) {
+    const n = runHistory[1];
+    const core = n > 0 && runHistory[2] === n && runHistory[3] === n * 3 && runHistory[4] === n && runHistory[5] === n;
+    return (core && runHistory[0] >= n * 4 && runHistory[6] >= n ? 1 : 0) + (core && runHistory[6] >= n * 4 && runHistory[0] >= n ? 1 : 0);
+  }
+  finderPenaltyTerminateAndCount(currentRunColor, currentRunLength, runHistory) {
+    if (currentRunColor) {
+      this.finderPenaltyAddHistory(currentRunLength, runHistory);
+      currentRunLength = 0;
+    }
+    currentRunLength += this.size;
+    this.finderPenaltyAddHistory(currentRunLength, runHistory);
+    return this.finderPenaltyCountPatterns(runHistory);
+  }
+  finderPenaltyAddHistory(currentRunLength, runHistory) {
+    if (runHistory[0] === 0)
+      currentRunLength += this.size;
+    runHistory.pop();
+    runHistory.unshift(currentRunLength);
+  }
+}
+function appendBits(val, len, bb) {
+  if (len < 0 || len > 31 || val >>> len !== 0)
+    throw new RangeError("Value out of range");
+  for (let i = len - 1;i >= 0; i--)
+    bb.push(val >>> i & 1);
+}
+function getBit(x, i) {
+  return (x >>> i & 1) !== 0;
+}
+
+class QrSegment {
+  constructor(mode, numChars, bitData) {
+    this.mode = mode;
+    this.numChars = numChars;
+    this.bitData = bitData;
+    if (numChars < 0)
+      throw new RangeError("Invalid argument");
+    this.bitData = bitData.slice();
+  }
+  getData() {
+    return this.bitData.slice();
+  }
+}
+var MODE_NUMERIC = [1, 10, 12, 14];
+var MODE_ALPHANUMERIC = [2, 9, 11, 13];
+var MODE_BYTE = [4, 8, 16, 16];
+function numCharCountBits(mode, ver) {
+  return mode[Math.floor((ver + 7) / 17) + 1];
+}
+function makeBytes(data) {
+  const bb = [];
+  for (const b of data)
+    appendBits(b, 8, bb);
+  return new QrSegment(MODE_BYTE, data.length, bb);
+}
+function makeNumeric(digits) {
+  if (!isNumeric(digits))
+    throw new RangeError("String contains non-numeric characters");
+  const bb = [];
+  for (let i = 0;i < digits.length; ) {
+    const n = Math.min(digits.length - i, 3);
+    appendBits(Number.parseInt(digits.substring(i, i + n), 10), n * 3 + 1, bb);
+    i += n;
+  }
+  return new QrSegment(MODE_NUMERIC, digits.length, bb);
+}
+function makeAlphanumeric(text) {
+  if (!isAlphanumeric(text))
+    throw new RangeError("String contains unencodable characters in alphanumeric mode");
+  const bb = [];
+  let i;
+  for (i = 0;i + 2 <= text.length; i += 2) {
+    let temp = ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)) * 45;
+    temp += ALPHANUMERIC_CHARSET.indexOf(text.charAt(i + 1));
+    appendBits(temp, 11, bb);
+  }
+  if (i < text.length)
+    appendBits(ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)), 6, bb);
+  return new QrSegment(MODE_ALPHANUMERIC, text.length, bb);
+}
+function makeSegments(text) {
+  if (text === "")
+    return [];
+  else if (isNumeric(text))
+    return [makeNumeric(text)];
+  else if (isAlphanumeric(text))
+    return [makeAlphanumeric(text)];
+  else
+    return [makeBytes(toUtf8ByteArray(text))];
+}
+function isNumeric(text) {
+  return NUMERIC_REGEX.test(text);
+}
+function isAlphanumeric(text) {
+  return ALPHANUMERIC_REGEX.test(text);
+}
+function getTotalBits(segs, version) {
+  let result = 0;
+  for (const seg of segs) {
+    const ccbits = numCharCountBits(seg.mode, version);
+    if (seg.numChars >= 1 << ccbits)
+      return Number.POSITIVE_INFINITY;
+    result += 4 + ccbits + seg.bitData.length;
+  }
+  return result;
+}
+function toUtf8ByteArray(str) {
+  str = encodeURI(str);
+  const result = [];
+  for (let i = 0;i < str.length; i++) {
+    if (str.charAt(i) !== "%") {
+      result.push(str.charCodeAt(i));
+    } else {
+      result.push(Number.parseInt(str.substring(i + 1, i + 3), 16));
+      i += 2;
+    }
+  }
+  return result;
+}
+function getNumRawDataModules(ver) {
+  if (ver < MIN_VERSION || ver > MAX_VERSION)
+    throw new RangeError("Version number out of range");
+  let result = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    const numAlign = Math.floor(ver / 7) + 2;
+    result -= (25 * numAlign - 10) * numAlign - 55;
+    if (ver >= 7)
+      result -= 36;
+  }
+  return result;
+}
+function getNumDataCodewords(ver, ecl) {
+  return Math.floor(getNumRawDataModules(ver) / 8) - ECC_CODEWORDS_PER_BLOCK[ecl[0]][ver] * NUM_ERROR_CORRECTION_BLOCKS[ecl[0]][ver];
+}
+function reedSolomonComputeDivisor(degree) {
+  if (degree < 1 || degree > 255)
+    throw new RangeError("Degree out of range");
+  const result = [];
+  for (let i = 0;i < degree - 1; i++)
+    result.push(0);
+  result.push(1);
+  let root = 1;
+  for (let i = 0;i < degree; i++) {
+    for (let j = 0;j < result.length; j++) {
+      result[j] = reedSolomonMultiply(result[j], root);
+      if (j + 1 < result.length)
+        result[j] ^= result[j + 1];
+    }
+    root = reedSolomonMultiply(root, 2);
+  }
+  return result;
+}
+function reedSolomonComputeRemainder(data, divisor) {
+  const result = divisor.map((_) => 0);
+  for (const b of data) {
+    const factor = b ^ result.shift();
+    result.push(0);
+    divisor.forEach((coef, i) => result[i] ^= reedSolomonMultiply(coef, factor));
+  }
+  return result;
+}
+function reedSolomonMultiply(x, y) {
+  if (x >>> 8 !== 0 || y >>> 8 !== 0)
+    throw new RangeError("Byte out of range");
+  let z = 0;
+  for (let i = 7;i >= 0; i--) {
+    z = z << 1 ^ (z >>> 7) * 285;
+    z ^= (y >>> i & 1) * x;
+  }
+  return z;
+}
+function encodeSegments(segs, ecl, minVersion = 1, maxVersion = 40, mask = -1, boostEcl = true) {
+  if (!(MIN_VERSION <= minVersion && minVersion <= maxVersion && maxVersion <= MAX_VERSION) || mask < -1 || mask > 7) {
+    throw new RangeError("Invalid value");
+  }
+  let version;
+  let dataUsedBits;
+  for (version = minVersion;; version++) {
+    const dataCapacityBits2 = getNumDataCodewords(version, ecl) * 8;
+    const usedBits = getTotalBits(segs, version);
+    if (usedBits <= dataCapacityBits2) {
+      dataUsedBits = usedBits;
+      break;
+    }
+    if (version >= maxVersion)
+      throw new RangeError("Data too long");
+  }
+  for (const newEcl of [MEDIUM, QUARTILE, HIGH]) {
+    if (boostEcl && dataUsedBits <= getNumDataCodewords(version, newEcl) * 8)
+      ecl = newEcl;
+  }
+  const bb = [];
+  for (const seg of segs) {
+    appendBits(seg.mode[0], 4, bb);
+    appendBits(seg.numChars, numCharCountBits(seg.mode, version), bb);
+    for (const b of seg.getData())
+      bb.push(b);
+  }
+  const dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
+  appendBits(0, Math.min(4, dataCapacityBits - bb.length), bb);
+  appendBits(0, (8 - bb.length % 8) % 8, bb);
+  for (let padByte = 236;bb.length < dataCapacityBits; padByte ^= 236 ^ 17)
+    appendBits(padByte, 8, bb);
+  const dataCodewords = Array.from({ length: Math.ceil(bb.length / 8) }, () => 0);
+  bb.forEach((b, i) => dataCodewords[i >>> 3] |= b << 7 - (i & 7));
+  return new QrCode(version, ecl, dataCodewords, mask);
+}
+function encode2(data, options) {
+  const {
+    ecc = "L",
+    boostEcc = false,
+    minVersion = 1,
+    maxVersion = 40,
+    maskPattern = -1,
+    border = 1
+  } = options || {};
+  const segment = typeof data === "string" ? makeSegments(data) : Array.isArray(data) ? [makeBytes(data)] : undefined;
+  if (!segment)
+    throw new Error(`uqr only supports encoding string and binary data, but got: ${typeof data}`);
+  const qr = encodeSegments(segment, EccMap[ecc], minVersion, maxVersion, maskPattern, boostEcc);
+  const result = addBorder({
+    version: qr.version,
+    maskPattern: qr.mask,
+    size: qr.size,
+    data: qr.modules,
+    types: qr.types
+  }, border);
+  if (options?.invert)
+    result.data = result.data.map((row) => row.map((mod2) => !mod2));
+  options?.onEncoded?.(result);
+  return result;
+}
+function addBorder(input, border = 1) {
+  if (!border)
+    return input;
+  const { size } = input;
+  const newSize = size + border * 2;
+  input.size = newSize;
+  input.data.forEach((row) => {
+    for (let i = 0;i < border; i++) {
+      row.unshift(false);
+      row.push(false);
+    }
+  });
+  for (let i = 0;i < border; i++) {
+    input.data.unshift(Array.from({ length: newSize }, (_) => false));
+    input.data.push(Array.from({ length: newSize }, (_) => false));
+  }
+  const b = QrCodeDataType.Border;
+  input.types.forEach((row) => {
+    for (let i = 0;i < border; i++) {
+      row.unshift(b);
+      row.push(b);
+    }
+  });
+  for (let i = 0;i < border; i++) {
+    input.types.unshift(Array.from({ length: newSize }, (_) => b));
+    input.types.push(Array.from({ length: newSize }, (_) => b));
+  }
+  return input;
+}
+
+// client/pay.ts
+var SATS_PER_BTC = 100000000n;
+function btcAmount(sats) {
+  const n = typeof sats === "bigint" ? sats : BigInt(sats);
+  if (n <= 0n)
+    throw new Error("btcAmount: the amount must be a positive number of sats");
+  const whole = n / SATS_PER_BTC;
+  const frac = (n % SATS_PER_BTC).toString().padStart(8, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole.toString();
+}
+function bip21(address, sats) {
+  if (!/^[a-z0-9]+$/i.test(address))
+    throw new Error("bip21: that is not a bitcoin address");
+  return `bitcoin:${address}?amount=${btcAmount(sats)}`;
+}
+function qrSvg(text, options = {}) {
+  const qr = encode2(text, { ecc: "M", border: 4 });
+  let path = "";
+  qr.data.forEach((row, y) => {
+    row.forEach((dark, x) => {
+      if (dark)
+        path += `M${x} ${y}h1v1h-1z`;
+    });
+  });
+  const label = (options.label ?? "QR code").replace(/[&<>"']/g, "");
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${qr.size} ${qr.size}" shape-rendering="crispEdges" role="img" aria-label="${label}">` + `<rect width="${qr.size}" height="${qr.size}" fill="#fff"/><path d="${path}" fill="#000"/></svg>`;
+}
+var SIGNATURE_WORDS = 104;
+var EXPIRY_FIELD = 6;
+var DEFAULT_EXPIRY = 3600;
+function bolt11Expiry(invoice) {
+  let words;
+  try {
+    words = bech32.decode(invoice.trim().toLowerCase(), false).words;
+  } catch {
+    return;
+  }
+  if (words.length < 7 + SIGNATURE_WORDS)
+    return;
+  const read = (from, count2) => {
+    let n = 0;
+    for (let i = from;i < from + count2; i++)
+      n = n * 32 + words[i];
+    return n;
+  };
+  const createdAt = read(0, 7);
+  let expiry = DEFAULT_EXPIRY;
+  const end = words.length - SIGNATURE_WORDS;
+  for (let i = 7;i < end; ) {
+    if (i + 3 > end)
+      return;
+    const type = words[i];
+    const length = words[i + 1] * 32 + words[i + 2];
+    if (i + 3 + length > end)
+      return;
+    if (type === EXPIRY_FIELD) {
+      if (length > 10)
+        return;
+      expiry = read(i + 3, length);
+    }
+    i += 3 + length;
+  }
+  return { createdAt, expiresAt: createdAt + expiry };
+}
+var INVOICE_OFFER_SECONDS = 10 * 60;
+function invoiceOfferEnds(invoice, receivedAt, windowSeconds = INVOICE_OFFER_SECONDS) {
+  const times = bolt11Expiry(invoice);
+  const lifetime = times ? times.expiresAt - times.createdAt : windowSeconds;
+  return receivedAt + Math.max(0, Math.min(windowSeconds, lifetime));
 }
 // client/signer.ts
 function hasExtension() {
@@ -8728,14 +10555,40 @@ function extensionSigner() {
         throw new Error("No NIP-07 extension is available in this browser");
       const expected = eventId(unsigned);
       const signed = await window.nostr.signEvent(unsigned);
+      if (typeof signed !== "object" || signed === null)
+        throw new Error("The extension returned no signed event");
       if (signed.pubkey?.toLowerCase() !== unsigned.pubkey) {
         throw new Error("The extension signed under a different key than the one it reported");
       }
-      if (signed.id !== expected) {
+      if (signed.id?.toLowerCase() !== expected) {
         throw new Error("The extension altered the event before signing it");
       }
-      return { ...signed, pubkey: signed.pubkey.toLowerCase() };
-    }
+      const sig = typeof signed.sig === "string" ? signed.sig.toLowerCase() : "";
+      if (!verifyDigestSignature(sig, hexToBytes(expected), unsigned.pubkey)) {
+        throw new Error("The extension returned a signature that does not verify");
+      }
+      return { ...unsigned, id: expected, sig };
+    },
+    ...hasExtension() && typeof window.nostr?.nip44?.encrypt === "function" && typeof window.nostr?.nip44?.decrypt === "function" ? {
+      nip44: {
+        async encrypt(peer, plaintext) {
+          if (!isHex32(peer))
+            throw new Error("nip44: the peer is not a public key");
+          const out = await window.nostr.nip44.encrypt(peer, plaintext);
+          if (typeof out !== "string" || out === "")
+            throw new Error("The extension returned no ciphertext");
+          return out;
+        },
+        async decrypt(peer, payload) {
+          if (!isHex32(peer))
+            throw new Error("nip44: the peer is not a public key");
+          const out = await window.nostr.nip44.decrypt(peer, payload);
+          if (typeof out !== "string")
+            throw new Error("The extension returned no plaintext");
+          return out;
+        }
+      }
+    } : {}
   };
 }
 function localSigner(secretKey) {
@@ -8753,6 +10606,14 @@ function localSigner(secretKey) {
         throw new Error("localSigner: that event is for a different key");
       const digest = hexToBytes(eventId(unsigned));
       return { ...unsigned, id: bytesToHex(digest), sig: bytesToHex(schnorr.sign(digest, secretKey)) };
+    },
+    nip44: {
+      async encrypt(peer, plaintext) {
+        return encrypt(plaintext, conversationKey(secretKey, peer), crypto.getRandomValues(new Uint8Array(32)));
+      },
+      async decrypt(peer, payload) {
+        return decrypt(payload, conversationKey(secretKey, peer));
+      }
     }
   };
 }
@@ -8774,14 +10635,20 @@ async function deriveAesKey(passphrase, salt) {
   ]);
   return crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
-async function storeKey(secretKey, passphrase) {
+async function storeKey(secretKey, passphrase, options = {}) {
   if (passphrase.length < 8)
     throw new Error("Choose a passphrase of at least 8 characters");
+  if (!options.replace && hasStoredKey()) {
+    throw new Error("A key is already stored in this browser. Unlock it, or confirm that you want to replace it");
+  }
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveAesKey(passphrase, salt);
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, secretKey));
-  const stored = { v: 1, salt: bytesToHex(salt), iv: bytesToHex(iv), ct: bytesToHex(ct) };
+  const stored = { v: 1, salt: bytesToHex(salt), iv: bytesToHex(iv), ct: bytesToHex(ct), pk: bytesToHex(schnorr.getPublicKey(secretKey)) };
+  if (!options.replace && hasStoredKey()) {
+    throw new Error("A key is already stored in this browser. Unlock it, or confirm that you want to replace it");
+  }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
 }
 async function loadKey(passphrase) {
@@ -8801,20 +10668,97 @@ async function loadKey(passphrase) {
   const secretKey = new Uint8Array(plain);
   if (secretKey.length !== 32)
     throw new Error("The stored key is not 32 bytes");
+  const pk = bytesToHex(schnorr.getPublicKey(secretKey));
+  if (stored.pk !== pk) {
+    try {
+      if (localStorage.getItem(STORAGE_KEY) === raw)
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...stored, pk }));
+    } catch {}
+  }
   return secretKey;
+}
+function storedPubkey() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw)
+      return;
+    const pk = JSON.parse(raw).pk;
+    return typeof pk === "string" && /^[0-9a-f]{64}$/.test(pk) ? pk : undefined;
+  } catch {
+    return;
+  }
 }
 function forgetStoredKey() {
   localStorage.removeItem(STORAGE_KEY);
+}
+var UNLOCKED_KEY = "fmd-unlocked-v2";
+var UNLOCKED_MAX_IDLE = 8 * 60 * 60;
+var nowSeconds = () => Math.floor(Date.now() / 1000);
+function keepUnlocked(secretKey, now = nowSeconds()) {
+  if (secretKey.length !== 32)
+    throw new Error("keepUnlocked: a secret key is 32 bytes");
+  try {
+    sessionStorage.setItem(UNLOCKED_KEY, JSON.stringify({ key: bytesToHex(secretKey), at: now }));
+  } catch {}
+}
+function unlockedKey(now = nowSeconds()) {
+  let raw = null;
+  try {
+    raw = sessionStorage.getItem(UNLOCKED_KEY);
+  } catch {
+    return;
+  }
+  if (raw === null) {
+    try {
+      if (sessionStorage.getItem("fmd-unlocked-v1") !== null)
+        sessionStorage.removeItem("fmd-unlocked-v1");
+    } catch {}
+    return;
+  }
+  let kept;
+  try {
+    kept = JSON.parse(raw);
+  } catch {
+    forgetUnlocked();
+    return;
+  }
+  if (typeof kept?.key !== "string" || !/^[0-9a-f]{64}$/.test(kept.key) || !Number.isSafeInteger(kept.at)) {
+    forgetUnlocked();
+    return;
+  }
+  const at = kept.at;
+  if (now - at > UNLOCKED_MAX_IDLE || at > now + 300) {
+    forgetUnlocked();
+    return;
+  }
+  const secretKey = hexToBytes(kept.key);
+  try {
+    schnorr.getPublicKey(secretKey);
+  } catch {
+    forgetUnlocked();
+    return;
+  }
+  keepUnlocked(secretKey, now);
+  return secretKey;
+}
+function forgetUnlocked() {
+  try {
+    sessionStorage.removeItem(UNLOCKED_KEY);
+    sessionStorage.removeItem("fmd-unlocked-v1");
+  } catch {}
 }
 export {
   zapperKeyFor,
   zapReceiptFilter,
   writeRelaysFor,
+  wrapForEachWith,
+  wrapForEach,
   wrapEntropy,
   waitForExtension,
   vsize,
   verifyZapReceipt,
   verifySpendSignature,
+  verifySettlement,
   verifyProofRecords,
   verifyProofRecord,
   verifyPortfolio,
@@ -8823,55 +10767,70 @@ export {
   verifyDigestSignature,
   verifiedBadges,
   upsertEntry,
+  unwrapWith,
   unwrap,
   unquoteTxt,
+  unlockedKey,
   txid,
   tryNormaliseDomain,
   tryDecodeNip19,
-  transferAllowed,
   toUnicode,
   toPubkeyHex,
   toASCII,
   tldOf,
   tldHasRdap,
+  termsProblem,
   tally,
   tagValues,
   tagValue,
   summariseTrades,
+  storedPubkey,
   storeKey,
   splitDomain,
   spendWith,
   snapshotHash,
+  signersOf,
   signSpend,
+  signSettlement,
   signEvent,
   sighashFor,
   shorten,
+  settlementTx,
+  settlementProblem,
+  settlementKey,
+  settlementFee,
   serializeSigned,
   serializeEvent,
   sealMessage,
+  rulesProblem,
+  roleOf,
   resolveHandshake,
   requestZapInvoice,
   removeEntry,
-  releasable,
   relayListFilter,
   relayHints,
-  registrantActed,
-  record,
+  registrarFindings,
   receiptFilter,
   rebuildFromRecovery,
   readRelaysFor,
+  readOwn,
+  readMessagesWith,
   readMessages,
+  readDomain,
   rdapDomainUrl,
   rdapBaseUrls,
+  rdapAnswerProblem,
   rankFlexDomains,
   rankByZaps,
   queryRelays,
   queryRelay,
   queryOutbox,
   queryDiscovery,
+  qrSvg,
   publishToRelays,
   publishToRelay,
   publishOutbox,
+  proposalOf,
   proofRecordName,
   proofMessage,
   proofFromEvent,
@@ -8883,6 +10842,7 @@ export {
   portfolioFilter,
   planAuthorQuery,
   parseWatchlist,
+  parseRuling,
   parseRelayList,
   parseReceipt,
   parseRdapDomain,
@@ -8892,7 +10852,9 @@ export {
   parsePortfolio,
   parseNip05Identifier,
   parseListing,
+  parseKeyBackup,
   parseEscrowEvent,
+  parseDraftBackup,
   parseDeletion,
   parseBadgeDefinition,
   parseBadgeAward,
@@ -8900,7 +10862,6 @@ export {
   parseArbiterSet,
   pairReceipts,
   paddedLength,
-  observe,
   nsecEncode,
   npubEncode,
   nprofileEncode,
@@ -8908,12 +10869,15 @@ export {
   nostrUri,
   normaliseRelayUrl,
   normaliseDomain,
+  normaliseAccount,
   nip05Url,
   nip05DocumentUrl,
   newestPerAddress,
   neventEncode,
   namesForPubkey,
   naddrEncode,
+  matchFilters,
+  matchFilter,
   lookupTxtVia,
   lookupTxt,
   localSigner,
@@ -8921,27 +10885,38 @@ export {
   listingFilter,
   listingAddress,
   lightningAddressUrl,
+  leafOfWitness,
+  latestCard,
   labelToASCII,
+  keyOfRole,
+  keyBackupSlot,
+  keyBackupPlaintext,
+  keyBackupFilter,
+  keepUnlocked,
+  keepConnectionsWarm,
+  isValidIat,
+  isTransferLocked,
   isReplaceable,
   isOwnRelayList,
   isNormalisedDomain,
+  isKeyBackup,
   isHex64,
   isHex32,
   isEphemeral,
   isAddressable,
+  invoiceOfferEnds,
   inboxRelaysFor,
   identityProofUrl,
   hasStoredKey,
   hasExtension,
+  giftWrapWith,
   giftWrapFilter,
   giftWrap,
   generateSecretKey,
-  fundable,
+  forgetUnlocked,
   forgetStoredKey,
   foldStatus,
   flexZapFilter,
-  fingerprintOf,
-  fingerprintMatches,
   findTag,
   findFunding,
   finaliseSpend,
@@ -8956,9 +10931,11 @@ export {
   eventId,
   eventDigest,
   escrowsForFilter,
+  escrowTree,
   escrowPublicKeyHex,
   escrowPublicKey,
-  escrowFilter,
+  escrowFilters,
+  escrowChats,
   escrowAddress,
   encrypt,
   encodeReply,
@@ -8966,9 +10943,11 @@ export {
   encodeProofRecord,
   encodeLabel,
   encodeInvite,
+  eligibilityFindings,
+  draftBackupPlaintext,
+  dmRelaysOf,
+  dmRelayListFilter,
   describeTree,
-  deriveTransferState,
-  deriveEscrowState,
   deriveEscrowId,
   deletionFilter,
   decrypt,
@@ -8978,13 +10957,16 @@ export {
   decodeLabel,
   decodeInvite,
   decodeAddress,
+  deadlines,
   createProof,
   countsTowardReputation,
   countOnRelays,
   countOnRelay,
   conversationKey,
+  completeSettlement,
   compareViews,
   combineProofs,
+  collectSettlements,
   clearZapperKeyCache,
   clearBootstrapCache,
   checkRegistry,
@@ -8994,7 +10976,10 @@ export {
   checkEligibility,
   checkDomainProof,
   checkDomain,
+  chatRoleOf,
+  chatPartners,
   chainApi,
+  cardProblem,
   canSealWith,
   buildZapRequest,
   buildWatchlist,
@@ -9002,22 +10987,32 @@ export {
   buildTree,
   buildSpend,
   buildRumor,
+  buildRuling,
+  buildReply,
   buildRelayList,
   buildReceipt,
   buildProfileBadges,
   buildPortfolio,
   buildListing,
+  buildKeyBackup,
   buildJobFeedback,
+  buildInvite,
   buildHandlerAdvertisement,
+  buildEscrowMessage,
   buildEscrowEvent,
   buildDeletion,
-  buildCommitment,
   buildBadgeDefinition,
   buildBadgeAward,
+  buildAuthEvent,
   buildAttestation,
   buildArbiterSet,
+  btcAmount,
+  bolt11Expiry,
   bolt11AmountMsats,
+  bip21,
+  bindingInternalKey,
   attestationFilter,
+  arbiterRule,
   arbiterIntersection,
   applyDeletions,
   addressToScript,
@@ -9029,13 +11024,17 @@ export {
   WARNING_STATUSES,
   VERIFY_RESULT_KIND,
   VERIFY_REQUEST_KIND,
+  UNLOCKED_MAX_IDLE,
   TRANSFER_LOCK_STATUS,
-  TRANSFER_LOCK_DAYS,
+  TRANSFER_LOCK_DAYS2 as TRANSFER_LOCK_DAYS,
+  SPACESHIP_IANA_ID,
+  SITE_RULES,
+  SETTLEMENT_LEAVES,
   SECONDS_PER_DAY,
   SEAL_KIND,
   RelayDirectory,
+  RULING_D_PREFIX,
   ROOT_NAME,
-  REQUIRED_AGREEING_POLLS,
   REPLY_PREFIX,
   RELAY_LIST_KIND,
   REFUSING_STATUSES,
@@ -9045,6 +11044,7 @@ export {
   READ_FANOUT,
   RDAP_BOOTSTRAP_URL,
   RDAP_BOOTSTRAP_URL2 as RDAP_BOOTSTRAP_ENDPOINT,
+  PROPOSER,
   PROOF_VERSION,
   PROOF_MESSAGE_PREFIX,
   PROOF_LABEL,
@@ -9062,19 +11062,26 @@ export {
   NIP44_VERSION,
   NETWORK_HRP,
   MSATS_PER_SAT,
-  MIN_POLL_GAP_SECONDS,
   MIN_PLAINTEXT_BYTES,
   MIN_EXPIRY_DAYS,
+  MIN_ARBITER_BLOCKS,
   MAX_TIMESTAMP_JITTER,
   MAX_PLAINTEXT_BYTES,
   MAX_LABEL_LENGTH,
+  MAX_FEE_RATE,
   MAX_DOMAIN_LENGTH,
   MAX_CLOCK_SKEW_SECONDS,
+  MAX_CHAT_LENGTH,
   LISTING_TOPIC,
   LISTING_KIND,
   LISTING_D_PREFIX,
+  KEY_BACKUP_VERSION,
+  KEY_BACKUP_KIND,
+  KEY_BACKUP_D_PREFIX,
   JOB_FEEDBACK_KIND,
+  INVOICE_OFFER_SECONDS,
   INVITE_PREFIX,
+  HANDSHAKE_KIND,
   HANDLER_KIND,
   GIFT_WRAP_KIND,
   FOLLOW_SET_KIND,
@@ -9085,13 +11092,18 @@ export {
   ESCROW_TOPIC,
   ESCROW_KIND,
   ESCROW_D_PREFIX,
+  ESCROW_CHAT_TAG,
   DOH_PROVIDERS,
+  DM_RELAY_LIST_KIND,
   DELETION_KIND,
   DEFAULT_RELAYS,
   CHAT_KIND,
+  CHAT_CARD_TAG,
   CHAIN_APIS,
+  BINDING_TAG,
   BADGE_DEFINITION_KIND,
   BADGE_AWARD_KIND,
+  AUTH_KIND,
   ARBITER_SET_D,
   ACE_PREFIX
 };
