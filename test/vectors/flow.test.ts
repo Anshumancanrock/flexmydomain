@@ -1,5 +1,4 @@
-// The add-a-domain flow in the flex page's order, with real modules and a fake `fetch`.
-// The stub answers in the providers' real JSON shapes, taken from live responses.
+// The add-a-domain flow in the flex page's order, against a fake fetch that answers in the providers' real JSON shapes.
 
 import { test, expect, describe, afterEach } from 'bun:test'
 import { bytesToHex } from '@noble/hashes/utils.js'
@@ -25,7 +24,6 @@ const PK = bytesToHex(schnorr.getPublicKey(SK))
 const DOMAIN = 'lumenary.com'
 const NOW = 1789430400
 
-/** `localSigner` without the browser. */
 const signer: Signer = {
   async getPublicKey() {
     return PK
@@ -37,7 +35,7 @@ const signer: Signer = {
 
 interface Zone {
   txt?: Record<string, string[]>
-  /** Providers that fail outright, for "no answer" as opposed to "no record". */
+  // Providers that fail outright, for "no answer" rather than "no record".
   down?: string[]
   rdap?: unknown
   rdapStatus?: number
@@ -90,7 +88,7 @@ afterEach(() => {
   clearBootstrapCache()
 })
 
-/** Healthy .com. Unlocked, over ten years old, far from expiry. */
+// Unlocked, over ten years old, far from expiry.
 function healthyRdap(over: Record<string, unknown> = {}) {
   return {
     objectClassName: 'domain',
@@ -114,17 +112,14 @@ function healthyRdap(over: Record<string, unknown> = {}) {
 
 describe('adding a domain, end to end', () => {
   test('sign, paste, resolve, verify, publish', async () => {
-    // 1. User signs. The key stays in their signer.
     const unsigned = proofEvent({ domain: DOMAIN, pubkey: PK, iat: NOW })
     const signed = await signer.signEvent(unsigned)
     const record = { version: 'fmd1' as const, iat: NOW, pubkey: PK, sig: signed.sig }
     const txt = encodeProofRecord(record)
 
-    // 2. What the page says to paste, and where.
     expect(proofRecordName(DOMAIN)).toBe('_flexmydomain.lumenary.com')
     expect(txt.length).toBe(209)
 
-    // 3. They paste it into the zone.
     install({ txt: { '_flexmydomain.lumenary.com': [txt] }, rdap: healthyRdap() })
 
     const { proof, registry } = await checkDomain({ domain: DOMAIN, pubkey: PK, now: NOW + 60 })
@@ -137,7 +132,6 @@ describe('adding a domain, end to end', () => {
     expect(registry.eligibility?.unlocked).toBe(true)
     expect(registry.snapshot.hash).toMatch(/^[0-9a-f]{64}$/)
 
-    // 4. Build, sign and verify the portfolio offline, as a flex page reader does.
     const entries = upsertEntry([], {
       domain: DOMAIN,
       source: 'dns',
@@ -158,7 +152,7 @@ describe('adding a domain, end to end', () => {
     install({ txt: {}, rdap: healthyRdap() })
     const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW })
     expect(report.status.proven).toBe(false)
-    expect(report.answered).toBe(true) // Resolvers answered "no".
+    expect(report.answered).toBe(true)
   })
 
   test('a record only one resolver can see is disputed, not proven', async () => {
@@ -182,16 +176,37 @@ describe('adding a domain, end to end', () => {
     expect(report.lookup.disputed).toEqual([txt])
   })
 
-  test('one resolver down is not a negative result', async () => {
+  test('one resolver down proves nothing, and is not a negative result either', async () => {
     const signed = await signer.signEvent(proofEvent({ domain: DOMAIN, pubkey: PK, iat: NOW }))
     const txt = encodeProofRecord({ version: 'fmd1', iat: NOW, pubkey: PK, sig: signed.sig })
     install({ txt: { '_flexmydomain.lumenary.com': [txt] }, down: ['google'], rdap: healthyRdap() })
 
     const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
-    // Agreement among the providers that answered is enough. The failure is still recorded.
-    expect(report.status.proven).toBe(true)
-    expect(report.answered).toBe(true)
+    // One lying or blocked resolver must not be enough on its own (spec/THREATS.md section 2).
+    expect(report.status.proven).toBe(false)
+    expect(report.answered).toBe(false)
+    expect(report.lookup.complete).toBe(false)
+    expect(report.lookup.agreed).toEqual([])
+    expect(report.lookup.disputed).toEqual([txt])
     expect(report.lookup.observations.find((o) => o.provider === 'google')?.error).toBeTruthy()
+    expect(report.dns.reason).toMatch(/^not checked, google did not answer/)
+    expect(report.dns.reason).not.toMatch(/no record/)
+  })
+
+  test('a SERVFAIL is no answer, not an empty one', async () => {
+    const signed = await signer.signEvent(proofEvent({ domain: DOMAIN, pubkey: PK, iat: NOW }))
+    const txt = encodeProofRecord({ version: 'fmd1', iat: NOW, pubkey: PK, sig: signed.sig })
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(input.toString())
+      return url.hostname.includes('cloudflare')
+        ? json({ Status: 0, AD: false, Answer: [{ type: 16, data: `"${txt}"` }] })
+        : json({ Status: 2, AD: false })
+    }) as typeof fetch
+
+    const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
+    expect(report.lookup.observations.find((o) => o.provider === 'google')?.error).toBe('DNS status 2')
+    expect(report.status.proven).toBe(false)
+    expect(report.answered).toBe(false)
   })
 
   test('both resolvers down proves nothing and says so', async () => {
@@ -245,7 +260,7 @@ describe('the registry half', () => {
       json({ version: '1.0', services: [[['com'], ['https://rdap.verisign.com/com/v1']]] })) as typeof fetch
     const report = await checkRegistry({ domain: 'something.io', now: NOW })
     expect(report.supported).toBe(false)
-    expect(report.eligibility).toBeUndefined() // No verdict we couldn't reach.
+    expect(report.eligibility).toBeUndefined()
   })
 
   test('a registry 404 is an answer, and does not become an eligibility pass', async () => {
