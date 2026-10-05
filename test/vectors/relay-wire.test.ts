@@ -110,6 +110,34 @@ describe('querying', () => {
     expect(events).toHaveLength(1)
   })
 
+  test('settle answers once enough relays are done, and the slow one arrives late', async () => {
+    const a = relay({ events: [listingFor(ALICE, 'lumenary.com')] })
+    const b = relay({ events: [listingFor(BOB, 'zeta.io')] })
+    const slow = relay({ events: [listingFor(BOB, 'slow.io')], withholdEose: true })
+    const late: { relay: string; count: number; complete: boolean }[] = []
+    const started = performance.now()
+    const events = await queryRelays([a.url, b.url, slow.url], [listingFilter()], {
+      timeoutMs: 1500,
+      settle: { quorum: 2, graceMs: 100 },
+      onLate: (relay, evs, complete) => { late.push({ relay, count: evs.length, complete }) },
+    })
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(events.map((e) => e.pubkey).sort()).toEqual([ALICE.pk, BOB.pk].sort())
+    await Bun.sleep(1700)
+    expect(late).toEqual([{ relay: slow.url, count: 1, complete: false }])
+  })
+
+  test('settle never answers early on errors or timeouts alone', async () => {
+    const hanging = relay({ events: [listingFor(ALICE, 'lumenary.com')], withholdEose: true })
+    const started = performance.now()
+    const events = await queryRelays([hanging.url, 'ws://localhost:1'], [listingFilter()], {
+      timeoutMs: 700,
+      settle: { quorum: 1, graceMs: 50 },
+    })
+    expect(performance.now() - started).toBeGreaterThan(600)
+    expect(events).toHaveLength(1)
+  })
+
   test('the same event from two relays is returned once', async () => {
     const listing = listingFor(ALICE, 'lumenary.com')
     const a = relay({ events: [listing] })

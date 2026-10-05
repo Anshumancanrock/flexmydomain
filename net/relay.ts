@@ -13,6 +13,12 @@ export interface QueryOptions {
   onRelayDone?: (relay: string, count: number, error?: string, complete?: boolean) => void
   /** Signs a NIP-42 AUTH for a relay that asks, or undefined to decline. */
   auth?: RelayAuth
+  /**
+   * Answer once `quorum` relays have sent EOSE and `graceMs` more has passed, instead of
+   * waiting for the slowest one. A relay that finishes after that goes to `onLate`.
+   */
+  settle?: { quorum: number; graceMs: number }
+  onLate?: (relay: string, events: NostrEvent[], complete: boolean) => void
 }
 
 /** Sign a kind 22242 for `relay` and its `challenge` (core/nostr/nip42.ts buildAuthEvent). */
@@ -89,17 +95,35 @@ export async function queryRelays(
   options: QueryOptions = {},
 ): Promise<NostrEvent[]> {
   const byId = new Map<string, NostrEvent>()
-  await Promise.all(
+  const quorum = options.settle ? Math.max(1, Math.min(options.settle.quorum, relays.length)) : relays.length
+  let settled = false
+  let answered = 0
+  let grace: ReturnType<typeof setTimeout> | undefined
+  let release = () => {}
+  const early = new Promise<void>((resolve) => { release = resolve })
+  const all = Promise.all(
     relays.map(async (relay) => {
+      let events: NostrEvent[] = []
+      let complete = false
+      let error: string | undefined
       try {
-        const { events, complete } = await queryRelayDetailed(relay, filters, options)
-        for (const event of events) byId.set(event.id, event)
-        options.onRelayDone?.(relay, events.length, undefined, complete)
+        ({ events, complete } = await queryRelayDetailed(relay, filters, options))
       } catch (err) {
-        options.onRelayDone?.(relay, 0, (err as Error).message, false)
+        error = (err as Error).message
       }
+      if (settled) {
+        if (!error) options.onLate?.(relay, events, complete)
+        return
+      }
+      for (const event of events) byId.set(event.id, event)
+      options.onRelayDone?.(relay, events.length, error, error ? false : complete)
+      // only relays that finished with EOSE count; errors and timeouts never settle a read early
+      if (complete && !error && ++answered >= quorum && options.settle && !grace) grace = setTimeout(release, options.settle.graceMs)
     }),
   )
+  await (options.settle ? Promise.race([all, early]) : all)
+  settled = true
+  clearTimeout(grace)
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at)
 }
 
