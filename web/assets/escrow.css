@@ -1,5 +1,4 @@
-/* escrow.html: the signing ceremony.
-   Tokens from app.css, components from flex.css and market.css. */
+/* escrow.html: the signing ceremony */
 
 .net-badge{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;border-radius:999px;
   border:1px solid var(--line);background:var(--panel);font-family:var(--mono);font-size:12.5px;
@@ -14,6 +13,9 @@
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:11px 13px;margin-bottom:10px}
 .ack{display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--ink);margin-top:10px}
+.key-box{margin:14px 0;display:grid;gap:10px}
+.key-box .fold{margin-top:0}
+.key-box .ack{margin:2px 0 0 2px}
 .ack input{width:auto;height:auto;margin-top:3px;accent-color:var(--accent)}
 
 .derive{border:1px solid var(--line);border-radius:var(--r-md);background:var(--sunk);
@@ -23,7 +25,7 @@
 .derive-row:last-child{border-bottom:0}
 .derive-row .k{width:132px;flex:none;color:var(--faint);text-transform:uppercase;
   letter-spacing:.055em;font-size:11px}
-.derive-row .v{font-family:var(--mono);flex:1;min-width:0;word-break:break-all;color:var(--ink)}
+.derive-row .v{font-family:var(--mono);flex:1;min-width:0;overflow-wrap:anywhere;color:var(--ink)}
 .derive-row .v.big{font-size:14px;font-weight:600}
 .derive-note{font-size:12.5px;color:var(--muted);line-height:1.55;padding:10px 0 12px}
 
@@ -39,7 +41,7 @@
   background:var(--panel);margin:14px 0}
 .confirm .amount{font-family:var(--mono);font-size:clamp(24px,3.4vw,34px);font-weight:700;
   letter-spacing:-.03em;line-height:1.1}
-.confirm .to{font-family:var(--mono);font-size:13px;word-break:break-all;color:var(--ink);
+.confirm .to{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere;color:var(--ink);
   margin-top:10px;padding:10px 12px;background:var(--sunk);border-radius:var(--r-sm)}
 .confirm .fee{font-size:12.5px;color:var(--muted);margin-top:10px}
 
@@ -62,3 +64,264 @@
 .state-pill.funded{border-color:color-mix(in srgb,var(--live) 45%,var(--line));color:var(--live)}
 .state-pill.settled{border-color:color-mix(in srgb,var(--live) 45%,var(--line));color:var(--live)}
 .state-pill.expired{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--accent-ink)}
+
+.state-pill.done{border-color:color-mix(in srgb,var(--live) 45%,var(--line));color:var(--live)}
+.state-pill.alert{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--accent-ink)}
+
+.resume{border-top:1px solid var(--line-soft);padding:clamp(14px,1.8vw,20px) clamp(15px,1.7vw,20px)}
+.resume .step-lede{margin:0}
+.resume .hint{text-align:left;margin-top:8px}
+
+/* The trade's progress, each step with its deadline. */
+.timeline{list-style:none;margin:18px 0 6px 7px;padding:0;border-left:2px solid var(--line)}
+.timeline:empty{display:none}
+.timeline li{position:relative;padding:0 0 14px 20px;font-size:13px;color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
+.timeline li:last-child{padding-bottom:2px}
+.timeline li::before{content:"";position:absolute;left:-8px;top:3px;width:10px;height:10px;
+  border-radius:999px;background:var(--panel);border:2px solid var(--line)}
+.timeline li.done::before{background:var(--live);border-color:var(--live)}
+.timeline li.now::before{background:var(--accent);border-color:var(--accent)}
+.timeline li b{color:var(--ink);font-weight:600}
+.timeline li .when{display:block;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+
+/* One box per thing the reader can do now. */
+.act{border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel);
+  padding:clamp(14px,1.6vw,18px);margin-top:16px}
+.act h3{font-size:15px;font-weight:650;letter-spacing:-.02em}
+.act h3 small{margin-left:6px;font-size:11px;font-weight:600;letter-spacing:.06em;color:var(--faint)}
+.act .step-lede{margin-bottom:10px}
+.act .sell-form{margin-top:4px}
+.act .btn{margin-top:12px}
+.act .hint{text-align:left;margin-top:8px}
+.act .nsec{font-family:var(--mono);font-size:13px;word-break:break-all;user-select:all;
+  background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;margin:6px 0}
+.act .ack{margin-top:12px}
+.act-form{grid-template-columns:minmax(0,1fr)}
+#act-log:not(:empty){margin-top:14px;display:grid;gap:7px}
+#act-log .nsec{display:block;font-family:var(--mono);font-size:12px;word-break:break-all;user-select:all;margin-top:6px}
+#invite-out .nsec{font-family:var(--mono);font-size:12px;word-break:break-all;user-select:all;
+  background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;margin:10px 0 8px}
+
+.sec-h.sm{font-size:15px;margin-top:18px}
+.rules{margin:8px 0 0 18px;font-size:13.5px;color:var(--muted);line-height:1.6;max-width:72ch}
+.rules li{margin-top:4px}
+
+@media (max-width:560px){
+  .derive-row{flex-direction:column;gap:3px}
+  .derive-row .k{width:auto}
+}
+
+#open-section .add-panel,#join-section .add-panel{overflow:hidden}
+
+/* Save the record and Refresh, side by side in the escrow's head. */
+.head-actions{display:inline-flex;flex-wrap:wrap;gap:8px}
+
+.step-sum{display:none}
+.steps.collapsing .step.done .step-body>*:not(h3):not(.step-sum){display:none}
+.steps.collapsing .step.done .step-sum{display:flex}
+.steps.collapsing .step.done{padding-block:clamp(12px,1.5vw,16px)}
+.step-sum{flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin-top:4px;font-size:13px;color:var(--muted);
+  line-height:1.55;overflow-wrap:anywhere}
+.step-sum b{color:var(--ink);font-weight:600}
+.steps.locked .link-btn{display:none}
+.link-btn{border:0;background:none;padding:0;font:inherit;font-size:12.5px;font-weight:600;color:var(--accent-ink);
+  cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.link-btn:hover{color:var(--accent)}
+
+.btn-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.btn-row .btn,.act .btn-row .btn{margin-top:0}
+
+/* Step 4: the invite, the reply, the address both pages derive. */
+.invite-card{display:grid;gap:10px;margin-top:2px}
+.invite-step{display:flex;gap:10px;align-items:flex-start;font-size:13.5px;color:var(--muted);line-height:1.55}
+.invite-step b{color:var(--ink)}
+.invite-step .n{display:grid;place-items:center;width:22px;height:22px;flex:none;margin-top:1px;border-radius:999px;
+  background:var(--accent-soft);color:var(--accent-ink);font-family:var(--mono);font-size:12px;font-weight:700}
+.invite-card .hint{text-align:left;margin:0}
+.invite-card .hint:empty{display:none}
+#invite-out .nsec{margin:0;max-height:8.6em;overflow-y:auto}
+.waiting{display:inline-flex;align-items:center;gap:10px;font-size:13px;color:var(--muted);padding:2px 0 2px 2px}
+#reply-in .reply-body{display:grid;gap:10px;justify-items:start;margin-bottom:14px}
+#publish-escrow{margin-top:16px}
+#reply-in .field{width:100%}
+#reply-in .hint{text-align:left;margin:0}
+.ready-addr{display:grid;gap:4px;margin:14px 0;padding:12px 14px;border:1px solid var(--line);
+  border-radius:var(--r-md);background:var(--sunk)}
+.ready-addr .k{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+.ready-addr .v{font-family:var(--mono);font-size:14px;font-weight:600;word-break:break-all;color:var(--ink)}
+.ready-addr .note{font-size:12.5px;color:var(--muted)}
+
+/* A live wait: the payment, the reply. */
+.pulse{position:relative;display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;
+  background:var(--accent);animation:live-core 1.8s ease-in-out infinite}
+.pulse::after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid var(--accent);
+  animation:live-ring 1.8s cubic-bezier(.15,0,.35,1) infinite}
+
+/* Folded detail: the derivation, a fallback reply. */
+.fold,.derive-box{margin-top:16px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel)}
+.fold>summary,.derive-box>summary{cursor:pointer;list-style:none;padding:12px 15px;font-size:13.5px;font-weight:600;
+  color:var(--ink);display:flex;align-items:center;gap:9px}
+.fold>summary::-webkit-details-marker,.derive-box>summary::-webkit-details-marker{display:none}
+.fold>summary::before,.derive-box>summary::before{content:"+";font-family:var(--mono);font-size:15px;color:var(--accent)}
+.fold[open]>summary::before,.derive-box[open]>summary::before{content:"\2212"}
+.fold>summary:hover,.derive-box>summary:hover{color:var(--accent-ink)}
+.fold>:not(summary){margin-inline:15px}
+.fold>:last-child{margin-bottom:14px}
+.fold .nsec{font-family:var(--mono);font-size:12px;word-break:break-all;user-select:all;background:var(--sunk);
+  border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;margin-bottom:8px}
+.derive-box>div{padding:0 clamp(12px,1.4vw,16px) 6px}
+.derive-box .derive{margin-top:0}
+
+.pay{display:grid;grid-template-columns:auto minmax(0,1fr);gap:clamp(14px,2vw,22px);align-items:start;
+  border:1.5px solid color-mix(in srgb,var(--accent) 55%,var(--line));border-radius:var(--r-lg);
+  background:var(--panel);padding:clamp(14px,1.8vw,20px);box-shadow:var(--shadow-sm)}
+.pay-qr{width:clamp(150px,17vw,188px);aspect-ratio:1;border-radius:var(--r-md);overflow:hidden;background:#fff;
+  border:1px solid var(--line)}
+.pay-qr svg{width:100%;height:100%}
+.pay-body{min-width:0}
+.pay-top{display:flex;align-items:center;flex-wrap:wrap;gap:4px 9px;font-size:14px;color:var(--muted)}
+.pay-top b{color:var(--ink)}
+.pay-amount{margin-top:8px;font-size:15px;color:var(--muted)}
+.pay-amount span{font-family:var(--mono);font-size:clamp(26px,3.2vw,34px);font-weight:700;letter-spacing:-.03em;color:var(--ink)}
+.pay-amount small{display:block;font-family:var(--mono);font-size:12.5px;color:var(--faint);margin-top:2px}
+.pay-addr{margin-top:10px;font-family:var(--mono);font-size:13.5px;word-break:break-all;color:var(--ink);
+  background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;user-select:all}
+.pay-notes{margin:12px 0 0 17px;font-size:12.5px;color:var(--muted);line-height:1.55}
+.pay-notes li{margin-top:3px}
+.pay-notes b{color:var(--ink)}
+.pay.seen{grid-template-columns:minmax(0,1fr);border-color:color-mix(in srgb,var(--live) 55%,var(--line))}
+.pay.seen p{margin-top:8px;font-size:13.5px;color:var(--muted);line-height:1.6}
+.pay.seen p b{color:var(--ink)}
+.pay.seen .pulse{background:var(--live)}
+.pay.seen .pulse::after{border-color:var(--live)}
+.pay p a{color:var(--accent-ink);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px}
+
+#chain-view{display:grid;gap:8px}
+#chain-view:empty{display:none}
+
+/* Who this tab acts as, and the way out. */
+.whoami{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin-top:16px;
+  padding:10px 14px;border:1px solid color-mix(in srgb,var(--live) 42%,var(--line));border-radius:var(--r-sm);
+  background:var(--sunk);font-size:13px;color:var(--muted)}
+.whoami b{color:var(--ink)}
+.whoami small{display:block;font-size:12px;color:var(--faint)}
+.whoami-actions{display:flex;flex-wrap:wrap;gap:8px}
+/* The deal is over: the same box, saying so. */
+.whoami.done-box{border-color:color-mix(in srgb,var(--live) 60%,var(--line))}
+.whoami.done-box small{margin-top:3px}
+
+/* The deal log: every event on record, in the order the deal ran. */
+.deal-log-box{margin-top:16px}
+.deal-log{list-style:none;margin:0;padding:0}
+.deal-log li{display:grid;grid-template-columns:minmax(92px,auto) minmax(0,1fr);gap:4px 14px;padding:9px 0;
+  border-bottom:1px solid var(--line-soft);font-size:13px;color:var(--muted);line-height:1.5}
+.deal-log li:last-child{border-bottom:0}
+.deal-log .log-when{font-family:var(--mono);font-size:11.5px;color:var(--faint);padding-top:2px;white-space:nowrap}
+.deal-log .log-what{overflow-wrap:anywhere}
+.deal-log .log-what b{color:var(--ink)}
+.deal-log li.good .log-when{color:var(--live)}
+.deal-log li.bad .log-when{color:var(--accent-ink)}
+.deal-log-box .hint{text-align:left;margin:4px 0 10px}
+@media (max-width:560px){
+  .deal-log li{grid-template-columns:minmax(0,1fr)}
+}
+#act-view>.obs{margin-top:10px}
+
+.act.is-done{border-color:color-mix(in srgb,var(--live) 45%,var(--line))}
+.act.is-done>*:not(h3):not(.act-out){opacity:.45;pointer-events:none}
+
+.escrow-titles{min-width:0}
+#escrow-title{overflow-wrap:anywhere}
+.escrow-body{display:grid;grid-template-columns:minmax(0,1fr);gap:clamp(16px,2vw,26px);align-items:start}
+.escrow-main{min-width:0}
+@media (min-width:1000px){
+  .escrow-body.with-chat{grid-template-columns:minmax(0,1fr) minmax(300px,370px)}
+  .escrow-side{position:sticky;top:82px}
+}
+
+/* The escrow's private chats. */
+.chat-card{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--r-lg);
+  background:var(--panel);overflow:hidden}
+.chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:13px 15px;
+  border-bottom:1px solid var(--line-soft)}
+.chat-head h3{font-size:15px;font-weight:650;letter-spacing:-.02em}
+.chat-head p{font-size:12px;color:var(--faint);margin-top:1px}
+.chat-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;flex:none;
+  background:color-mix(in srgb,var(--live) 12%,transparent);color:var(--live);font-size:11.5px;font-weight:600;white-space:nowrap}
+.chat-card .thread{display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--sunk);
+  overflow-y:auto;min-height:220px;max-height:min(460px,55vh);overscroll-behavior:contain}
+.msg{max-width:86%;padding:8px 11px;border-radius:14px;background:var(--panel);border:1px solid var(--line);align-self:flex-start}
+.msg.mine{align-self:flex-end;background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 28%,var(--line))}
+.msg-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--faint)}
+.msg-head b{font-size:12px;color:var(--ink);font-weight:650}
+.msg.from-arbiter:not(.mine) .msg-head b{color:var(--accent-ink)}
+.msg-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;line-height:1.5;margin-top:2px;color:var(--ink)}
+.thread-empty,.thread-warn{margin:auto;text-align:center;font-size:12.5px;color:var(--muted);max-width:32ch;line-height:1.5}
+.thread-warn{color:var(--accent-ink);margin-top:6px}
+.chat-form{display:flex;gap:8px;align-items:flex-end;padding:10px 12px 4px;border-top:1px solid var(--line-soft)}
+.chat-form textarea{flex:1;min-width:0;min-height:42px;max-height:160px;resize:vertical;border-radius:var(--r-sm);
+  border:1px solid var(--line);background:var(--sunk);color:var(--ink);font-family:var(--sans);font-size:14px;
+  line-height:1.45;padding:9px 11px;outline:none;transition:border-color .18s,box-shadow .18s}
+.chat-form textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.chat-form .btn{flex:none}
+.chat-foot{display:flex;justify-content:space-between;gap:10px;padding:2px 13px 10px;font-size:11.5px;color:var(--faint)}
+#chat-hint.ok{color:var(--live)}
+#chat-hint.err{color:var(--accent-ink)}
+.chat-tabs{display:flex;gap:6px;padding:10px 12px 0}
+.chat-tab{flex:1;position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;
+  border-radius:999px;border:1px solid var(--line);background:var(--sunk);color:var(--muted);font:inherit;font-size:13px;
+  font-weight:600;cursor:pointer;transition:background .15s,color .15s,border-color .15s}
+.chat-tab:hover{color:var(--ink)}
+.chat-tab.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--ink)}
+.chat-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chat-count{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--faint)}
+.chat-count:empty{display:none}
+/* Messages there the reader hasn't had on screen. */
+.chat-tab.fresh::after{content:"";position:absolute;top:5px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--accent)}
+.chat-who{padding:8px 15px 10px;font-size:12px;color:var(--muted);line-height:1.45;border-bottom:1px solid var(--line-soft)}
+/* A card in a message: the fields a form sent, each ready to copy. */
+.msg-card{margin-top:6px;padding:8px 10px;border-radius:10px;background:var(--sunk);border:1px dashed var(--line);font-size:12.5px}
+.msg.mine .msg-card{background:var(--panel)}
+.msg-card>b{display:block;font-size:12px;color:var(--ink);margin-bottom:4px}
+.card-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:2px 0}
+.card-row .k{min-width:64px;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+.card-row .v{flex:1;min-width:0;font-family:var(--mono);color:var(--ink);overflow-wrap:anywhere}
+@media (max-width:560px){
+  .card-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 8px}
+  .card-row .k{grid-column:1/-1;min-width:0}
+}
+
+.method-pick{display:grid;gap:8px;margin:12px 0 4px}
+.method{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-sm);
+  background:var(--sunk);font-size:13px;cursor:pointer}
+.method:has(input:checked){border-color:color-mix(in srgb,var(--accent) 55%,var(--line));background:var(--accent-soft)}
+.method input{width:auto;height:auto;margin-top:3px;accent-color:var(--accent)}
+.method b{display:block;color:var(--ink);font-weight:600}
+.method small{display:block;margin-top:2px;font-size:12px;line-height:1.45;color:var(--muted)}
+.ts-form:has(#ts-push:checked) .code-only{display:none}
+.act .derive-row .link-btn{flex:none}
+.derive.prose .v{font-family:var(--sans);font-size:13px;line-height:1.5}
+.msg-card+.msg-text{font-size:12.5px;color:var(--muted)}
+
+/* Invites in this key's messages. */
+.invite-row{display:flex;align-items:center;justify-content:space-between;gap:10px 14px;flex-wrap:wrap;
+  padding:10px 13px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--sunk);font-size:13px;
+  overflow-wrap:anywhere}
+.invite-row span{display:block;font-size:12px;color:var(--muted)}
+/* An invite waiting for an answer, at the top of the page. */
+.inbox-alert{display:grid;gap:8px;margin:clamp(14px,1.6vw,18px) clamp(15px,1.7vw,20px) 0;padding:14px 16px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));border-radius:var(--r-md);background:var(--accent-soft)}
+.inbox-alert h3{font-size:15px;font-weight:650;letter-spacing:-.02em}
+.inbox-alert .invite-row{background:var(--panel)}
+.inbox-alert .invite-row.lead{border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+.inbox-older{margin-top:4px;font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+#inbox-out:empty{display:none}
+
+@media (max-width:560px){
+  .act .btn,.step-body .btn,.resume .btn,.pay .btn,.invite-card .btn,.whoami .btn,.fold .btn,.invite-row .btn{
+    white-space:normal;height:auto;min-height:40px;padding-block:8px;line-height:1.3;text-align:center}
+  .pay{grid-template-columns:minmax(0,1fr)}
+  .pay-qr{justify-self:center;width:min(220px,68vw)}
+  .pay .btn-row .btn{flex:1 1 100%}
+  .msg{max-width:94%}
+}
