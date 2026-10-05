@@ -12,8 +12,9 @@ bun run serve
 ```
 
 Open `http://localhost:8000/flex.html` and watch the network tab. Every
-request goes to a DNS resolver, a registry or a relay, and none of them is
-ours. There is no API call to a host we run, because we run no host.
+request goes to a DNS resolver, a registry, a relay, or the domain's own web
+server (the NIP-05 proof), and none of them is ours. There is no API call to a
+host we run, because we run no host.
 
 For a stronger check, ignore our deployment entirely and open the files from a
 clone. The pages behave the same.
@@ -87,23 +88,38 @@ was filtered out, labelled with the reason.
 curl -s https://rdap.verisign.com/com/v1/domain/<domain> | jq '.status, .events'
 ```
 
-`clientTransferProhibited` present means the domain is locked and cannot be
-sold yet. The market shows the lock state, and the escrow page lets a buyer
-fund only after the registry has shown the lock turned on and then off.
-Changing the lock is an act only the registrant can perform, and anyone can
-observe it.
+When you prove a domain, the market shows the registry's view of it: its
+registrar, statuses, age and expiry. Listing cards show only a registration
+date the seller states, if any. The escrow page reads the record of the domain
+being traded, at any registrar, and stops the escrow only for a name the
+registry says isn't registered, one expired or expiring within 45 days, or one
+whose statuses show it leaving, being deleted, restored or renewed
+(`pendingTransfer`, `pendingDelete`, `redemptionPeriod`, `pendingRestore`,
+`pendingRenew`). A transfer lock, a registry update lock, a hold, a missing
+expiry, and a registration or move between registrars in the last 60 days are
+warnings both sides see, and the registrar itself is never refused. Until the
+registry answers, the page doesn't offer to fund.
+`bun test test/vectors/registrar.test.ts` runs the status, expiry and lock
+rules.
+
+In a dispute, the arbiter's page shows the same record: the registrar and its
+IANA id, the statuses, the last transfer and last change dates, the expiry and
+the nameservers. Drop the `jq` filter above to see all of it. A move to another
+registrar shows there; a move between two accounts at one registrar doesn't,
+which is why the arbiter also asks each side for read-only proof.
 
 The list of TLDs with RDAP is never hardcoded. It comes from
 `https://data.iana.org/rdap/dns.json` at run time, and a domain whose TLD is
-not in it can be flexed but not escrowed.
+not in it, or that lists only plain-HTTP RDAP services, can be flexed but not
+escrowed.
 
-## 5. The escrow address can be re-derived from three public keys
+## 5. The escrow address can be re-derived from three public keys and the id
 
 ```bash
 bun test test/vectors
 ```
 
-528 vectors, no network, and `bun run typecheck` is clean under `strict`. The
+Every vector runs with no network, and `bun run typecheck` is clean under `strict`. The
 taproot derivation in `core/escrow/` is written from scratch over `@noble`
 primitives and is differentially tested against `@scure/btc-signer`, so the
 test compares two independent derivations rather than a function with itself.
@@ -118,7 +134,7 @@ This needs Bitcoin Core 31.1 unpacked at `tools/bitcoin-31.1/`. `tools/` is not
 in git: download the release from bitcoincore.org and check it against its
 `SHA256SUMS` and the signatures on that file. Without it, the tests that need
 a node are skipped. The suite starts a throwaway Bitcoin Core regtest node, funds the derived address
-and spends every leaf: cooperative, both dispute paths, and the timeout. The
+and spends every leaf: cooperative, both arbiter paths, and the timeout. The
 timeout spend is first shown to be rejected before the timelock, then accepted
 unchanged after mining past it. The test also builds, for every leaf, a
 witness carrying only the arbiter's signature, and Core refuses each one.
@@ -147,7 +163,10 @@ Each test describes the attack it refuses. In particular:
 The last rule is what stops wash trading. Two keys you control can escrow to
 each other and produce a perfect pair of receipts for the cost of mining fees.
 A real inter-registrar transfer is expensive: roughly $10 and a 60-day lock on
-that name. So volume is displayed but ignored, and only transfers count.
+that name. So volume is displayed but ignored, and only transfers count. A
+move between two accounts at one registrar, the quickest way an escrow here
+sends a domain, shows nowhere in RDAP, so a trade made that way weighs zero.
+No page writes or shows receipts yet.
 
 ## 7. Take your money out with the server off
 
@@ -160,9 +179,12 @@ first: the page makes no network requests of any kind, and the test suite
 asserts it. There is no `fetch`, no `XMLHttpRequest`, no remote script,
 stylesheet, font or image, and no `http` URL anywhere in the file.
 
-Paste your recovery string. The page rebuilds the escrow, shows you the
-address so you can check it against the one you funded, and signs a sweep.
-Broadcast the hex wherever you like.
+Paste the buyer's recovery string. The page rebuilds the escrow, shows you the
+address so you can check it against the one you funded, and, once the
+timelock has passed, signs a sweep back to the buyer. You type in the funding
+transaction from any block explorer, since the string is saved before funding.
+Broadcast the hex wherever you like. The seller's string rebuilds the address
+too, but the timeout pays only the buyer.
 
 `test/regtest/recover.test.ts` does this in a real browser, from `file://`,
 against a real regtest node, and then broadcasts what the page printed.
@@ -174,16 +196,19 @@ The escrow output is a 2-of-3 Taproot script tree between buyer, seller and
 arbiter, with a timelock. We hold at most one key of three.
 
 ```bash
-bun test test/vectors/escrow.test.ts
+bun test test/vectors/spend.test.ts test/vectors/settle.test.ts
 ```
 
 No leaf can be spent by the arbiter alone. That is a property of the tree,
-and the negative test asserts it.
+and the negative tests in those two files assert it. `bun run test:regtest`
+also shows Bitcoin Core refusing a witness that carries only the arbiter's
+signature.
 
 ## 9. An escrow cannot point somewhere it does not derive
 
 Open `escrow.html?id=<any id>`. Every published view of an escrow is parsed by
-re-deriving the taproot address from the three keys it names. A view whose
+re-deriving the taproot address from the three keys it names and the id its terms
+hash to, which the internal key commits to (PROTOCOL §5). A view whose
 stated address is not the one its own parameters produce is refused, with the
 words "do not fund it".
 
@@ -191,16 +216,60 @@ This stops an attacker from publishing a plausible escrow that names an
 output only they can spend, and then waiting for somebody to fund it.
 
 Above everything else, the page also shows where the parties' published views
-disagree: different amounts, keys or funding outpoints. That is a dispute you
-should see before funding, and it is permanent because each view is signed.
+disagree. Views of one id can't differ on any term, since the id hashes them
+all, so a disagreement there means a bug, and the page says so loudly. That is
+something you should see before funding, and it is permanent because each
+view is signed.
 
 This has been checked in a browser against the shipped bundle as well as the
 source.
 
-## 10. Run the index yourself
+A view of the earlier flow, where the arbiter held the domain (version 4), is
+refused with words that say so, and so is a version 5 view carrying any field
+of that flow, such as `custody_account` or `forward_blocks`: a field this
+version doesn't define would be a term nobody agreed to.
+`bun test test/vectors/escrow-event.test.ts` runs both cases.
+
+## 10. Where the domain goes stays between the buyer and the seller
 
 ```bash
-bun services/indexer/indexer.ts --once
+bun test test/vectors/escrow-chat.test.ts test/vectors/transfer-flow.test.ts
+```
+
+Each pair of an escrow's three keys has its own NIP-17 chat (PROTOCOL §10): the
+buyer and the seller, the buyer and the arbiter, the seller and the arbiter. A
+message names exactly one recipient and is encrypted only to that recipient's
+key and its author's. The tests open every copy with every key: the arbiter's
+key opens nothing the buyer and the seller sent each other, neither party's
+key opens the other's chat with the arbiter, and a key outside the escrow
+opens nothing. On the outside, each copy names only its recipient, and nothing
+of the escrow or its author.
+
+`transfer-flow.test.ts` runs whole trades the way the pages do, over a
+connection to a test relay that, like relay.damus.io, hands a key its gift
+wraps only after it signs in (NIP-42). The buyer's account and the seller's
+transfer code go as cards in their chat, and the arbiter, signed in as itself,
+is handed no copy of either. In the dispute, each side's proof reaches the
+arbiter and not the other side.
+
+Nothing public says where the domain goes. The invite and the reply carry the
+terms and one escrow key each, and nothing about any account
+(`handshake.test.ts`), and a view carries the terms, its author's claims and
+its signatures (`escrow-event.test.ts` pins its fields). Read any escrow's
+views from a relay, as in step 2 with `{"kinds":[30078],"#t":["flexmydomain"]}`:
+no field holds an account, an email or a transfer code. The one free text in a
+view is the reason a side gives for a cancellation or a dispute, and that is
+public.
+
+## 11. Run the index yourself
+
+```bash
+bun services/indexer/indexer.ts      # sweeps, then serves on :8788 (--once sweeps and exits)
+```
+
+Then, in a second terminal:
+
+```bash
 curl 'http://localhost:8788/search?q=' | jq '.cache, .relays, .filter'
 ```
 

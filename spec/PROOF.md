@@ -176,8 +176,8 @@ Freshness policy belongs to the reader:
 - reject an `iat` more than 300 seconds in the future (a clock-skew guard);
 - display the age, and let the reader judge;
 - re-resolve at least daily rather than trust an old observation, because a
-  proof is a live claim. A listing whose record has vanished is marked stale,
-  not deleted.
+  proof is a live claim. A listing whose record has vanished is shown as
+  unverified, not deleted.
 
 ## 4. Domain normalisation
 
@@ -241,26 +241,34 @@ It does not show that `P` is the registrant, or that `P` can sell the domain.
 A DNS administrator, a hosting provider, an agency or a former employee can
 hold zone control with no registrar access at all.
 
-Selling requires registrar control, and the separate check for that is a
-change to the transfer lock: `clientTransferProhibited` seen present in RDAP,
-then absent. Only the registrant can make that change, and anybody can
-observe it. The absence of the lock alone is not the check, because many
-registrars never set it, so a domain can show as unlocked no matter who lists
-it.
+Selling requires control of the registrar account that holds the domain, and
+nothing public shows whose account that is: RDAP names the registrar, never
+the account holder. The escrow doesn't check it before funding. It checks
+only that the registry has the name registered, at any registrar, and that it
+is not leaving, being deleted, restored or renewed, expired, or expiring
+within 45 days (spec/PROTOCOL.md §8). A seller who can't transfer the domain
+never gets the buyer's confirmation: with no "sent" by the transfer deadline
+the rules refund the buyer, and a "sent" with nothing behind it ends in a
+dispute the arbiter decides, or in the buyer's refund at the timelock.
 
-    TXT record         ->  zone control       ->  enough to FLEX, and to LIST
-    lock on, then off  ->  registrant control ->  required before FUNDING
+    TXT record         ->  zone control                          ->  enough to FLEX, and to LIST
+    RDAP reading       ->  registered, not expiring, not leaving ->  required before FUNDING
+    account control    ->  never checked; the buyer's confirmation, or a ruling, settles it
 
 spec/THREATS.md (section 2) describes what goes wrong when the two are
 confused.
 
 ## 7. Alternative proof: NIP-05
 
-A domain that already serves `/.well-known/nostr.json` mapping any name to `P`
-gives equivalent evidence of control, and the owner has already done the
-work. A verifier SHOULD accept it, and SHOULD label which proof it used: NIP-05
-proves control of the web server, the TXT record proves control of the zone,
-and the two claims are not quite the same.
+A domain that already serves `/.well-known/nostr.json` mapping the root name
+`_` to `P` gives equivalent evidence of control, and the owner has already done
+the work. A verifier SHOULD accept it, and SHOULD label which proof it used:
+NIP-05 proves control of the web server, the TXT record proves control of the
+zone, and the two claims are not quite the same.
+
+Only `_` counts. Hosted NIP-05 services map thousands of names on one domain,
+one per user, and none of those users owns the domain. A verifier MUST NOT
+accept any other name as a proof for the domain.
 
 ## 8. Test vectors
 
