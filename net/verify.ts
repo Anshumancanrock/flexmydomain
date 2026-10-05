@@ -10,6 +10,7 @@ import {
   type DomainProofStatus,
   type Eligibility,
   type Nip05Verification,
+  type ProofRecord,
   type ProofVerification,
 } from '../core/oracle/index.js'
 import { fetchNip05, lookupTxt, type TxtLookup } from './dns.js'
@@ -42,8 +43,8 @@ export async function checkDomainProof(params: {
 
   const lookup = await lookupTxt(proofRecordName(domain), { signal: params.signal, now: checkedAt })
   const silent = lookup.observations.filter((o) => o.error !== undefined)
-  const dns: ProofVerification = lookup.complete
-    ? verifyProofRecords({ domain, pubkey: params.pubkey, records: lookup.agreed, now: checkedAt })
+  const dns: ProofVerification = lookup.answered
+    ? verifyEachResolver(domain, params.pubkey, lookup, checkedAt)
     : {
         ok: false,
         reason: silent.length
@@ -73,6 +74,23 @@ export async function checkDomainProof(params: {
     nip05Url: url,
     checkedAt,
   }
+}
+
+// One resolver showing a record that proves this key is enough. DNS caches catch up at their own
+// pace, and a proof signed again can sit in one cache long after the other has the new one.
+function verifyEachResolver(domain: string, pubkey: string, lookup: TxtLookup, now: number): ProofVerification {
+  const agreed = verifyProofRecords({ domain, pubkey, records: lookup.agreed, now })
+  if (agreed.ok) return agreed
+  const each = lookup.observations
+    .filter((o) => o.error === undefined)
+    .map((o) => verifyProofRecords({ domain, pubkey, records: o.records, now }))
+  const good = each.filter((v) => v.ok)
+  if (good.length === 0) {
+    // say why a record was refused, such as one signed by another key
+    const why = each.flatMap((v) => v.rejected)[0]?.reason
+    return why ? { ok: false, reason: why } : agreed
+  }
+  return good.reduce((a, b) => ((b.record as ProofRecord).iat < (a.record as ProofRecord).iat ? b : a))
 }
 
 export interface RegistryReport {

@@ -9896,7 +9896,7 @@ async function checkDomainProof(params) {
   const checkedAt = params.now ?? Math.floor(Date.now() / 1000);
   const lookup = await lookupTxt(proofRecordName(domain), { signal: params.signal, now: checkedAt });
   const silent = lookup.observations.filter((o) => o.error !== undefined);
-  const dns = lookup.complete ? verifyProofRecords({ domain, pubkey: params.pubkey, records: lookup.agreed, now: checkedAt }) : {
+  const dns = lookup.answered ? verifyEachResolver(domain, params.pubkey, lookup, checkedAt) : {
     ok: false,
     reason: silent.length ? `not checked, ${silent.map((o) => `${o.provider} did not answer (${o.error})`).join(" and ")}` : "not checked, no resolver was asked"
   };
@@ -9919,6 +9919,18 @@ async function checkDomainProof(params) {
     nip05Url: url,
     checkedAt
   };
+}
+function verifyEachResolver(domain, pubkey, lookup, now) {
+  const agreed = verifyProofRecords({ domain, pubkey, records: lookup.agreed, now });
+  if (agreed.ok)
+    return agreed;
+  const each = lookup.observations.filter((o) => o.error === undefined).map((o) => verifyProofRecords({ domain, pubkey, records: o.records, now }));
+  const good = each.filter((v) => v.ok);
+  if (good.length === 0) {
+    const why = each.flatMap((v) => v.rejected)[0]?.reason;
+    return why ? { ok: false, reason: why } : agreed;
+  }
+  return good.reduce((a, b) => b.record.iat < a.record.iat ? b : a);
 }
 async function checkRegistry(params) {
   const domain = normaliseDomain(params.domain);

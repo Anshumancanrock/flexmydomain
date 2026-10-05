@@ -382,19 +382,18 @@ function renderPodium() {
   }).join("");
 }
 function renderRows(rows) {
-  const filtered = state.search || state.tld;
-  const body = filtered ? rows : rows.slice(PODIUM.length);
+  const body = rows;
   const pages = Math.max(1, Math.ceil(body.length / PER_PAGE));
   if (state.page > pages)
     state.page = pages;
   const start = (state.page - 1) * PER_PAGE;
   const page = body.slice(start, start + PER_PAGE);
-  $("#rows").innerHTML = page.length === 0 ? `<li class="empty">${state.loading ? "Asking the relays…" : state.unknown ? esc(state.unknown) : state.rows.length === 0 && state.answered === 0 && featuringEnabled() ? "The relays didn't answer, so the board can't be shown. Reload in a minute." : state.rows.length === 0 && state.missing.length ? "No flexes were found, but not every relay answered, so there may be some. Reload in a minute." : state.rows.length === 0 ? "Nobody has flexed a domain yet. Type one above and take #1." : filtered ? "Nothing matches that filter." : "Only the podium so far. Flex a domain to take the next spot."}</li>` : page.map((row) => {
+  $("#rows").innerHTML = page.length === 0 ? `<li class="empty">${state.loading ? "Asking the relays…" : state.unknown ? esc(state.unknown) : state.rows.length === 0 && state.answered === 0 && featuringEnabled() ? "The relays didn't answer, so the board can't be shown. Reload in a minute." : state.rows.length === 0 && state.missing.length ? "No flexes were found, but not every relay answered, so there may be some. Reload in a minute." : state.rows.length === 0 ? "Nobody has flexed a domain yet. Type one above and take #1." : "Nothing matches that filter."}</li>` : page.map((row) => {
     const [stem, t] = splitName(row.domain);
     const tile = tileOf(row.domain);
     const rank = row.rank;
     const metal = rank <= 3 ? ` r${rank} metal` : "";
-    return `<li class="row${rank === 1 ? " row-top" : ""}${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
+    return `<li class="row${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
           <span class="r-rank${metal}">#${rank}</span>
           <span class="r-av" style="--h:${tile.h};--l:${tile.l}" aria-hidden="true">${esc((stem[0] ?? "?").toUpperCase())}</span>
           <div class="r-body">

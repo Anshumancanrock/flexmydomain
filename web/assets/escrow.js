@@ -107,6 +107,7 @@ import {
   sats,
   session,
   sessionReady,
+  sessionSecretFor,
   toast
 } from "./ui.js";
 const ESCROW_RELAYS = DISCOVERY_RELAYS;
@@ -740,8 +741,9 @@ async function checkTerms(event) {
     fail(hint, "The price must be a whole number of sats.");
     return;
   }
-  if (amountSats < 2000) {
-    fail(hint, "Too small to escrow: the settlement fee would exceed it.");
+  const floor = await escrowFloor();
+  if (amountSats < floor) {
+    fail(hint, `Too small to escrow right now: paying it out on Bitcoin needs at least ${sats(floor)} sats, for the network fee and the smallest payment the network relays.`);
     return;
   }
   const counterparty = toPubkeyHex($("#e-counterparty").value.trim());
@@ -1714,6 +1716,13 @@ function payoutKind(snap) {
 function render(snap) {
   const { view } = snap;
   const claims = claimsOf(snap);
+  if (!state.me && !snap.settled) {
+    const key = sessionSecretFor(view.arbiter);
+    if (key) {
+      state.me = { role: "arbiter", secret: key };
+      queueMicrotask(refreshWanted);
+    }
+  }
   if (snap.funding && snap.tip !== undefined) {
     snap.verdict = arbiterRule({
       rules: { timeoutBlocks: view.timeoutBlocks, deliverBlocks: view.deliverBlocks },
@@ -2038,7 +2047,8 @@ function renderActions(snap) {
           opens it.</p>
           <button class="btn btn-accent btn-sm" type="button" id="me-backup">Open with my account</button>` : ""}
         <p class="step-lede">${canBackUp() ? "Or paste" : "Paste"} your recovery string if you are the buyer or the seller,
-          or the arbiter key if you are the arbiter. Neither is ever sent anywhere. A recovery string stays in this
+          or the arbiter key if you are the arbiter (or log in with it from Connect, and this opens by itself).
+          Neither is ever sent anywhere. A recovery string stays in this
           tab until you disconnect or are away for 8 hours; the arbiter key only until you reload.</p>
         <form class="add-form" id="me-form">
           <input type="password" id="me-in" placeholder="fmdrec1… or nsec1…" autocomplete="off" spellcheck="false" aria-label="Recovery string or arbiter key">
@@ -3022,6 +3032,12 @@ async function freshRecord(snap) {
     answered
   };
 }
+const PAYOUT_VBYTES = 170;
+const PAYOUT_DUST = 546;
+async function escrowFloor() {
+  const rate = Math.min(Math.max(await chain.feeRate().catch(() => 2), 1), 500);
+  return PAYOUT_DUST + Math.ceil(2 * rate * PAYOUT_VBYTES);
+}
 async function quote(snap, kind, dest) {
   const f = snap.funding;
   const rate = Math.min(Math.max(await chain.feeRate(), 1), 500);
@@ -3516,8 +3532,54 @@ function useKey() {
   render(snap);
   refreshWanted();
 }
-async function listForArbiter() {
-  const arbiter = siteArbiters()[0];
+function enterAsArbiter(id, keys, secret) {
+  state.me = { role: "arbiter", secret };
+  rememberKeys(id, keys);
+  setUrl(id, keys);
+  $("#arbiter-section").hidden = true;
+  $("#open-section").hidden = true;
+  $("#join-section").hidden = true;
+  watch(id);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+$("#arbiter-list").addEventListener("click", (e) => {
+  const me = e;
+  if (me.button !== 0 || me.metaKey || me.ctrlKey || me.shiftKey)
+    return;
+  const link = e.target.closest("a[href]");
+  if (!link)
+    return;
+  const url = new URL(link.href);
+  const id = url.searchParams.get("id") ?? "";
+  const keys = (url.searchParams.get("k") ?? "").split(",").filter((k) => /^[0-9a-f]{64}$/.test(k));
+  const secret = keys[2] ? sessionSecretFor(keys[2]) : null;
+  if (!secret || !/^[0-9a-f]{64}$/.test(id))
+    return;
+  e.preventDefault();
+  enterAsArbiter(id, keys, secret);
+});
+let arbiterHome = false;
+function paintArbiterHome() {
+  if (new URL(location.href).searchParams.has("arbiter")) {
+    listForArbiter();
+    return;
+  }
+  if (!plainVisit())
+    return;
+  const arbiter = session.pubkey && siteArbiters().includes(session.pubkey) && sessionSecretFor(session.pubkey) ? session.pubkey : null;
+  if (!!arbiter === arbiterHome)
+    return;
+  arbiterHome = !!arbiter;
+  if (arbiter)
+    listForArbiter(arbiter);
+  else {
+    $("#arbiter-section").hidden = true;
+    $("#open-section").hidden = false;
+  }
+}
+async function listForArbiter(arbiter = siteArbiters()[0]) {
+  const mine = !!arbiter && sessionSecretFor(arbiter) !== null;
+  $("#arbiter-title").textContent = mine ? "Escrows you arbitrate" : "Escrows naming this site's arbiter";
   $("#arbiter-section").hidden = false;
   $("#open-section").hidden = true;
   const list = $("#arbiter-list");
@@ -3554,7 +3616,7 @@ async function listForArbiter() {
     const latest = Math.max(...c.participants.map((v) => v.publishedAt), 0);
     return { id, c, latest };
   }).filter((r) => r.c.participants.length).sort((a, b) => b.latest - a.latest);
-  $("#arbiter-sub").textContent = `${rows.length} escrow(s) name this site's arbiter on the relays asked.`;
+  $("#arbiter-sub").textContent = mine ? `${rows.length} escrow${rows.length === 1 ? "" : "s"} name you as the arbiter. Open one to read the chats and decide.` : `${rows.length} escrow(s) name this site's arbiter on the relays asked.`;
   const perDomain = new Map;
   for (const { c } of rows) {
     const domain = (c.buyerView ?? c.sellerView).domain;
@@ -3660,10 +3722,11 @@ onSessionChange((pubkey, restored) => {
     clearAccountLists();
     listsFor = pubkey;
   }
+  paintArbiterHome();
   if (pubkey) {
     if (state.snap)
       render(state.snap);
-    if (!restored && session.kind === "local" && plainVisit() && !state.draft) {
+    if (!restored && !arbiterHome && session.kind === "local" && plainVisit() && !state.draft) {
       if (!$("#inbox-box").hidden)
         checkInbox();
       if (!$("#resume-box").hidden)

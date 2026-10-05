@@ -32,6 +32,7 @@ import {
   npubEncode,
   parseListing,
   parsePortfolio,
+  parseProofRecord,
   portfolioFilter,
   publishOutbox,
   queryDiscovery,
@@ -229,21 +230,14 @@ function render() {
     const mine = entry.event.pubkey === session.pubkey;
     const fresh = entry.event.id === state.fresh?.id;
     const tags = [];
-    if (fresh)
-      tags.push(`<span class="tag fresh">just listed</span>`);
     if (ok)
-      tags.push(`<span class="tag proven">✓ proof verified</span>`);
+      tags.push(`<span class="tag proven">✓ verified</span>`);
     else if (entry.check)
       tags.push(`<span class="tag unproven">unverified</span>`);
     else
       tags.push(`<span class="tag">checking…</span>`);
-    if (entry.live?.dnssec)
-      tags.push(`<span class="tag dnssec">DNSSEC</span>`);
-    if (l.registeredAt)
-      tags.push(`<span class="tag">registered ${ageText(l.registeredAt)} ago</span>`);
     if (l.status === "sold")
       tags.push(`<span class="tag">sold</span>`);
-    tags.push(`<span class="tag">.${esc(tldOf(l.domain))}</span>`);
     return `<article class="listing${ok ? "" : " unverified"}${fresh ? " fresh" : ""}">
       <div class="listing-top">
         <div class="listing-name">${esc(l.domain)}${idnLine(l.domain)}</div>
@@ -258,8 +252,6 @@ function render() {
       amount: String(l.priceSats),
       seller: npubEncode(entry.event.pubkey)
     }).toString()}">Buy</a>` : ""}
-        <button class="btn btn-ghost" type="button" data-feature="${esc(entry.event.id)}">Feature</button>
-        <button class="btn btn-ghost" type="button" data-share="${esc(entry.event.id)}">Share</button>
         <button class="btn btn-ghost" type="button" data-seller="${esc(entry.event.pubkey)}">Seller</button>
         ${mine && l.status !== "sold" ? `<button class="btn btn-ghost" type="button" data-delist="${esc(l.domain)}">Delist</button>` : ""}
       </div>
@@ -662,7 +654,7 @@ async function verifyZone() {
     const rows = report.lookup.observations.map((o) => row(o.error ? "" : o.records.length ? "good" : "bad", `<b>${esc(o.provider)}</b>: ${o.error ? `did not answer (${esc(o.error)})` : `${o.records.length} TXT record${o.records.length === 1 ? "" : "s"}${o.dnssec ? ", DNSSEC validated" : ""}`}`));
     if (report.status.proven) {
       rows.push(row("good", report.status.source === "nip05" ? `<b>Proven.</b> <code>${esc(report.nip05Url ?? "nostr.json")}</code> maps <code>_</code> to your key.
-            That shows control of the web server, not the zone.` : `<b>Proven.</b> Both resolvers returned a record that verifies
+            That shows control of the web server, not the zone.` : `<b>Proven.</b> A resolver returned a record that verifies
             for your key${report.dnssec ? ", over a validated DNSSEC chain" : ""}.`));
       step(4);
     } else if (!report.lookup.complete) {
@@ -672,8 +664,15 @@ async function verifyZone() {
       rows.push(row("bad", `One resolver sees the record and the other does not. That is
         normal for a few minutes after you add it; check again shortly.`));
     } else {
-      rows.push(row("bad", `No record verified yet${report.dns.reason ? `: ${esc(report.dns.reason)}` : ""}.
-        DNS changes can take a few minutes.`));
+      const keys = new Set(report.lookup.observations.flatMap((o) => o.records).flatMap((r) => {
+        const p = parseProofRecord(r);
+        return p.ok ? [p.record.pubkey] : [];
+      }));
+      const other = [...keys].find((k) => k !== session.pubkey);
+      rows.push(row("bad", other && !keys.has(session.pubkey) ? `The record in your DNS was signed by another key, <code>${esc(shorten(npubEncode(other), 10))}</code>,
+            but you are connected as <code>${esc(shorten(npubEncode(session.pubkey), 10))}</code>.
+            Connect with that key, or put this page's record in your DNS instead.` : `No record verified yet${report.dns.reason ? `: ${esc(report.dns.reason)}` : ""}.
+            DNS changes can take a few minutes.`));
     }
     out.innerHTML = rows.join("");
   } catch (err) {

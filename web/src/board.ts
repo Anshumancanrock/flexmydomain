@@ -419,8 +419,8 @@ function renderPodium(): void {
 }
 
 function renderRows(rows: RankedRow[]): void {
-  const filtered = state.search || state.tld;
-  const body = filtered ? rows : rows.slice(PODIUM.length);
+  // every rank is listed, the podium ones too, so the board is never empty while anyone has paid
+  const body = rows;
 
   const pages = Math.max(1, Math.ceil(body.length / PER_PAGE));
   if (state.page > pages) state.page = pages;
@@ -440,16 +440,14 @@ function renderRows(rows: RankedRow[]): void {
             ? "No flexes were found, but not every relay answered, so there may be some. Reload in a minute."
           : state.rows.length === 0
             ? "Nobody has flexed a domain yet. Type one above and take #1."
-            : filtered
-              ? "Nothing matches that filter."
-              : "Only the podium so far. Flex a domain to take the next spot."
+            : "Nothing matches that filter."
       }</li>`
     : page.map((row) => {
         const [stem, t] = splitName(row.domain);
         const tile = tileOf(row.domain);
         const rank = row.rank;
         const metal = rank <= 3 ? ` r${rank} metal` : "";
-        return `<li class="row${rank === 1 ? " row-top" : ""}${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
+        return `<li class="row${row.domain === state.flexed ? " fresh" : ""}" data-domain="${esc(row.domain)}">
           <span class="r-rank${metal}">#${rank}</span>
           <span class="r-av" style="--h:${tile.h};--l:${tile.l}" aria-hidden="true">${esc((stem[0] ?? "?").toUpperCase())}</span>
           <div class="r-body">

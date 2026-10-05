@@ -97,7 +97,7 @@ import type {
 import { CONFIG } from "./config.js";
 import {
   $, DISCOVERY_RELAYS, confirmDialog, copyToClipboard, esc, initConnect, initTheme, now,
-  onSessionChange, openConnect, row, sats, session, sessionReady, toast,
+  onSessionChange, openConnect, row, sats, session, sessionReady, sessionSecretFor, toast,
 } from "./ui.js";
 
 // Both sides must use the same relays, so they come from the deployment. Per-escrow keys have no NIP-65 list.
@@ -815,8 +815,12 @@ async function checkTerms(event: Event): Promise<void> {
     fail(hint, "The price must be a whole number of sats.");
     return;
   }
-  // Must stay above dust after the settlement fee. Fail now, not at signing.
-  if (amountSats < 2000) { fail(hint, "Too small to escrow: the settlement fee would exceed it."); return; }
+  // The payout must clear the network fee and still be a payment nodes relay. Fail now, not at signing.
+  const floor = await escrowFloor();
+  if (amountSats < floor) {
+    fail(hint, `Too small to escrow right now: paying it out on Bitcoin needs at least ${sats(floor)} sats, for the network fee and the smallest payment the network relays.`);
+    return;
+  }
 
   const counterparty = toPubkeyHex($<HTMLInputElement>("#e-counterparty").value.trim());
   if (!counterparty) { fail(hint, "That is not an npub or a hex pubkey."); return; }
@@ -1804,6 +1808,15 @@ function render(snap: Snapshot): void {
   const { view } = snap;
   const claims = claimsOf(snap);
 
+  // connected with this escrow's arbiter key: act as the arbiter, as if the key had been pasted
+  if (!state.me && !snap.settled) {
+    const key = sessionSecretFor(view.arbiter);
+    if (key) {
+      state.me = { role: "arbiter", secret: key };
+      queueMicrotask(refreshWanted);
+    }
+  }
+
   if (snap.funding && snap.tip !== undefined) {
     snap.verdict = arbiterRule({
       rules: { timeoutBlocks: view.timeoutBlocks, deliverBlocks: view.deliverBlocks },
@@ -2180,7 +2193,8 @@ function renderActions(snap: Snapshot): void {
           opens it.</p>
           <button class="btn btn-accent btn-sm" type="button" id="me-backup">Open with my account</button>` : ""}
         <p class="step-lede">${canBackUp() ? "Or paste" : "Paste"} your recovery string if you are the buyer or the seller,
-          or the arbiter key if you are the arbiter. Neither is ever sent anywhere. A recovery string stays in this
+          or the arbiter key if you are the arbiter (or log in with it from Connect, and this opens by itself).
+          Neither is ever sent anywhere. A recovery string stays in this
           tab until you disconnect or are away for 8 hours; the arbiter key only until you reload.</p>
         <form class="add-form" id="me-form">
           <input type="password" id="me-in" placeholder="fmdrec1… or nsec1…" autocomplete="off" spellcheck="false" aria-label="Recovery string or arbiter key">
@@ -3208,6 +3222,15 @@ async function freshRecord(snap: Snapshot): Promise<{ seller: EscrowClaims; buye
   };
 }
 
+// A payout spends about 170 vbytes and must leave at least 546 sats, the dust limit of the oldest
+// address type. Twice today's fee rate leaves room for fees to rise before it settles.
+const PAYOUT_VBYTES = 170;
+const PAYOUT_DUST = 546;
+async function escrowFloor(): Promise<number> {
+  const rate = Math.min(Math.max(await chain.feeRate().catch(() => 2), 1), 500);
+  return PAYOUT_DUST + Math.ceil(2 * rate * PAYOUT_VBYTES);
+}
+
 /** The fee for a payout to `dest` at the current rate. Refusing a high one would only run out a deadline. */
 async function quote(snap: Snapshot, kind: SettlementKind, dest: string): Promise<number> {
   const f = snap.funding!;
@@ -3673,8 +3696,51 @@ function useKey(): void {
 
 /* ---------- The arbiter's list ---------- */
 
-async function listForArbiter(): Promise<void> {
-  const arbiter = siteArbiters()[0];
+// Opened in this page, as when the key is pasted: a reload would drop the arbiter key, which lives
+// in memory only.
+function enterAsArbiter(id: string, keys: string[], secret: Uint8Array): void {
+  state.me = { role: "arbiter", secret };
+  rememberKeys(id, keys);
+  setUrl(id, keys);
+  $("#arbiter-section").hidden = true;
+  $("#open-section").hidden = true;
+  $("#join-section").hidden = true;
+  void watch(id);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+$("#arbiter-list").addEventListener("click", (e) => {
+  const me = e as MouseEvent;
+  if (me.button !== 0 || me.metaKey || me.ctrlKey || me.shiftKey) return;
+  const link = (e.target as Element).closest<HTMLAnchorElement>("a[href]");
+  if (!link) return;
+  const url = new URL(link.href);
+  const id = url.searchParams.get("id") ?? "";
+  const keys = (url.searchParams.get("k") ?? "").split(",").filter((k) => /^[0-9a-f]{64}$/.test(k));
+  const secret = keys[2] ? sessionSecretFor(keys[2]) : null;
+  // not logged in as this arbiter: the link opens the escrow, where the key can be pasted
+  if (!secret || !/^[0-9a-f]{64}$/.test(id)) return;
+  e.preventDefault();
+  enterAsArbiter(id, keys, secret);
+});
+
+// Logged in with the site's arbiter key on the plain page: the escrows to decide take the place
+// of the trade forms, since an arbiter doesn't buy or sell here.
+let arbiterHome = false;
+function paintArbiterHome(): void {
+  // the arbiter's own list page: retitle it for whoever is logged in now
+  if (new URL(location.href).searchParams.has("arbiter")) { void listForArbiter(); return; }
+  if (!plainVisit()) return;
+  const arbiter = session.pubkey && siteArbiters().includes(session.pubkey) && sessionSecretFor(session.pubkey) ? session.pubkey : null;
+  if (!!arbiter === arbiterHome) return;
+  arbiterHome = !!arbiter;
+  if (arbiter) void listForArbiter(arbiter);
+  else { $("#arbiter-section").hidden = true; $("#open-section").hidden = false; }
+}
+
+async function listForArbiter(arbiter = siteArbiters()[0]): Promise<void> {
+  const mine = !!arbiter && sessionSecretFor(arbiter) !== null;
+  $("#arbiter-title").textContent = mine ? "Escrows you arbitrate" : "Escrows naming this site's arbiter";
   $("#arbiter-section").hidden = false;
   $("#open-section").hidden = true;
   const list = $("#arbiter-list");
@@ -3703,7 +3769,9 @@ async function listForArbiter(): Promise<void> {
     return { id, c, latest };
   }).filter((r) => r.c.participants.length).sort((a, b) => b.latest - a.latest);
 
-  $("#arbiter-sub").textContent = `${rows.length} escrow(s) name this site's arbiter on the relays asked.`;
+  $("#arbiter-sub").textContent = mine
+    ? `${rows.length} escrow${rows.length === 1 ? "" : "s"} name you as the arbiter. Open one to read the chats and decide.`
+    : `${rows.length} escrow(s) name this site's arbiter on the relays asked.`;
   const perDomain = new Map<string, number>();
   for (const { c } of rows) {
     const domain = (c.buyerView ?? c.sellerView!).domain;
@@ -3817,9 +3885,10 @@ const plainVisit = (): boolean => {
 
 onSessionChange((pubkey, restored) => {
   if (listsFor !== pubkey) { clearAccountLists(); listsFor = pubkey; }
+  paintArbiterHome();
   if (pubkey) {
     if (state.snap) render(state.snap);
-    if (!restored && session.kind === "local" && plainVisit() && !state.draft) {
+    if (!restored && !arbiterHome && session.kind === "local" && plainVisit() && !state.draft) {
       if (!$("#inbox-box").hidden) void checkInbox();
       if (!$("#resume-box").hidden) void findMine(true);
     }

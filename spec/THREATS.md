@@ -48,9 +48,11 @@ domain, marked "proof not found". Nothing is deleted from the relays. A funded
 escrow doesn't watch the proof: only its deadlines, the two sides' claims and
 the arbiter's ruling move it.
 
-To resist a poisoned lookup, two independent DoH providers are queried and
-must agree; a record that only one resolver returns is left unverified, and
-the prove-a-domain step says which resolver saw it. While one resolver doesn't
+Two independent DoH providers are queried, and a record that verifies for the
+key from either one is enough. That keeps proving quick while DNS caches catch
+up, but it trusts each resolver on its own: one poisoned resolver could vouch
+for a record the zone doesn't hold. The prove-a-domain step shows what each
+resolver returned, and says when a record was signed by another key. While one resolver doesn't
 answer, nothing can be verified, and the pages say "not checked" rather than
 "no record". DNSSEC validation is shown when the chain validates, and
 a verifier daemon on a different network gives a third view.

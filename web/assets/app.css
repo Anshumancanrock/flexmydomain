@@ -299,8 +299,6 @@ select.sort:focus{border-color:var(--accent)}
 .r-meta a:hover{color:var(--accent)}
 .r-bid{font-family:var(--mono);font-size:clamp(15px,1.5vw,19px);font-weight:700;
   letter-spacing:-.03em;color:var(--accent);white-space:nowrap;text-align:right}
-.row-top{background:var(--win-bg);box-shadow:inset 3px 0 0 #f0bd45}
-.row-top:hover{background:var(--win-bg)}
 .row.fresh,.card-rank.fresh{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 55%,transparent),var(--shadow-sm)}
 .empty{padding:38px;text-align:center;color:var(--muted);font-size:14px;list-style:none}
 

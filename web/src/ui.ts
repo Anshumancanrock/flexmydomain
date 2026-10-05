@@ -17,6 +17,7 @@ import {
   storedPubkey,
   toPubkeyHex,
   toUnicode,
+  tryDecodeNip19,
   unlockedKey,
   waitForExtension,
 } from "./fmd.js";
@@ -298,6 +299,20 @@ function preferred(): string | null {
 
 let generation = 0;
 
+// The secret behind a local session, so a page can act with it as an escrow's arbiter.
+let localSecret: Uint8Array | null = null;
+
+async function adoptKey(secret: Uint8Array, restored = false): Promise<void> {
+  localSecret = secret;
+  await adopt(localSigner(secret), "local", restored);
+}
+
+/** The connected key's secret, when this page holds it and it is `pubkey`'s. */
+export function sessionSecretFor(pubkey: string): Uint8Array | null {
+  if (!localSecret || session.kind !== "local" || session.pubkey !== pubkey) return null;
+  return escrowPublicKeyHex(localSecret) === pubkey ? localSecret : null;
+}
+
 async function adopt(signer: Signer, kind: SignerKind, restored = false): Promise<void> {
   const mine = ++generation;
   const pubkey = await signer.getPublicKey();
@@ -305,7 +320,7 @@ async function adopt(signer: Signer, kind: SignerKind, restored = false): Promis
   session.signer = signer;
   session.pubkey = pubkey;
   session.kind = kind;
-  if (kind === "extension") { prefer("extension"); forgetUnlocked(); }
+  if (kind === "extension") { prefer("extension"); forgetUnlocked(); localSecret = null; }
   else prefer(null);
   const btn = $("#connect");
   if (btn) {
@@ -333,6 +348,7 @@ export function disconnect(everywhere = true): void {
   session.signer = null;
   session.pubkey = null;
   session.kind = null;
+  localSecret = null;
   forgetTabSecrets();
   prefer(null);
   if (everywhere) channel?.postMessage({ type: "disconnect" });
@@ -392,7 +408,7 @@ function askOtherTabs(timeoutMs = 300): Promise<Uint8Array | undefined> {
 async function restoreSession(): Promise<void> {
   const kept = unlockedKey();
   if (kept) {
-    await adopt(localSigner(kept), "local", true).catch(() => forgetUnlocked());
+    await adoptKey(kept, true).catch(() => forgetUnlocked());
     return;
   }
   const stored = storedPubkey();
@@ -402,7 +418,7 @@ async function restoreSession(): Promise<void> {
       keepUnlocked(shared);
       const checked = unlockedKey();
       if (checked && escrowPublicKeyHex(checked) === stored) {
-        await adopt(localSigner(checked), "local", true).catch(() => forgetUnlocked());
+        await adoptKey(checked, true).catch(() => forgetUnlocked());
         return;
       }
       forgetUnlocked();
@@ -450,6 +466,10 @@ export async function openConnect(): Promise<void> {
          Create a new account
          <span>Made in this page and saved, encrypted, in this browser. You get a backup code to keep.</span>
        </button>
+       <button class="btn btn-ghost" type="button" id="use-nsec">
+         Log in with your key
+         <span>Paste your nsec backup code. It stays in this browser and is never sent anywhere.</span>
+       </button>
        ${extension ? "" : extensionButton}
      </div>
      <p>Browsing needs no account. You connect to list, buy, sell or flex.</p>`,
@@ -482,7 +502,7 @@ export async function openConnect(): Promise<void> {
             if ($<HTMLInputElement>("#keep").checked && mayKeep(secret)) keepUnlocked(secret);
             else forgetUnlocked();
             closeDialog();
-            await adopt(localSigner(secret), "local");
+            await adoptKey(secret);
           } catch (err) {
             $("#pass-hint").textContent = (err as Error).message;
             $("#pass-hint").className = "hint err";
@@ -496,6 +516,54 @@ export async function openConnect(): Promise<void> {
     closeDialog();
     createKey();
   });
+
+  $("#use-nsec")?.addEventListener("click", () => {
+    closeDialog();
+    logInWithKey();
+  });
+}
+
+function logInWithKey(): void {
+  askDialog(
+    "Log in with your key",
+    `<p>Paste your <code>nsec1…</code> backup code. It is used in this browser only, never sent anywhere,
+        and not saved: to save it with a passphrase, use "Create a new account" instead.</p>
+     <input type="password" id="nsec-in" placeholder="nsec1…" autocomplete="off" spellcheck="false" aria-label="Your nsec key">
+     <label class="check">
+       <input type="checkbox" id="keep" checked>
+       <span>Keep me connected in this tab, so other pages here don't ask again. It locks when you
+         disconnect, or after 8 hours away from the site.</span>
+     </label>
+     <p class="hint" id="nsec-hint"></p>`,
+    {
+      confirmLabel: "Log in",
+      place: "account",
+      onConfirm: async () => {
+        const hint = $("#nsec-hint");
+        const text = $<HTMLInputElement>("#nsec-in").value.trim();
+        const decoded = tryDecodeNip19(text);
+        const secret = decoded?.type === "nsec" ? decoded.data
+          : /^[0-9a-f]{64}$/i.test(text) ? Uint8Array.from(text.toLowerCase().match(/../g)!.map((h) => parseInt(h, 16)))
+          : undefined;
+        let valid = false;
+        try { valid = !!secret && /^[0-9a-f]{64}$/.test(escrowPublicKeyHex(secret)); } catch { valid = false; }
+        if (!secret || !valid) {
+          hint.textContent = "That isn't a valid nsec key.";
+          hint.className = "hint err";
+          return;
+        }
+        // the site's arbiter key never outlives this page
+        const arbiter = !mayKeep(secret);
+        if ($<HTMLInputElement>("#keep").checked && !arbiter) keepUnlocked(secret);
+        else forgetUnlocked();
+        closeDialog();
+        await adoptKey(secret);
+        toast(arbiter
+          ? "Connected as this site's arbiter. The key stays in this page's memory only, until you reload."
+          : "You're connected.");
+      },
+    },
+  );
 }
 
 function createKey(): void {
@@ -546,7 +614,7 @@ function createKey(): void {
           if ($<HTMLInputElement>("#keep").checked && mayKeep(secret)) keepUnlocked(secret);
           else forgetUnlocked();
           closeDialog();
-          await adopt(signer, "local");
+          await adoptKey(secret);
           toast("You're connected. Keep your backup code somewhere off this machine.");
         } catch (err) {
           hint.textContent = (err as Error).message;

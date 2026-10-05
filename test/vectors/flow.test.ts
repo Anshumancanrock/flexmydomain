@@ -155,7 +155,7 @@ describe('adding a domain, end to end', () => {
     expect(report.answered).toBe(true)
   })
 
-  test('a record only one resolver can see is disputed, not proven', async () => {
+  test('a record only one resolver can see is disputed, and still enough to prove the domain', async () => {
     const signed = await signer.signEvent(proofEvent({ domain: DOMAIN, pubkey: PK, iat: NOW }))
     const txt = encodeProofRecord({ version: 'fmd1', iat: NOW, pubkey: PK, sig: signed.sig })
 
@@ -171,26 +171,52 @@ describe('adding a domain, end to end', () => {
     }) as typeof fetch
 
     const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
-    expect(report.status.proven).toBe(false)
+    expect(report.status.proven).toBe(true)
     expect(report.lookup.agreed).toEqual([])
     expect(report.lookup.disputed).toEqual([txt])
   })
 
-  test('one resolver down proves nothing, and is not a negative result either', async () => {
+  test('a proof signed again counts while the resolvers hold different versions of it', async () => {
+    const recordAt = async (iat: number, sk = SK) => {
+      const signed = signEvent(proofEvent({ domain: DOMAIN, pubkey: bytesToHex(schnorr.getPublicKey(sk)), iat }), sk, AUX)
+      return encodeProofRecord({ version: 'fmd1', iat, pubkey: bytesToHex(schnorr.getPublicKey(sk)), sig: signed.sig })
+    }
+    const older = await recordAt(NOW - 600)
+    const newer = await recordAt(NOW)
+    const answer = (cloudflare: string, google: string) => {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = new URL(input.toString())
+        return json({ Status: 0, AD: true, Answer: [{ type: 16, data: `"${url.hostname.includes('cloudflare') ? cloudflare : google}"` }] })
+      }) as typeof fetch
+    }
+
+    // Cloudflare still caches the first version; Google has the new one.
+    answer(older, newer)
+    const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
+    expect(report.lookup.agreed).toEqual([])
+    expect(report.status.proven).toBe(true)
+    expect(report.status.iat).toBe(NOW - 600)
+
+    // Records for another key prove nothing for this one, and the page is told why.
+    const theirs = await recordAt(NOW, new Uint8Array(32).fill(0x22))
+    answer(theirs, theirs)
+    const refused = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
+    expect(refused.status.proven).toBe(false)
+    expect(refused.dns.reason).toBe('record is for a different pubkey')
+  })
+
+  test('one resolver down: the other one\'s record is enough, and the silent one is reported', async () => {
     const signed = await signer.signEvent(proofEvent({ domain: DOMAIN, pubkey: PK, iat: NOW }))
     const txt = encodeProofRecord({ version: 'fmd1', iat: NOW, pubkey: PK, sig: signed.sig })
     install({ txt: { '_flexmydomain.lumenary.com': [txt] }, down: ['google'], rdap: healthyRdap() })
 
     const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
-    // One lying or blocked resolver must not be enough on its own (spec/THREATS.md section 2).
-    expect(report.status.proven).toBe(false)
+    expect(report.status.proven).toBe(true)
     expect(report.answered).toBe(false)
     expect(report.lookup.complete).toBe(false)
     expect(report.lookup.agreed).toEqual([])
     expect(report.lookup.disputed).toEqual([txt])
     expect(report.lookup.observations.find((o) => o.provider === 'google')?.error).toBeTruthy()
-    expect(report.dns.reason).toMatch(/^not checked, google did not answer/)
-    expect(report.dns.reason).not.toMatch(/no record/)
   })
 
   test('a SERVFAIL is no answer, not an empty one', async () => {
@@ -205,7 +231,7 @@ describe('adding a domain, end to end', () => {
 
     const report = await checkDomainProof({ domain: DOMAIN, pubkey: PK, now: NOW, dnsOnly: true })
     expect(report.lookup.observations.find((o) => o.provider === 'google')?.error).toBe('DNS status 2')
-    expect(report.status.proven).toBe(false)
+    expect(report.status.proven).toBe(true)
     expect(report.answered).toBe(false)
   })
 
