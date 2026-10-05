@@ -525,7 +525,7 @@ async function loadPrice() {
   } catch {}
 }
 function usdText(satsAmount) {
-  if (!usdPerBtc || onchainFlex() && FLEX_NET !== "mainnet")
+  if (!usdPerBtc)
     return;
   const v = satsAmount * usdPerBtc / 1e8;
   const cents = v < 100;
@@ -929,8 +929,7 @@ if (asked.ok) {
 }
 $("#c-minus").addEventListener("click", () => stepAmount(false));
 $("#c-plus").addEventListener("click", () => stepAmount(true));
-if (!onchainFlex() || FLEX_NET === "mainnet")
-  loadPrice();
+loadPrice();
 $("#sort").addEventListener("change", (e) => {
   const value = e.target.value;
   const wantRange = value === "rank-all" ? "all" : "week";

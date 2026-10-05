@@ -617,7 +617,7 @@ async function loadPrice(): Promise<void> {
 }
 
 function usdText(satsAmount: number): string | undefined {
-  if (!usdPerBtc || (onchainFlex() && FLEX_NET !== "mainnet")) return undefined;
+  if (!usdPerBtc) return undefined;
   const v = (satsAmount * usdPerBtc) / 100_000_000;
   const cents = v < 100;
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD",
@@ -1033,8 +1033,7 @@ if (asked.ok) {
 
 $("#c-minus").addEventListener("click", () => stepAmount(false));
 $("#c-plus").addEventListener("click", () => stepAmount(true));
-// test coins have no price to fetch
-if (!onchainFlex() || FLEX_NET === "mainnet") void loadPrice();
+void loadPrice();
 
 $("#sort").addEventListener("change", (e) => {
   const value = (e.target as HTMLSelectElement).value;
