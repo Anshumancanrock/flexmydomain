@@ -2,13 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'sha256-cM2xWURx3FFGsh6xpUZEAgSA5jlPRcVB5vf8Vji4aNw='; object-src 'none'; base-uri 'none'; form-action 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f0f5fc" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#07121c" media="(prefers-color-scheme: dark)">
 <title>escrow: a trade neither side can rig</title>
-<meta name="description" content="A 2-of-3 Taproot escrow between buyer, seller and an arbiter you both choose. We hold at most one key of three, and can move nothing alone.">
+<meta name="description" content="Buy or sell a domain at any registrar with the bitcoin in a 2-of-3 Taproot escrow. The seller transfers the domain straight to the buyer, the buyer's confirmation pays the seller, and an arbiter who can never move the money alone decides a dispute.">
 <meta property="og:title" content="flexmydomain · escrow">
-<meta property="og:description" content="A 2-of-3 Taproot escrow. We can move nothing alone, and if everyone vanishes a timelock settles it with nobody's permission.">
+<meta property="og:description" content="A 2-of-3 Taproot escrow for domains at any registrar. Nobody can move the money alone, and if everyone vanishes a timelock refunds the buyer.">
 <meta property="og:image" content="/opengraph-image.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -59,11 +60,12 @@
     <div>
       <h1>Escrow</h1>
       <p class="lede">
-        Buy or sell a domain without trusting the other side. The buyer's bitcoin is
-        locked where <b>nobody can take it alone</b>: not the buyer, not the seller, not
-        us. It is released when the domain arrives. If everyone walks away, a timer
-        settles it after a set time, and the page shows you who that timer pays before
-        you send a single sat.
+        Buy or sell a domain at <b>any registrar</b> without trusting the other side. The
+        buyer's bitcoin is locked where <b>nobody can take it alone</b>: not the buyer, not
+        the seller, not us. The seller transfers the domain <b>straight to the buyer</b>, the
+        registrar's usual way, and the buyer's confirmation pays the seller. If the two
+        disagree, an arbiter checks the registry's record and decides. If the domain never
+        arrives, the buyer gets the money back.
       </p>
     </div>
     <div class="net-badge" id="net-badge" title="Set in web/assets/config.js"></div>
@@ -77,13 +79,15 @@
           <p class="meta">Both sides generate a key here. We never see either of them.</p>
         </div>
       </div>
+      <div class="inbox-alert" id="inbox-alert" hidden></div>
 
-      <ol class="steps" id="steps">
+      <ol class="steps collapsing" id="steps">
 
         <li class="step on" data-step="1">
           <div class="step-no">1</div>
           <div class="step-body">
             <h3>The trade</h3>
+            <div class="step-sum" id="sum-1"></div>
             <form class="sell-form" id="terms-form">
               <label class="field">
                 <span>Domain</span>
@@ -101,11 +105,12 @@
                 </select>
               </label>
               <label class="field">
-                <span>Counterparty <small>npub or hex</small></span>
+                <span>The other side's npub <small>their public key</small></span>
                 <input type="text" id="e-counterparty" placeholder="npub1…" autocomplete="off" spellcheck="false">
+                <small class="field-help">They copy it from the account button at the top right of any page.</small>
               </label>
               <div class="sell-actions">
-                <button class="btn btn-accent" type="submit">Check the terms</button>
+                <button class="btn btn-accent" type="submit" id="terms-btn">Check the terms</button>
                 <p class="hint" id="terms-hint"></p>
               </div>
             </form>
@@ -116,11 +121,15 @@
         <li class="step" data-step="2">
           <div class="step-no">2</div>
           <div class="step-body">
-            <h3>Who referees, if anyone</h3>
+            <h3>The arbiter</h3>
+            <div class="step-sum" id="sum-2"></div>
             <p class="step-lede">
-              An arbiter holds one key of three. They can co-sign with you or with your
-              counterparty, <b>never alone</b>. We read both sides' published arbiter lists
-              and offer only the ones you both accept.
+              An arbiter holds one key of three and <b>decides a dispute</b>: if the two of you
+              disagree about the transfer, it checks the registry's record and asks each of you,
+              in private, for proof. It never holds the domain, and co-signs a payout with you or
+              with your counterparty, <b>never alone</b>. We read both sides' published arbiter
+              lists and offer only the ones you both accept. A side with no list accepts only
+              this site's arbiter.
             </p>
             <div id="arbiters"></div>
           </div>
@@ -129,34 +138,13 @@
         <li class="step" data-step="3">
           <div class="step-no">3</div>
           <div class="step-body">
-            <h3 id="commit-title">Where the domain is going</h3>
-            <div id="commit-fields">
-              <p class="step-lede">
-                The registry hides who owns a domain, so it can only show us <em>which
-                registrar</em> holds it. As the buyer, say where you will receive it. "The
-                transfer completed" will mean the registry shows exactly this.
-              </p>
-              <div class="sell-form">
-                <label class="field">
-                  <span>Your registrar's IANA id <small>or leave blank and give nameservers</small></span>
-                  <input type="text" id="e-registrar" placeholder="292" autocomplete="off">
-                </label>
-                <label class="field">
-                  <span>Your nameservers <small>comma separated</small></span>
-                  <input type="text" id="e-ns" placeholder="ns1.you.example, ns2.you.example" autocomplete="off" spellcheck="false">
-                </label>
-              </div>
-              <p class="hint" style="text-align:left">Your registrar's id is on
-                <a href="https://www.iana.org/assignments/registrar-ids/registrar-ids.xhtml" target="_blank" rel="noopener">IANA's list</a>
-                (GoDaddy 146, Namecheap 1068, Porkbun 1861, Cloudflare 1910). Prefer it:
-                <b>nameservers alone are weak</b>, because the seller can point the domain at
-                yours without handing it over. Use them only when you both use the same
-                registrar, and whatever you commit, check that the domain is in your own
-                registrar account before you release anything.</p>
-            </div>
-            <p class="step-lede" id="commit-seller-note" hidden>
-              You are the seller, so the buyer says where they will receive the domain. That
-              comes back with their reply.
+            <h3>The invite</h3>
+            <div class="step-sum" id="sum-3"></div>
+            <p class="step-lede">
+              Your Nostr key signs the terms above, and the invite carries a fresh key for this
+              trade to your counterparty. Nothing is published, and nothing is paid, until you
+              both accept. After funding, the buyer tells the seller where to send the domain in
+              your private chat.
             </p>
             <button class="btn btn-accent" type="button" id="invite-btn">Create the invite</button>
             <p class="hint" id="commit-hint"></p>
@@ -167,36 +155,71 @@
           <div class="step-no">4</div>
           <div class="step-body">
             <h3>Swap one message each way, then publish</h3>
-            <p class="step-lede">
+            <p class="step-lede" id="swap-lede">
               The escrow address needs <b>both</b> your keys, so neither of you can make it
-              alone. Send your counterparty the invite link; they send back a short reply.
-              Nothing in either message is secret, so you can paste them anywhere.
+              alone. Your invite carries yours to your counterparty, and their reply brings
+              theirs back. Neither message holds a secret.
             </p>
             <div id="invite-out"></div>
-            <div id="reply-in" hidden>
-              <label class="field full">
-                <span>Their reply <small>starts with fmdrep1</small></span>
-                <input type="text" id="e-reply" placeholder="fmdrep1…" autocomplete="off" spellcheck="false">
-              </label>
-              <button class="btn btn-accent" type="button" id="reply-btn">Use their reply</button>
-            </div>
-            <div class="warn-box" id="recovery-box" hidden>
-              <p><b>This string is the only way to reclaim your money if we disappear.</b>
-                 Write it down now. It holds your private key. We do not have a copy
-                 and cannot make you another one.</p>
-              <div class="nsec" id="recovery"></div>
-              <button class="btn btn-ghost btn-sm" type="button" id="copy-recovery">Copy</button>
-              <label class="ack">
+            <details class="fold" id="reply-in" hidden>
+              <summary>Got their reply another way?</summary>
+              <div class="reply-body">
+                <label class="field full">
+                  <span>Their reply <small>starts with fmdrep5</small></span>
+                  <input type="text" id="e-reply" placeholder="fmdrep5…" autocomplete="off" spellcheck="false">
+                </label>
+                <button class="btn btn-accent btn-sm" type="button" id="reply-btn">Use their reply</button>
+                <p class="hint" id="reply-hint"></p>
+              </div>
+            </details>
+            <div class="ready-addr" id="ready-addr" hidden></div>
+            <div class="key-box" id="recovery-box" hidden>
+              <div id="backup-status"></div>
+              <details class="fold" id="recovery-fold">
+                <summary>Keep an offline copy of your key too</summary>
+                <p class="step-lede"><b>This recovery string is your key to this escrow.</b> It signs your
+                   payouts, and for the buyer it is the way to take the timeout refund with recover.html if
+                   this site disappears. It holds your private key, so keep it to yourself. We have no copy.</p>
+                <div class="nsec" id="recovery"></div>
+                <div class="btn-row">
+                  <button class="btn btn-ghost btn-sm" type="button" id="download-recovery">Download as a file</button>
+                  <button class="btn btn-ghost btn-sm" type="button" id="copy-recovery">Copy</button>
+                </div>
+              </details>
+              <label class="ack" id="saved-ack">
                 <input type="checkbox" id="saved-recovery">
-                <span>I have written it down somewhere safe.</span>
+                <span>I have saved my recovery string somewhere safe.</span>
               </label>
             </div>
-            <div id="derivation"></div>
+            <details class="derive-box" id="derivation-box" hidden>
+              <summary>How this address is derived</summary>
+              <div id="derivation"></div>
+            </details>
             <button class="btn btn-accent" type="button" id="publish-escrow" disabled hidden>Sign and publish my view</button>
             <div class="relay-results" id="publish-out" hidden></div>
           </div>
         </li>
       </ol>
+      <div class="resume" id="resume-box">
+        <p class="step-lede">Already in an escrow? Connect, and your escrows open here, on any device.</p>
+        <button class="btn btn-ghost" type="button" id="mine-btn">Your escrows</button>
+        <p class="hint" id="mine-hint"></p>
+        <div class="registry" id="mine-out"></div>
+        <details class="fold" id="resume-fold">
+          <summary>Open one with a recovery string instead</summary>
+          <form class="add-form" id="resume-form">
+            <input type="password" id="resume-in" placeholder="fmdrec1…" autocomplete="off" spellcheck="false" aria-label="Recovery string">
+            <button class="btn btn-ghost" type="submit" id="resume-btn">Open</button>
+          </form>
+          <p class="hint" id="resume-hint"></p>
+        </details>
+      </div>
+      <div class="resume" id="inbox-box">
+        <p class="step-lede">Invited privately? Escrow invites sent to your account show here.</p>
+        <button class="btn btn-ghost" type="button" id="inbox-btn">Invites for you</button>
+        <p class="hint" id="inbox-hint"></p>
+        <div class="registry" id="inbox-out"></div>
+      </div>
     </div>
   </section>
 
@@ -210,27 +233,6 @@
       </div>
       <div class="sell-body">
         <div id="join-terms"></div>
-        <div id="join-commit" hidden>
-          <p class="step-lede">You are the buyer, so say where you will receive the domain.
-            The registry will be checked against exactly this before the seller is paid.</p>
-          <div class="sell-form">
-            <label class="field">
-              <span>Your registrar's IANA id <small>or leave blank and give nameservers</small></span>
-              <input type="text" id="j-registrar" placeholder="292" autocomplete="off">
-            </label>
-            <label class="field">
-              <span>Your nameservers <small>comma separated</small></span>
-              <input type="text" id="j-ns" placeholder="ns1.you.example" autocomplete="off" spellcheck="false">
-            </label>
-          </div>
-          <p class="hint" style="text-align:left">Your registrar's id is on
-            <a href="https://www.iana.org/assignments/registrar-ids/registrar-ids.xhtml" target="_blank" rel="noopener">IANA's list</a>
-            (GoDaddy 146, Namecheap 1068, Porkbun 1861, Cloudflare 1910). Prefer it:
-            <b>nameservers alone are weak</b>, because the seller can point the domain at
-            yours without handing it over. Use them only when you both use the same
-            registrar, and whatever you commit, check that the domain is in your own
-            registrar account before you release anything.</p>
-        </div>
         <button class="btn btn-accent" type="button" id="join-btn">Accept and make my key</button>
         <p class="hint" id="join-hint"></p>
       </div>
@@ -240,20 +242,46 @@
   <section class="wrap" id="escrow" hidden>
     <div class="panel add-panel">
       <div class="panel-head">
-        <div>
+        <div class="escrow-titles">
           <h2 id="escrow-title">Escrow</h2>
           <p class="meta" id="escrow-sub"></p>
         </div>
-        <button class="btn btn-ghost btn-sm" id="refresh" type="button">Refresh</button>
+        <div class="head-actions">
+          <button class="btn btn-ghost btn-sm" id="save-record" type="button" title="Every signed view and ruling, to keep">Save the record</button>
+          <button class="btn btn-ghost btn-sm" id="refresh" type="button">Refresh</button>
+        </div>
       </div>
-      <div class="sell-body">
-        <div id="state-line"></div>
-        <div id="disagreements"></div>
-        <div id="derivation-view"></div>
-        <div id="chain-view"></div>
-        <div id="transfer-view"></div>
-        <div id="settle-view"></div>
+      <div class="sell-body escrow-body" id="escrow-body">
+        <div class="escrow-main">
+          <div id="state-line"></div>
+          <div id="disagreements"></div>
+          <div id="chain-view"></div>
+          <ol class="timeline" id="timeline"></ol>
+          <div id="act-log"></div>
+          <div id="act-view"></div>
+          <details class="derive-box deal-log-box" id="deal-log-wrap">
+            <summary>Deal log</summary>
+            <div id="deal-log"></div>
+          </details>
+          <details class="derive-box" id="derivation-wrap">
+            <summary>How this address is derived</summary>
+            <div id="derivation-view"></div>
+          </details>
+        </div>
+        <aside class="escrow-side" id="chat-view" hidden></aside>
       </div>
+    </div>
+  </section>
+
+  <section class="wrap" id="arbiter-section" hidden>
+    <div class="panel add-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Escrows naming this site's arbiter</h2>
+          <p class="meta" id="arbiter-sub">Newest first, from the relays this page asks.</p>
+        </div>
+      </div>
+      <div class="sell-body"><div class="registry" id="arbiter-list"></div></div>
     </div>
   </section>
 
@@ -265,12 +293,27 @@
         <tr><td>Refuse to show your listing</td><td>Remove it from the relays</td></tr>
         <tr><td>Refuse to arbitrate</td><td>Move a single satoshi by ourselves</td></tr>
         <tr><td>Publish a ruling you disagree with</td><td>Freeze, seize or reverse a payment</td></tr>
-        <tr><td>Stop running this site</td><td>Take your domain, your key, or your history</td></tr>
+        <tr><td>Read the registry's public record of your domain</td><td>Touch your domain: it goes straight from the seller to the buyer</td></tr>
+        <tr><td>Ask you for read-only proof in a dispute</td><td>Read your chat with the other side: only the two of you can</td></tr>
+        <tr><td>Stop running this site</td><td>Take your key or your history</td></tr>
       </table>
       <p class="muted-p">There is no leaf in the script tree an arbiter key can spend by
          itself. That is a property of the output, asserted by a test that spends every
-         leaf against Bitcoin Core. If we vanish, the timeout path settles it with
+         leaf against Bitcoin Core. If we vanish, the timeout path refunds the buyer with
          <a href="recover.html">recover.html</a>, offline, from a file.</p>
+      <p class="muted-p">What you trust the arbiter with is its judgement in a dispute. It decides
+         from the registry's public record (RDAP, the modern WHOIS: the registrar, its locks, and
+         when the domain last moved) and from read-only proof each side shows it in their own
+         private chat with it, such as a registrar API key that can only read. Every ruling is
+         published with its reason, signed with the arbiter's key, so a bad one is on the record
+         for good. Transfer details and codes pass only between the buyer and the seller.</p>
+      <h3 class="sec-h sm">The rules the arbiter follows</h3>
+      <ul class="rules">
+        <li>After funding, the buyer tells the seller where to send the domain, and the seller transfers it within the transfer window: a move to the buyer's account at the same registrar, or a transfer code for the buyer's own registrar. If the seller doesn't say it is sent in time, the buyer is refunded.</li>
+        <li>When the domain is in the buyer's account, the buyer confirms, which pays the seller. If the seller cancels, the buyer is refunded.</li>
+        <li>If either side asks, the arbiter decides: it reads the registry's record, asks each side for read-only proof, and co-signs the payout the evidence supports, release to the seller or refund to the buyer, with its reason published.</li>
+        <li>A seller whose buyer won't confirm asks for a ruling before the timelock: after it, the buyer can take the money back alone.</li>
+      </ul>
     </div>
   </section>
 
