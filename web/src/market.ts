@@ -47,7 +47,7 @@ import {
   $, DISCOVERY_RELAYS, ZAP_RECEIPT_RELAYS, ageText, askDialog, closeDialog, confirmIncompleteRead, copyToClipboard, esc,
   idnLine, initConnect, initTheme, invoiceBlock, now, onSessionChange, openConnect, row, sats, session, toast, wireInvoice,
 } from "./ui.js";
-import { CONFIG, featuringEnabled } from "./config.js";
+import { CONFIG, featuringEnabled, onchainFlex } from "./config.js";
 
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
 
@@ -116,10 +116,14 @@ function rememberAuthors(authors: readonly string[]): void {
   }
 }
 
+// don't wait on the slowest relay; whatever it holds shows on the next load
+const settleFor = (relays: readonly string[]) => ({ quorum: Math.max(1, relays.length - 1), graceMs: 400 });
+
 const deletionsBy = (relays: readonly string[], authors: readonly string[], onDone?: (relay: string) => void) =>
   relays.length && authors.length
     ? queryRelays(relays, [deletionFilter([...authors])], {
         timeoutMs: 4000,
+        settle: settleFor(relays),
         onRelayDone: (relay, _count, _error, complete) => { if (complete) onDone?.(relay); },
       }).catch(() => [])
     : Promise.resolve([]);
@@ -140,6 +144,7 @@ async function load(): Promise<void> {
   const early = deletionsBy(DISCOVERY_RELAYS, remembered, (relay) => answeredEarly.add(relay));
   const events = await queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], {
     timeoutMs: 6000,
+    settle: settleFor(DISCOVERY_RELAYS),
     onRelayDone: (_relay, _count, _error, complete) => { if (complete) answered++; },
   }).catch(() => []);
   if (call !== loads) return;
@@ -573,6 +578,11 @@ async function featureListing(eventId: string): Promise<void> {
        <p>The listing stays on the market either way. Featuring only changes where
           it ranks on the flex board.</p>`,
     );
+    return;
+  }
+  // on-chain flex payments are made on the board
+  if (onchainFlex()) {
+    location.href = `/?flex=${encodeURIComponent(domain)}`;
     return;
   }
   if (!session.pubkey) {

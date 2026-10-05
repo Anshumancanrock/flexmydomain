@@ -1,21 +1,32 @@
 // Generated from web/src/board.ts by scripts/build-web.ts. Edit that file instead.
 import {
+  CHAIN_APIS,
   INVOICE_OFFER_SECONDS,
   MSATS_PER_SAT,
   addressOf,
+  addressToScript,
   applyDeletions,
+  bip21,
+  btcAmount,
+  buildFlexClaim,
   buildZapRequest,
+  chainApi,
   checkDomainProof,
   checkListing,
   deletionFilter,
   fetchLnurlPay,
-  lightningAddressUrl,
+  flexClaimFilter,
   flexZapFilter,
   invoiceOfferEnds,
+  lightningAddressUrl,
   listingFilter,
+  matchFlexPayments,
   newestPerAddress,
   npubEncode,
+  parseFlexClaim,
   parseListing,
+  publishToRelay,
+  qrSvg,
   queryDiscovery,
   queryRelays,
   rankFlexDomains,
@@ -25,7 +36,7 @@ import {
   verifyZapReceipt,
   zapperKeyFor
 } from "./fmd.js";
-import { CONFIG, featuringEnabled } from "./config.js";
+import { CONFIG, featuringEnabled, onchainFlex } from "./config.js";
 import {
   $,
   DISCOVERY_RELAYS,
@@ -33,6 +44,7 @@ import {
   ageText,
   askDialog,
   clockText,
+  copyToClipboard,
   esc,
   initConnect,
   initTheme,
@@ -64,7 +76,23 @@ const state = {
   flexed: null
 };
 const uncertain = () => state.loading || state.unknown !== null || state.missing.length > 0;
+const PROVIDER_KEY = "fmd-zap-provider-v1";
+function keptProvider(address) {
+  try {
+    const k = JSON.parse(localStorage.getItem(PROVIDER_KEY) ?? "null");
+    if (k?.address === address && typeof k.pubkey === "string" && /^[0-9a-f]{64}$/.test(k.pubkey) && Date.now() - (k.at ?? 0) < 86400000)
+      return k.pubkey;
+  } catch {}
+  return;
+}
+function keepProvider(address, pubkey) {
+  try {
+    localStorage.setItem(PROVIDER_KEY, JSON.stringify({ address, pubkey, at: Date.now() }));
+  } catch {}
+}
+let boardLoads = 0;
 async function load() {
+  const call = ++boardLoads;
   state.loading = true;
   render();
   const unknownBecause = (reason) => {
@@ -79,13 +107,18 @@ async function load() {
     unknownBecause(null);
     return;
   }
+  if (onchainFlex()) {
+    await loadOnchain(call, unknownBecause);
+    return;
+  }
   const address = CONFIG.featuredLightningAddress.trim();
   if (!/^https?:\/\//i.test(address) && !lightningAddressUrl(address)) {
     unknownBecause("This site's lightning address isn't a valid one, so no payment can be counted.");
     return;
   }
   const recipient = CONFIG.featuredRecipientPubkey.trim().toLowerCase();
-  let provider = await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => {
+  const kept = keptProvider(address);
+  let provider = kept ?? await zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => {
     return;
   });
   if (!provider) {
@@ -97,29 +130,152 @@ async function load() {
       return;
     }
   }
+  const zapper = provider;
+  if (!kept)
+    keepProvider(address, zapper);
+  else {
+    zapperKeyFor(CONFIG.featuredLightningAddress).catch(() => {
+      return;
+    }).then((fresh) => {
+      if (!fresh)
+        return;
+      keepProvider(address, fresh);
+      if (fresh !== zapper && call === boardLoads)
+        load();
+    });
+  }
   const windowSeconds = state.range === "all" ? undefined : WEEK;
   const finished = new Set;
-  const receipts = await queryDiscovery(DISCOVERY_RELAYS, [{ ...flexZapFilter(recipient, windowSeconds ? now() - windowSeconds : undefined), authors: [provider] }], { timeoutMs: 6000, onRelayDone: (relay, _count, _error, complete) => {
-    if (complete)
-      finished.add(relay);
-  } }).catch(() => []);
-  state.unknown = null;
-  state.answered = finished.size;
-  state.missing = ZAP_RECEIPT_RELAYS.filter((r) => !finished.has(r));
-  const verified = [];
-  for (const receipt of receipts) {
-    const result = verifyZapReceipt({ receipt, recipient, expectedProvider: provider });
-    if (result.ok && result.zap.flexDomain)
-      verified.push(result.zap);
+  const receipts = [];
+  const apply = () => {
+    state.unknown = null;
+    state.answered = finished.size;
+    state.missing = ZAP_RECEIPT_RELAYS.filter((r) => !finished.has(r));
+    const verified = [];
+    const seen = new Set;
+    for (const receipt of receipts) {
+      if (seen.has(receipt.id))
+        continue;
+      seen.add(receipt.id);
+      const result = verifyZapReceipt({ receipt, recipient, expectedProvider: zapper });
+      if (result.ok && result.zap.flexDomain)
+        verified.push(result.zap);
+    }
+    const links = new Map(state.rows.map((r) => [r.domain, r.listing]));
+    state.rows = rankFlexDomains(verified, {
+      now: now(),
+      windowSeconds: state.range === "all" ? 100 * 365 * 86400 : WEEK
+    }).map((r) => ({ ...r, listing: links.get(r.domain) ?? null }));
+    state.recent = verified.sort((a, b) => b.at - a.at).slice(0, 6);
+    state.loading = false;
+    render();
+    settlePending(verified);
+  };
+  receipts.push(...await queryDiscovery(DISCOVERY_RELAYS, [{ ...flexZapFilter(recipient, windowSeconds ? now() - windowSeconds : undefined), authors: [zapper] }], {
+    timeoutMs: 6000,
+    settle: { quorum: Math.max(1, DISCOVERY_RELAYS.length - 1), graceMs: 400 },
+    onRelayDone: (relay, _count, _error, complete) => {
+      if (complete)
+        finished.add(relay);
+    },
+    onLate: (relay, events, complete) => {
+      if (call !== boardLoads)
+        return;
+      if (complete)
+        finished.add(relay);
+      receipts.push(...events);
+      apply();
+    }
+  }).catch(() => []));
+  if (call !== boardLoads)
+    return;
+  apply();
+  linkListings();
+}
+const FLEX_NET = CONFIG.flexNetwork || "signet";
+const FLEX_ADDRESS = CONFIG.flexAddress.trim();
+const flexChain = chainApi(FLEX_NET, FLEX_NET === CONFIG.network && CONFIG.chainApiBase.trim() || CHAIN_APIS[FLEX_NET]);
+const flexZap = (claim, payment) => ({
+  receipt: claim.event,
+  request: claim.event,
+  sender: claim.author,
+  recipient: "",
+  amountSats: payment.valueSats,
+  amountMsats: payment.valueSats * MSATS_PER_SAT,
+  flexDomain: claim.domain,
+  comment: "",
+  at: payment.at ?? now()
+});
+async function loadOnchain(call, unknownBecause) {
+  try {
+    addressToScript(FLEX_ADDRESS, FLEX_NET);
+  } catch {
+    unknownBecause(`This site's flex address isn't a valid ${FLEX_NET} address, so no payment can be counted.`);
+    return;
   }
-  state.rows = rankFlexDomains(verified, {
-    now: now(),
-    windowSeconds: state.range === "all" ? 100 * 365 * 86400 : WEEK
-  }).map((r) => ({ ...r, listing: null }));
-  state.recent = verified.sort((a, b) => b.at - a.at).slice(0, 6);
-  state.loading = false;
-  render();
-  settlePending(verified);
+  const history = await flexChain.activity(FLEX_ADDRESS).catch(() => {
+    return;
+  });
+  if (call !== boardLoads)
+    return;
+  if (!history) {
+    unknownBecause("The chain API didn't answer, so payments can't be counted. Reload in a minute.");
+    return;
+  }
+  const from = state.range === "all" ? 0 : now() - WEEK;
+  const payments = history.outputs.filter((o) => (o.blockTime ?? now()) >= from).map((o) => ({ txid: o.txid, vout: o.vout, valueSats: Number(o.valueSats), at: o.blockTime, confirmed: o.confirmed }));
+  const finished = new Set;
+  const events = [];
+  const apply = () => {
+    const claims = events.flatMap((e) => {
+      const p = parseFlexClaim(e);
+      return p.ok ? [p.claim] : [];
+    });
+    const matches = matchFlexPayments(claims, payments, { address: FLEX_ADDRESS, now: now() });
+    const zaps = matches.map(({ claim, payment }) => flexZap(claim, payment));
+    state.unknown = null;
+    state.answered = finished.size;
+    state.missing = [...DISCOVERY_RELAYS.filter((r) => !finished.has(r)), ...history.complete ? [] : [flexChain.base]];
+    const links = new Map(state.rows.map((r) => [r.domain, r.listing]));
+    state.rows = rankFlexDomains(zaps, {
+      now: now(),
+      windowSeconds: state.range === "all" ? 100 * 365 * 86400 : WEEK
+    }).map((r) => ({ ...r, listing: links.get(r.domain) ?? null }));
+    state.recent = zaps.sort((a, b) => b.at - a.at).slice(0, 6);
+    state.loading = false;
+    render();
+    settleOnchain(matches);
+  };
+  if (payments.length === 0) {
+    for (const relay of DISCOVERY_RELAYS)
+      finished.add(relay);
+    apply();
+    return;
+  }
+  const amounts = [...new Set(payments.map((p) => p.valueSats))];
+  const since = Math.min(...payments.map((p) => p.at ?? now())) - 86400;
+  const filters = [];
+  for (let i = 0;i < amounts.length; i += 100)
+    filters.push(flexClaimFilter({ amounts: amounts.slice(i, i + 100), since }));
+  events.push(...await queryDiscovery(DISCOVERY_RELAYS, filters, {
+    timeoutMs: 6000,
+    settle: { quorum: Math.max(1, DISCOVERY_RELAYS.length - 1), graceMs: 400 },
+    onRelayDone: (relay, _count, _error, complete) => {
+      if (complete)
+        finished.add(relay);
+    },
+    onLate: (relay, late, complete) => {
+      if (call !== boardLoads)
+        return;
+      if (complete)
+        finished.add(relay);
+      events.push(...late);
+      apply();
+    }
+  }).catch(() => []));
+  if (call !== boardLoads)
+    return;
+  apply();
   linkListings();
 }
 async function linkListings() {
@@ -309,11 +465,11 @@ function renderSide(rows) {
            <span class="act-i ${i < 3 ? "act-up" : "act-bid"}">${TREND}</span>
            <span class="act-body">
              <b>${esc(domain)}</b>
-             <span>zapped by ${esc(shortNpub(zap.sender))}</span>
+             <span>${onchainFlex() ? "paid" : "zapped"} by ${esc(shortNpub(zap.sender))}</span>
            </span>
            <span class="act-figs"><b>${sats(zap.amountSats)}</b><span>${agoText(zap.at)}</span></span>
          </li>`;
-  }).join("") : `<li><span class="act-body"><span>${!featuringEnabled() ? "Nothing yet. Flex payments are not switched on for this site." : !state.loading && uncertain() ? "Payments can't all be counted right now." : state.range === "all" ? "No zaps yet." : "No zaps in the last week."}</span></span></li>`;
+  }).join("") : `<li><span class="act-body"><span>${!featuringEnabled() ? "Nothing yet. Flex payments are not switched on for this site." : !state.loading && uncertain() ? "Payments can't all be counted right now." : state.range === "all" ? "No payments yet." : "No payments in the last week."}</span></span></li>`;
 }
 function render() {
   const rows = visible();
@@ -369,7 +525,7 @@ async function loadPrice() {
   } catch {}
 }
 function usdText(satsAmount) {
-  if (!usdPerBtc)
+  if (!usdPerBtc || onchainFlex() && FLEX_NET !== "mainnet")
     return;
   const v = satsAmount * usdPerBtc / 1e8;
   const cents = v < 100;
@@ -386,7 +542,7 @@ function paintClaim() {
   $("#c-rank").textContent = `#${rankFor(amount)}${sure ? "" : "?"}`;
   const usd = usdText(amount);
   $("#c-amount").textContent = usd ?? `${sats(amount)} sats`;
-  $("#c-sats").textContent = usd ? `⚡ ${sats(amount)} sats` : "";
+  $("#c-sats").textContent = usd ? `${onchainFlex() ? "" : "⚡ "}${sats(amount)} sats` : onchainFlex() && FLEX_NET !== "mainnet" ? `${FLEX_NET} test coins` : "";
 }
 function failHint(message) {
   const el = $("#hint");
@@ -413,6 +569,8 @@ async function flexIt(event) {
     return;
   }
   const domain = normalised.domain;
+  if (onchainFlex())
+    return flexOnchain(domain);
   const amount = claimAmount();
   hint.className = "hint";
   hint.innerHTML = `Getting an invoice for <b>${esc(domain)}</b>…`;
@@ -453,11 +611,163 @@ async function flexIt(event) {
     failHint(err.message);
   }
 }
+async function freeAmount(base) {
+  const picks = [...new Set(Array.from({ length: 6 }, () => base + 1 + Math.floor(Math.random() * 999)))];
+  const taken = await queryDiscovery(DISCOVERY_RELAYS, [flexClaimFilter({ amounts: picks, since: now() - 86400 })], {
+    timeoutMs: 4000,
+    settle: { quorum: Math.max(1, DISCOVERY_RELAYS.length - 1), graceMs: 300 }
+  }).catch(() => []);
+  const used = new Set(taken.flatMap((e) => {
+    const p = parseFlexClaim(e);
+    return p.ok ? [p.claim.amountSats] : [];
+  }));
+  return picks.find((a) => !used.has(a)) ?? picks[0];
+}
+async function flexOnchain(domain) {
+  const hint = $("#hint");
+  hint.className = "hint";
+  hint.innerHTML = `Picking an amount for <b>${esc(domain)}</b>…`;
+  const amount = await freeAmount(claimAmount());
+  const claimId = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  hint.className = "hint";
+  hint.innerHTML = `Signing your claim for <b>${esc(domain)}</b>…`;
+  try {
+    const event = await session.signer.signEvent(buildFlexClaim({
+      pubkey: session.pubkey,
+      claimId,
+      domain,
+      amountSats: amount,
+      address: FLEX_ADDRESS,
+      createdAt: now()
+    }));
+    if (!await publishedSomewhere(event))
+      return failHint("No relay took your claim, so the payment couldn't be counted. Nothing to pay yet; try again in a minute.");
+    const p = { pubkey: event.pubkey, domain, amountSats: amount, claimId, at: event.created_at };
+    keepChainPending(p);
+    hint.textContent = "";
+    renderPending();
+    showChainPay(p);
+  } catch (err) {
+    failHint(err.message);
+  }
+}
+function publishedSomewhere(event) {
+  return new Promise((resolve) => {
+    let left = DISCOVERY_RELAYS.length;
+    if (!left)
+      resolve(false);
+    for (const relay of DISCOVERY_RELAYS) {
+      publishToRelay(relay, event).then((r) => {
+        if (r.ok)
+          resolve(true);
+        else if (--left === 0)
+          resolve(false);
+      });
+    }
+  });
+}
+const CHAIN_PENDING_KEY = "fmd-flex-chain-v1";
+function chainPending() {
+  let p = null;
+  try {
+    p = JSON.parse(localStorage.getItem(CHAIN_PENDING_KEY) ?? "null");
+  } catch {
+    p = null;
+  }
+  if (!p)
+    return;
+  const usable = isHex64(p.pubkey) && typeof p.domain === "string" && tryNormaliseDomain(p.domain).ok && Number.isSafeInteger(p.amountSats) && p.amountSats > 0 && typeof p.claimId === "string" && Number.isSafeInteger(p.at);
+  if (!usable || now() - p.at > 86400) {
+    forgetChainPending();
+    return;
+  }
+  return p;
+}
+function keepChainPending(p) {
+  try {
+    localStorage.setItem(CHAIN_PENDING_KEY, JSON.stringify(p));
+  } catch {}
+}
+function forgetChainPending() {
+  try {
+    localStorage.removeItem(CHAIN_PENDING_KEY);
+  } catch {}
+}
+let shownChainPay;
+function showChainPay(p) {
+  const uri = bip21(FLEX_ADDRESS, p.amountSats);
+  let qr = "";
+  try {
+    qr = qrSvg(uri, { label: `Pay ${btcAmount(p.amountSats)} BTC to the flex address` });
+  } catch {}
+  askDialog(`Flex ${p.domain}`, `<p>Pay <b>exactly ${sats(p.amountSats)} sats</b> to put <b>${esc(p.domain)}</b> at <b>#${rankFor(p.amountSats)}</b>.
+        The odd sats at the end make this payment yours: a different amount can't be matched to your claim.</p>
+     ${rankWarning(p.amountSats)}
+     <div class="invoice">
+       ${qr ? `<div class="invoice-qr">${qr}</div>` : ""}
+       <div class="nsec" id="flex-addr">${esc(FLEX_ADDRESS)}</div>
+       <div class="btn-row">
+         <button class="btn btn-accent btn-sm" type="button" id="flex-copy-addr">Copy address</button>
+         <button class="btn btn-ghost btn-sm" type="button" id="flex-copy-amount">Copy amount (${esc(btcAmount(p.amountSats))} BTC)</button>
+         <a class="btn btn-ghost btn-sm" href="${esc(uri)}">Open in wallet</a>
+       </div>
+       <p class="hint invoice-out" id="flex-pay-status">Waiting for your payment…</p>
+     </div>
+     <p class="hint" style="text-align:left">${FLEX_NET === "mainnet" ? "" : `This is Bitcoin <b>${esc(FLEX_NET)}</b>: test coins with no value.
+        ${FLEX_NET === "signet" ? `Need some? Get them free from a <a href="https://signetfaucet.com" target="_blank" rel="noopener">signet faucet</a>. ` : ""}`}It shows
+        on the board as soon as the payment reaches the mempool, and every payment to this address is
+        <a href="${esc(`${flexChain.explorer}/address/${FLEX_ADDRESS}`)}" target="_blank" rel="noopener">public on chain</a>.
+        Being on the board says only that somebody paid, not that they own the domain.</p>`);
+  shownChainPay = p.claimId;
+  $("#flex-copy-addr").addEventListener("click", () => copyToClipboard(FLEX_ADDRESS, "Address copied."));
+  $("#flex-copy-amount").addEventListener("click", () => copyToClipboard(btcAmount(p.amountSats), "Amount copied."));
+  if (p.paid)
+    chainPaySeen(p, "Payment seen. Putting it on the board…");
+}
+function chainPaySeen(p, note) {
+  const status = document.querySelector("#flex-pay-status");
+  if (status && shownChainPay === p.claimId) {
+    status.className = "hint invoice-out ok";
+    status.textContent = note;
+  }
+}
+function settleOnchain(matches) {
+  const p = chainPending();
+  if (!p || !matches.some((m) => m.claim.id === p.claimId && m.claim.author === p.pubkey)) {
+    renderPending();
+    return;
+  }
+  forgetChainPending();
+  flexed(p.domain);
+  chainPaySeen(p, `Paid. ${p.domain} is on the board.`);
+  renderPending();
+}
+async function checkChainPending() {
+  const p = chainPending();
+  if (!p || p.paid || p.pubkey !== session.pubkey)
+    return;
+  const history = await flexChain.activity(FLEX_ADDRESS).catch(() => {
+    return;
+  });
+  if (!history)
+    return;
+  if (!history.outputs.some((o) => Number(o.valueSats) === p.amountSats && (o.blockTime ?? now()) >= p.at - 900))
+    return;
+  keepChainPending({ ...p, paid: true });
+  chainPaySeen(p, "Payment seen. Putting it on the board…");
+  renderPending();
+  load();
+}
+function rankWarning(amount) {
+  if (!uncertain())
+    return "";
+  return `<p class="hint err" style="text-align:left"><strong>${state.loading ? "The board is still loading" : state.unknown ? "The board was read while payments couldn't be counted" : "Not every relay answered"}</strong>, so the board may be missing payments, and this may land lower
+      than #${rankFor(amount)}. ${state.loading ? "Wait for it before paying." : "Reload the page before paying to be sure."}</p>`;
+}
 function showInvoice(p) {
   const { domain, amountSats: amount, invoice } = p;
   askDialog(`Flex ${domain}`, `<p><b>${sats(amount)} sats</b>${usdText(amount) ? ` (about ${usdText(amount)})` : ""} puts <b>${esc(domain)}</b> at <b>#${rankFor(amount)}</b>.
-        Pay in any wallet. We never touch the payment.</p>` + (uncertain() ? `<p class="hint err" style="text-align:left"><strong>${state.loading ? "The board is still loading" : state.unknown ? "The board was read while payments couldn't be counted" : "Not every relay answered"}</strong>, so the board may be missing payments, and this may land lower
-           than #${rankFor(amount)}. ${state.loading ? "Wait for it before paying." : "Reload the page before paying to be sure."}</p>` : "") + invoiceBlock(invoice, { endsAt: p.endsAt }) + `<p class="hint" style="text-align:left">The board updates when your provider publishes the
+        Pay in any wallet. We never touch the payment.</p>` + rankWarning(amount) + invoiceBlock(invoice, { endsAt: p.endsAt }) + `<p class="hint" style="text-align:left">The board updates when your provider publishes the
         receipt, usually within seconds. Being on this board says only that somebody paid; it is
         not a claim of ownership. To say you own it, prove it on the <a href="/market">market</a>.</p>`);
   shownInvoice = p.requestId;
@@ -505,6 +815,13 @@ function renderPending() {
   const line = document.querySelector("#pending");
   if (!line)
     return;
+  const c = onchainFlex() ? chainPending() : undefined;
+  if (c && c.pubkey === session.pubkey) {
+    line.hidden = false;
+    line.innerHTML = c.paid ? `Payment seen for <b>${esc(c.domain)}</b>. It shows on the board in a moment.` : `Your flex for <b>${esc(c.domain)}</b> is waiting for a payment of exactly ${sats(c.amountSats)} sats.
+         <button class="text-btn" type="button" id="pending-open">Open it</button>`;
+    return;
+  }
   const p = pendingFlex();
   if (!p || p.pubkey !== session.pubkey) {
     line.hidden = true;
@@ -516,18 +833,21 @@ function renderPending() {
     <span id="pending-left">Expires in ${clockText(p.endsAt - now())}</span>.
     <button class="text-btn" type="button" id="pending-open">Open it</button>`;
 }
+function flexed(domain) {
+  state.flexed = domain;
+  const input = document.querySelector("#domain");
+  const typed = input ? tryNormaliseDomain(input.value) : undefined;
+  if (input && typed?.ok && typed.domain === domain)
+    input.value = "";
+  render();
+  document.querySelector(`[data-domain="${CSS.escape(domain)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  toast(`Paid: ${domain} is on the board.`);
+}
 function settlePending(verified) {
   const p = pendingFlex();
   if (p && verified.some((z) => z.request.id === p.requestId)) {
     forgetPending();
-    state.flexed = p.domain;
-    const input = document.querySelector("#domain");
-    const typed = input ? tryNormaliseDomain(input.value) : undefined;
-    if (input && typed?.ok && typed.domain === p.domain)
-      input.value = "";
-    render();
-    document.querySelector(`[data-domain="${CSS.escape(p.domain)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-    toast(`Paid: ${p.domain} is on the board.`);
+    flexed(p.domain);
     const dialog = document.querySelector("#key-dialog");
     if (dialog?.open && shownInvoice === p.requestId) {
       markInvoicePaid($("#key-body"), `Paid. ${esc(p.domain)} is on the board.`);
@@ -573,6 +893,11 @@ $("#form").addEventListener("submit", flexIt);
 $("#pending").addEventListener("click", (e) => {
   if (!e.target.closest("#pending-open"))
     return;
+  const c = onchainFlex() ? chainPending() : undefined;
+  if (c && c.pubkey === session.pubkey) {
+    showChainPay(c);
+    return;
+  }
   const p = pendingFlex();
   if (p && p.pubkey === session.pubkey)
     showInvoice(p);
@@ -584,6 +909,8 @@ setInterval(() => {
   const line = document.querySelector("#pending");
   if (!line || line.hidden)
     return;
+  if (onchainFlex())
+    return;
   const p = pendingFlex();
   const left = document.querySelector("#pending-left");
   if (p && p.pubkey === session.pubkey && left)
@@ -593,11 +920,17 @@ setInterval(() => {
 }, 1000);
 setInterval(() => {
   if (!document.hidden)
-    checkPending();
+    onchainFlex() ? checkChainPending() : checkPending();
 }, 1e4);
+const asked = tryNormaliseDomain(new URLSearchParams(location.search).get("flex") ?? "");
+if (asked.ok) {
+  $("#domain").value = asked.domain;
+  history.replaceState(null, "", location.pathname + location.hash);
+}
 $("#c-minus").addEventListener("click", () => stepAmount(false));
 $("#c-plus").addEventListener("click", () => stepAmount(true));
-loadPrice();
+if (!onchainFlex() || FLEX_NET === "mainnet")
+  loadPrice();
 $("#sort").addEventListener("change", (e) => {
   const value = e.target.value;
   const wantRange = value === "rank-all" ? "all" : "week";
@@ -645,6 +978,8 @@ for (const b of document.querySelectorAll(".js-social")) {
   b.addEventListener("click", () => window.open(url, "_blank", "noopener"));
 }
 paintLive();
+for (const el of document.querySelectorAll("[data-pay]"))
+  el.hidden = el.dataset.pay === "chain" !== onchainFlex();
 load();
 if (featuringEnabled())
   setInterval(() => {

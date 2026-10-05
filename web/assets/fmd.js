@@ -8670,6 +8670,92 @@ function removeEntry(entries, domain) {
 function portfolioFilter(pubkey) {
   return { kinds: [PORTFOLIO_KIND], authors: [pubkey], "#d": [PORTFOLIO_D], limit: 1 };
 }
+// core/nostr/flex.ts
+var FLEX_CLAIM_KIND = 30078;
+var FLEX_CLAIM_D_PREFIX = "fmd:flex:";
+var FLEX_CLAIM_TOPIC = "fmd-flex";
+var flexAmountTopic = (amountSats) => `${FLEX_CLAIM_TOPIC}-${amountSats}`;
+var CLAIM_ID = /^[0-9a-f]{16,64}$/;
+var ADDRESS = /^(bc1|tb1|bcrt1)[02-9ac-hj-np-z]{8,87}$/;
+function buildFlexClaim(params) {
+  if (!isHex32(params.pubkey))
+    throw new Error("buildFlexClaim: pubkey must be 64 lowercase hex characters");
+  if (!CLAIM_ID.test(params.claimId))
+    throw new Error("buildFlexClaim: the claim id is 16 to 64 hex characters");
+  if (!Number.isSafeInteger(params.amountSats) || params.amountSats <= 0)
+    throw new Error("buildFlexClaim: amount must be whole sats");
+  if (!ADDRESS.test(params.address))
+    throw new Error("buildFlexClaim: not a segwit address");
+  const domain = normaliseDomain(params.domain);
+  return {
+    pubkey: params.pubkey,
+    created_at: params.createdAt,
+    kind: FLEX_CLAIM_KIND,
+    tags: [
+      ["d", FLEX_CLAIM_D_PREFIX + params.claimId],
+      ["t", "flexmydomain"],
+      ["t", FLEX_CLAIM_TOPIC],
+      ["t", flexAmountTopic(params.amountSats)],
+      ["fmd_domain", domain],
+      ["fmd_amount", String(params.amountSats)],
+      ["fmd_address", params.address]
+    ],
+    content: ""
+  };
+}
+function parseFlexClaim(event) {
+  if (event.kind !== FLEX_CLAIM_KIND)
+    return { ok: false, reason: "not a flex claim" };
+  const d = tagValue(event, "d") ?? "";
+  if (!d.startsWith(FLEX_CLAIM_D_PREFIX) || !CLAIM_ID.test(d.slice(FLEX_CLAIM_D_PREFIX.length)))
+    return { ok: false, reason: "bad claim id" };
+  if (event.tags.filter((t) => t[0] === "d").length !== 1)
+    return { ok: false, reason: "one d tag only" };
+  const domain = tryNormaliseDomain(tagValue(event, "fmd_domain"));
+  if (!domain.ok || domain.domain !== tagValue(event, "fmd_domain"))
+    return { ok: false, reason: "bad domain" };
+  const amountText = tagValue(event, "fmd_amount") ?? "";
+  const amountSats = /^[1-9][0-9]{0,15}$/.test(amountText) ? Number(amountText) : NaN;
+  if (!Number.isSafeInteger(amountSats))
+    return { ok: false, reason: "bad amount" };
+  if (!event.tags.some((t) => t[0] === "t" && t[1] === flexAmountTopic(amountSats)))
+    return { ok: false, reason: "the amount topic is missing" };
+  const address = tagValue(event, "fmd_address") ?? "";
+  if (!ADDRESS.test(address))
+    return { ok: false, reason: "bad address" };
+  if (event.content !== "")
+    return { ok: false, reason: "a claim has no content" };
+  return {
+    ok: true,
+    claim: { id: d.slice(FLEX_CLAIM_D_PREFIX.length), author: event.pubkey, domain: domain.domain, amountSats, address, at: event.created_at, event }
+  };
+}
+function flexClaimFilter(options = {}) {
+  const topics = options.amounts?.length ? [...new Set(options.amounts)].map(flexAmountTopic) : [FLEX_CLAIM_TOPIC];
+  return { kinds: [FLEX_CLAIM_KIND], "#t": topics, limit: 500, ...options.since ? { since: options.since } : {} };
+}
+function matchFlexPayments(claims, payments, options) {
+  const slack = options.slackSeconds ?? 900;
+  const maxAge = options.maxAgeSeconds ?? 86400;
+  const open = claims.filter((c) => c.address === options.address).sort((a, b) => a.at - b.at || (a.event.id < b.event.id ? -1 : 1));
+  const used = new Set;
+  const seen = new Set;
+  const ordered = [...payments].sort((a, b) => (a.at ?? options.now) - (b.at ?? options.now));
+  const out = [];
+  for (const payment of ordered) {
+    const key = `${payment.txid}:${payment.vout}`;
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    const when = payment.at ?? options.now;
+    const claim = open.find((c) => !used.has(c.event.id) && c.amountSats === payment.valueSats && c.at <= when + slack && c.at >= when - maxAge);
+    if (!claim)
+      continue;
+    used.add(claim.event.id);
+    out.push({ claim, payment });
+  }
+  return out;
+}
 
 // core/nostr/index.ts
 var DEFAULT_RELAYS = [
@@ -9002,16 +9088,37 @@ function takeWarm(relay) {
 }
 async function queryRelays(relays, filters, options = {}) {
   const byId = new Map;
-  await Promise.all(relays.map(async (relay) => {
+  const quorum = options.settle ? Math.max(1, Math.min(options.settle.quorum, relays.length)) : relays.length;
+  let settled = false;
+  let answered = 0;
+  let grace;
+  let release = () => {};
+  const early = new Promise((resolve) => {
+    release = resolve;
+  });
+  const all = Promise.all(relays.map(async (relay) => {
+    let events = [];
+    let complete = false;
+    let error;
     try {
-      const { events, complete } = await queryRelayDetailed(relay, filters, options);
-      for (const event of events)
-        byId.set(event.id, event);
-      options.onRelayDone?.(relay, events.length, undefined, complete);
+      ({ events, complete } = await queryRelayDetailed(relay, filters, options));
     } catch (err) {
-      options.onRelayDone?.(relay, 0, err.message, false);
+      error = err.message;
     }
+    if (settled) {
+      if (!error)
+        options.onLate?.(relay, events, complete);
+      return;
+    }
+    for (const event of events)
+      byId.set(event.id, event);
+    options.onRelayDone?.(relay, events.length, error, error ? false : complete);
+    if (complete && !error && ++answered >= quorum && options.settle && !grace)
+      grace = setTimeout(release, options.settle.graceMs);
   }));
+  await (options.settle ? Promise.race([all, early]) : all);
+  settled = true;
+  clearTimeout(grace);
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at);
 }
 async function queryRelay(relay, filters, options = {}) {
@@ -9353,7 +9460,8 @@ function readStatus(status) {
   const s = typeof status === "object" && status !== null ? status : {};
   return {
     confirmed: s.confirmed === true,
-    blockHeight: Number.isSafeInteger(s.block_height) ? s.block_height : undefined
+    blockHeight: Number.isSafeInteger(s.block_height) ? s.block_height : undefined,
+    blockTime: Number.isSafeInteger(s.block_time) ? s.block_time : undefined
   };
 }
 function count(value) {
@@ -10853,6 +10961,7 @@ export {
   parseNip05Identifier,
   parseListing,
   parseKeyBackup,
+  parseFlexClaim,
   parseEscrowEvent,
   parseDraftBackup,
   parseDeletion,
@@ -10876,6 +10985,7 @@ export {
   neventEncode,
   namesForPubkey,
   naddrEncode,
+  matchFlexPayments,
   matchFilters,
   matchFilter,
   lookupTxtVia,
@@ -10917,6 +11027,8 @@ export {
   forgetStoredKey,
   foldStatus,
   flexZapFilter,
+  flexClaimFilter,
+  flexAmountTopic,
   findTag,
   findFunding,
   finaliseSpend,
@@ -10998,6 +11110,7 @@ export {
   buildJobFeedback,
   buildInvite,
   buildHandlerAdvertisement,
+  buildFlexClaim,
   buildEscrowMessage,
   buildEscrowEvent,
   buildDeletion,
@@ -11087,6 +11200,9 @@ export {
   FOLLOW_SET_KIND,
   FMD_BADGES,
   FLEX_TOPIC,
+  FLEX_CLAIM_TOPIC,
+  FLEX_CLAIM_KIND,
+  FLEX_CLAIM_D_PREFIX,
   EXPLORERS,
   ESCROW_VERSION,
   ESCROW_TOPIC,

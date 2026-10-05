@@ -113,7 +113,7 @@
       <div class="panel-head">
         <div>
           <h2>Leaderboard</h2>
-          <p class="meta"><span id="count">—</span> · ranked by sats paid, re-countable from public receipts</p>
+          <p class="meta"><span id="count">—</span> · ranked by sats paid, and anyone can recount it</p>
         </div>
         <label class="sort">
           <span>Sort by</span>
@@ -166,7 +166,7 @@
 
       <div class="panel activity">
         <div class="panel-head sm">
-          <h2>Recent zaps</h2>
+          <h2>Recent payments</h2>
           <span class="live"><span class="dot"></span> Live</span>
         </div>
         <ul id="feed"></ul>
@@ -211,7 +211,11 @@
          claim of ownership and nobody checked one. To say you own a name and put it
          up for sale, prove it on the <a href="/market">market</a>. Listing there is
          free, and the market checks the proof.</p>
-      <p class="muted-p">There is no backend. The ranking is a sum of public Lightning
+      <p class="muted-p" data-pay="chain">There is no backend. Every payment is a public
+         Bitcoin transaction to one address, matched to a claim its payer signed on Nostr
+         relays we do not run. Fetch both yourself and you get the same ordering. We keep
+         no record of who paid what.</p>
+      <p class="muted-p" data-pay="zap" hidden>There is no backend. The ranking is a sum of public Lightning
          zap receipts held on Nostr relays we do not run; fetch them yourself and you
          get the same ordering. We keep no record of who paid what.</p>
     </div>

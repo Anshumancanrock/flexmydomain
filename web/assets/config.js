@@ -6,6 +6,11 @@ export const CONFIG = {
   // Esplora API base URL (needs CORS). Blank uses the network's default.
   chainApiBase: "",
 
+  // On-chain flex payments: the network and the address that receives them. When set,
+  // the board counts these instead of Lightning zaps.
+  flexNetwork: "signet",
+  flexAddress: "tb1qh0wfj00cysg9qencrq7g27w2ams89qazlw9uzt",
+
   // Lightning address with NIP-57 zaps, for flex payments. Its zap key must be yours alone:
   // a shared custodial one signs receipts for all its users.
   featuredLightningAddress: "anshuman@cake.cash",
@@ -31,7 +36,9 @@ export const CONFIG = {
   },
 };
 
-// needs both, or we could take a payment we can't verify
+export const onchainFlex = () => CONFIG.flexAddress.trim() !== "";
+
+// lightning needs both, or we could take a payment we can't verify
 export const featuringEnabled = () =>
-  CONFIG.featuredLightningAddress.trim() !== "" &&
-  /^[0-9a-f]{64}$/.test(CONFIG.featuredRecipientPubkey.trim());
+  onchainFlex() || (CONFIG.featuredLightningAddress.trim() !== "" &&
+  /^[0-9a-f]{64}$/.test(CONFIG.featuredRecipientPubkey.trim()));

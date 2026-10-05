@@ -64,7 +64,7 @@ import {
   toast,
   wireInvoice
 } from "./ui.js";
-import { CONFIG, featuringEnabled } from "./config.js";
+import { CONFIG, featuringEnabled, onchainFlex } from "./config.js";
 const directory = new RelayDirectory(DISCOVERY_RELAYS);
 const state = {
   draft: null,
@@ -94,8 +94,10 @@ function rememberAuthors(authors) {
     localStorage.setItem(AUTHORS_KEY, JSON.stringify(authors.slice(0, MAX_REMEMBERED)));
   } catch {}
 }
+const settleFor = (relays) => ({ quorum: Math.max(1, relays.length - 1), graceMs: 400 });
 const deletionsBy = (relays, authors, onDone) => relays.length && authors.length ? queryRelays(relays, [deletionFilter([...authors])], {
   timeoutMs: 4000,
+  settle: settleFor(relays),
   onRelayDone: (relay, _count, _error, complete) => {
     if (complete)
       onDone?.(relay);
@@ -113,6 +115,7 @@ async function load() {
   const early = deletionsBy(DISCOVERY_RELAYS, remembered, (relay) => answeredEarly.add(relay));
   const events = await queryDiscovery(DISCOVERY_RELAYS, [listingFilter({ limit: 500 })], {
     timeoutMs: 6000,
+    settle: settleFor(DISCOVERY_RELAYS),
     onRelayDone: (_relay, _count, _error, complete) => {
       if (complete)
         answered++;
@@ -450,6 +453,10 @@ async function featureListing(eventId) {
           nowhere to send a payment the board could count.</p>
        <p>The listing stays on the market either way. Featuring only changes where
           it ranks on the flex board.</p>`);
+    return;
+  }
+  if (onchainFlex()) {
+    location.href = `/?flex=${encodeURIComponent(domain)}`;
     return;
   }
   if (!session.pubkey) {
