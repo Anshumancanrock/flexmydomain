@@ -3,6 +3,7 @@ import { LISTING_D_PREFIX, LISTING_KIND, LISTING_TOPIC, checkListing } from '../
 import { PORTFOLIO_D, parsePortfolio } from '../../core/nostr/portfolio.js'
 import { ESCROW_D_PREFIX, RULING_D_PREFIX, parseEscrowEvent, parseRuling } from '../../core/nostr/escrow.js'
 import { KEY_BACKUP_D_PREFIX, isKeyBackup } from '../../core/nostr/keybackup.js'
+import { FLEX_CLAIM_D_PREFIX, parseFlexClaim } from '../../core/nostr/flex.js'
 import { DELETION_KIND } from '../../core/nostr/deletion.js'
 import { RECEIPT_KIND, RECEIPT_NAMESPACE, parseReceipt } from '../../core/nostr/receipt.js'
 import {
@@ -115,6 +116,10 @@ function decideAppData(event: NostrEvent): Decision {
     // Encrypted to its author, so only the outside can be checked.
     return isKeyBackup(event) ? accept : reject('not a valid key backup')
   }
+  if (d.startsWith(FLEX_CLAIM_D_PREFIX)) {
+    const claim = parseFlexClaim(event)
+    return claim.ok ? accept : reject(`not a valid flex claim (${claim.reason})`)
+  }
 
   return reject(OFF_TOPIC)
 }
@@ -145,7 +150,7 @@ export function isOurAddress(coordinate: string): boolean {
       return d.startsWith(LISTING_D_PREFIX)
     case PROOF_KIND:
       return d.startsWith(PROOF_D_PREFIX) || d === PORTFOLIO_D || d.startsWith(ESCROW_D_PREFIX) || d.startsWith(RULING_D_PREFIX) ||
-        d.startsWith(KEY_BACKUP_D_PREFIX)
+        d.startsWith(KEY_BACKUP_D_PREFIX) || d.startsWith(FLEX_CLAIM_D_PREFIX)
     case FOLLOW_SET_KIND:
       return d === ARBITER_SET_D || d === WATCHLIST_D
     case BADGE_DEFINITION_KIND:

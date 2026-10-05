@@ -253,6 +253,18 @@ export {
 } from './portfolio.js'
 export type { EntryVerification, Portfolio, PortfolioEntry } from './portfolio.js'
 
+export {
+  FLEX_CLAIM_D_PREFIX,
+  FLEX_CLAIM_KIND,
+  FLEX_CLAIM_TOPIC,
+  buildFlexClaim,
+  flexAmountTopic,
+  flexClaimFilter,
+  matchFlexPayments,
+  parseFlexClaim,
+} from './flex.js'
+export type { FlexClaim, FlexPayment } from './flex.js'
+
 /** Fallback only, none run by us. A user's NIP-65 write relays win for their events (relays.ts). */
 export const DEFAULT_RELAYS = [
   'wss://relay.damus.io',

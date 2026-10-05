@@ -32,6 +32,8 @@ export interface Utxo {
   valueSats: bigint
   confirmed: boolean
   blockHeight?: number
+  /** Unix seconds of the block, when confirmed. */
+  blockTime?: number
 }
 
 export interface Spender {
@@ -81,11 +83,12 @@ function readOutput(txid: unknown, vout: unknown, value: unknown, status: unknow
   }
 }
 
-function readStatus(status: unknown): { confirmed: boolean; blockHeight?: number } {
-  const s = (typeof status === 'object' && status !== null ? status : {}) as { confirmed?: unknown; block_height?: unknown }
+function readStatus(status: unknown): { confirmed: boolean; blockHeight?: number; blockTime?: number } {
+  const s = (typeof status === 'object' && status !== null ? status : {}) as { confirmed?: unknown; block_height?: unknown; block_time?: unknown }
   return {
     confirmed: s.confirmed === true,
     blockHeight: Number.isSafeInteger(s.block_height) ? (s.block_height as number) : undefined,
+    blockTime: Number.isSafeInteger(s.block_time) ? (s.block_time as number) : undefined,
   }
 }
 
