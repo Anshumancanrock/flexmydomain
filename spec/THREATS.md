@@ -107,6 +107,13 @@ their own address, pay themselves, and get a receipt the board counts. A
 deployment that turns the board on must take payments through an LNURL server
 whose `nostrPubkey` is its own.
 
+On-chain flex payments (PROTOCOL §11) are weaker. A payment counts only for a
+signed claim of its exact amount, made in the day before it, and each payment
+counts once, so nobody can count coins that were never sent. But nothing ties a
+payment to the claim it was made for: someone watching the address can sign a
+backdated claim for the same amount and take the credit. The live site accepts
+that because it takes signet coins, which are worth nothing.
+
 A key can list badges it was never given, because a kind 30008 is
 self-published and says only "show these". Each claim is therefore checked
 against a real kind 8 award naming that key, issued by the author of the badge

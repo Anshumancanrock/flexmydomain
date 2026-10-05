@@ -57,9 +57,11 @@ reason.
 refund alone, even with this site offline, using the `recover.html` page and a
 saved recovery string.
 
-**Flex your domain.** The home page ranks domains by the Lightning sats people
-zap to them. Every payment leaves a public zap receipt, so anyone can recount the
-board and nobody, including us, can fake a rank.
+**Flex your domain.** The home page ranks domains by the sats people pay for
+them. On the live site that's signet coins sent to one public address, each
+payment matched to a claim its payer signed on Nostr, so anyone can recount the
+board from the chain and the relays. The board can take Lightning zaps instead,
+whose receipts the provider signs.
 
 ## What we can and can't do
 
@@ -109,7 +111,7 @@ There is no server. The pages are static files that talk directly to:
 - **DNS over HTTPS** (Cloudflare and Google) for ownership proofs
 - **RDAP**, the registry's own WHOIS service, for registrar, locks and dates
 - **An Esplora API** (mempool.space) for funding and settlement
-- **LNURL and NIP-57** for Lightning zaps on the flex board
+- **LNURL and NIP-57** if the flex board takes Lightning zaps instead of signet payments
 
 ```
 core/      protocol: escrow script tree, settlements, Nostr events, DNS proofs
@@ -191,6 +193,10 @@ buyer press **Ask the arbiter to decide**. Then:
 - To see the registry record change, tick "moved to another registrar" in the
   control page's Registry box, press **Apply**, then **Read it again** on the
   escrow page.
+
+**5. Flex a domain.** On the Rank page of either tab, type any domain and press
+**Flex it**. Pay the exact amount it shows, to the address it shows, from the
+control page's faucet, and the domain lands on the board.
 
 Ctrl-C stops the sandbox and deletes the chain.
 

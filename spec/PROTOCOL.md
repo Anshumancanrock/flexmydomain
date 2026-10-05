@@ -24,11 +24,12 @@ made by escrow keys over BIP-341 sighashes (§8).
 | 30078 | 78 | `fmd:escrow:<id>` | one party's view of an escrow |
 | 30078 | 78 | `fmd:ruling:<id>` | the arbiter's ruling on an escrow |
 | 30078 | 78 | `fmd:key:<slot>` | a party's escrow key, encrypted to their own Nostr key (§5) |
+| 30078 | 78 | `fmd:flex:<claim id>` | a claim on an on-chain flex payment (§11) |
 | 30402 | 99 | `fmd:listing:<domain>` | a listing, for sale |
 | 1985 | 32 | — | a trade receipt, written about the counterparty |
 | 6970 | 90 | — | a verifier's attestation |
 | 5970 | 90 | — | a request for one |
-| 9734 / 9735 | 57 | — | featured-spot zaps |
+| 9734 / 9735 | 57 | — | featured-spot zaps, when the board takes Lightning |
 | 10002 | 65 | — | where a key publishes |
 | 30000 | 51 | `fmd:arbiters` | the arbiters a key accepts (§5) |
 | 30000 | 51 | `fmd:watchlist` | domains a key is watching |
@@ -739,3 +740,42 @@ signed by the key whose messages it is reading, only for those queries, so
 the relay learns that key reads its messages and nothing more. A query the
 relay closed as `auth-required:` is sent once more after the relay accepts. The
 same holds for a publish refused as `auth-required:`.
+
+## 11. Flex payments on chain
+
+A site can take flex payments on chain instead of as Lightning zaps, by setting
+`flexAddress` (and `flexNetwork`) in its config. The live site does this on
+signet. A Bitcoin payment carries no domain, so the payer first signs a claim:
+
+```json
+{
+  "kind": 30078,
+  "pubkey": "<payer>",
+  "tags": [
+    ["d", "fmd:flex:<16 to 64 hex>"],
+    ["t", "flexmydomain"], ["t", "fmd-flex"], ["t", "fmd-flex-10123"],
+    ["fmd_domain", "lumenary.com"],
+    ["fmd_amount", "10123"],
+    ["fmd_address", "tb1q…"]
+  ],
+  "content": ""
+}
+```
+
+Then they pay exactly `fmd_amount` sats to `fmd_address`. The page adds 1 to 999
+random sats to the amount picked, skipping any amount claimed in the last day,
+so that two payers rarely share one.
+
+To count the board, a reader takes every output paid to the address, asks the
+relays for claims tagged `fmd-flex-<amount>` for each amount it saw paid, and
+pairs each payment, oldest first, with the earliest unused claim for the same
+address and the exact same amount that was made no more than a day before the
+payment and no more than 15 minutes after it. A payment still in the mempool
+counts at the time it is read. Each claim and each output is used once, and a
+payment nobody claimed counts for nothing.
+
+Nothing in the payment points back at its claim, so someone who sees a payment
+can sign a backdated claim for the same amount and take the credit. On test
+coins that costs nothing worth protecting. Real money needs an address per
+claim, or the Lightning zaps above, whose receipts the provider signs.
+
