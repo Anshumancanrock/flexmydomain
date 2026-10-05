@@ -225,6 +225,8 @@ header{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--bg) 8
 .card-rank .bid{margin-top:7px;font-family:var(--mono);font-size:clamp(15px,1.5vw,19px);
   font-weight:700;letter-spacing:-.03em}
 .card-rank.r1 .bid{font-size:clamp(17px,1.85vw,24px)}
+.card-rank .bid small,.r-bid small,#s-total small{display:block;margin-top:1px;font-size:max(10px,.5em);
+  font-weight:500;letter-spacing:0;color:var(--faint)}
 .card-rank .clicks{font-family:var(--mono);font-size:10.5px;color:var(--faint);
   margin:2px 0 8px}
 .card-rank > :first-child{margin-top:auto}
@@ -296,7 +298,7 @@ select.sort:focus{border-color:var(--accent)}
 .r-meta a{color:var(--muted);transition:color .18s}
 .r-meta a:hover{color:var(--accent)}
 .r-bid{font-family:var(--mono);font-size:clamp(15px,1.5vw,19px);font-weight:700;
-  letter-spacing:-.03em;color:var(--accent);white-space:nowrap}
+  letter-spacing:-.03em;color:var(--accent);white-space:nowrap;text-align:right}
 .row-top{background:var(--win-bg);box-shadow:inset 3px 0 0 #f0bd45}
 .row-top:hover{background:var(--win-bg)}
 .row.fresh,.card-rank.fresh{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 55%,transparent),var(--shadow-sm)}

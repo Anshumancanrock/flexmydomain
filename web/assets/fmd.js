@@ -8675,6 +8675,15 @@ var FLEX_CLAIM_KIND = 30078;
 var FLEX_CLAIM_D_PREFIX = "fmd:flex:";
 var FLEX_CLAIM_TOPIC = "fmd-flex";
 var flexAmountTopic = (amountSats) => `${FLEX_CLAIM_TOPIC}-${amountSats}`;
+var FLEX_AMOUNT_SLACK_SATS = 10;
+function flexNearAmounts(amounts, slack = FLEX_AMOUNT_SLACK_SATS) {
+  const near = new Set;
+  for (const amount of amounts) {
+    for (let a = Math.max(1, amount - slack);a <= amount + slack; a++)
+      near.add(a);
+  }
+  return [...near].sort((a, b) => a - b);
+}
 var CLAIM_ID = /^[0-9a-f]{16,64}$/;
 var ADDRESS = /^(bc1|tb1|bcrt1)[02-9ac-hj-np-z]{8,87}$/;
 function buildFlexClaim(params) {
@@ -8736,25 +8745,60 @@ function flexClaimFilter(options = {}) {
 }
 function matchFlexPayments(claims, payments, options) {
   const slack = options.slackSeconds ?? 900;
+  const near = options.amountSlackSats ?? FLEX_AMOUNT_SLACK_SATS;
   const maxAge = options.maxAgeSeconds ?? 86400;
   const open = claims.filter((c) => c.address === options.address).sort((a, b) => a.at - b.at || (a.event.id < b.event.id ? -1 : 1));
-  const used = new Set;
   const seen = new Set;
-  const ordered = [...payments].sort((a, b) => (a.at ?? options.now) - (b.at ?? options.now));
-  const out = [];
-  for (const payment of ordered) {
-    const key = `${payment.txid}:${payment.vout}`;
+  const ordered = [...payments].sort((a, b) => (a.at ?? options.now) - (b.at ?? options.now)).filter((p) => {
+    const key = `${p.txid}:${p.vout}`;
     if (seen.has(key))
-      continue;
+      return false;
     seen.add(key);
+    return true;
+  });
+  const used = new Set;
+  const paired = new Map;
+  const pick = (payment, fits) => {
     const when = payment.at ?? options.now;
-    const claim = open.find((c) => !used.has(c.event.id) && c.amountSats === payment.valueSats && c.at <= when + slack && c.at >= when - maxAge);
-    if (!claim)
-      continue;
-    used.add(claim.event.id);
-    out.push({ claim, payment });
+    const over = (c) => payment.valueSats - c.amountSats;
+    const better = (c, than) => c.at > when !== than.at > when ? c.at <= when : over(c) < over(than);
+    let best;
+    for (const c of open) {
+      if (used.has(c.event.id) || over(c) < 0 || !fits(over(c)) || c.at > when + slack || c.at < when - maxAge)
+        continue;
+      if (!best || better(c, best))
+        best = c;
+    }
+    return best;
+  };
+  for (const fits of [(over) => over <= near, () => true]) {
+    for (const payment of ordered) {
+      if (paired.has(payment))
+        continue;
+      const claim = pick(payment, fits);
+      if (!claim)
+        continue;
+      used.add(claim.event.id);
+      paired.set(payment, claim);
+    }
   }
-  return out;
+  return ordered.flatMap((payment) => {
+    const claim = paired.get(payment);
+    return claim ? [{ claim, payment }] : [];
+  });
+}
+function flexPaymentZap(claim, payment, now) {
+  return {
+    receipt: claim.event,
+    request: claim.event,
+    sender: claim.author,
+    recipient: "",
+    amountSats: payment.valueSats,
+    amountMsats: payment.valueSats * MSATS_PER_SAT,
+    flexDomain: claim.domain,
+    comment: "",
+    at: payment.at ?? now
+  };
 }
 
 // core/nostr/index.ts
@@ -11027,6 +11071,8 @@ export {
   forgetStoredKey,
   foldStatus,
   flexZapFilter,
+  flexPaymentZap,
+  flexNearAmounts,
   flexClaimFilter,
   flexAmountTopic,
   findTag,
@@ -11203,6 +11249,7 @@ export {
   FLEX_CLAIM_TOPIC,
   FLEX_CLAIM_KIND,
   FLEX_CLAIM_D_PREFIX,
+  FLEX_AMOUNT_SLACK_SATS,
   EXPLORERS,
   ESCROW_VERSION,
   ESCROW_TOPIC,
