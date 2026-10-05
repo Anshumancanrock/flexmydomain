@@ -5,7 +5,7 @@
 Listings live on Nostr. Ownership is proved with a DNS record. Funds sit in a Bitcoin escrow that no single party can control—including us. No accounts. No commission. No backend.
 
 **Live:** [flexmydomain.com](https://flexmydomain-neon.vercel.app)
-(The escrow currently runs on Bitcoin signet.)
+(The escrow and the flex board currently run on Bitcoin signet.)
 
 ## The problem
 
@@ -39,7 +39,7 @@ If the parties disagree, the arbiter reviews the domain’s public WHOIS/RDAP re
 A timelock allows the buyer to reclaim the funds unilaterally—even if this site is offline—using the recovery page and a saved recovery string.
 
 **Flex your domain.**  
-The home page ranks domains by Lightning sats received. Every payment produces a public zap receipt, so anyone can independently recount the rankings. No one, including the site operators, can fabricate rank.
+The home page ranks domains by sats paid. On the live site, each payment is a signet transaction to one public address, matched to a claim the payer signed on Nostr, so anyone can independently recount the rankings from the chain and the relays. A site can take Lightning zaps instead, whose receipts the payment provider signs.
 
 ## What we can and cannot do
 
@@ -65,7 +65,7 @@ This is not a stage demo. The components that protect money are specified, teste
 
 There are approximately 770 tests. `bun run test` runs the protocol vectors; `bun run test:regtest` runs the escrow against a local Bitcoin node.
 
-> The escrow currently runs on **Bitcoin signet** (test coins) and will move to mainnet after an independent audit. The marketplace and flex board are live today.
+> The escrow and the flex board currently run on **Bitcoin signet** (test coins). The escrow will move to mainnet after an independent audit. The marketplace and flex board are live today.
 
 ## Architecture
 
@@ -74,5 +74,5 @@ There is no application server. The pages are static files that communicate dire
 - **Nostr relays** — listings, portfolios, escrow records, private messages
 - **DNS over HTTPS** (Cloudflare and Google) — ownership proofs
 - **RDAP** — registrar data, locks, and dates
-- **Esplora API** (mempool.space) — funding and settlement
-- **LNURL and NIP-57** — Lightning zaps on the flex board
+- **Esplora API** (mempool.space) — escrow funding and settlement, and flex payments
+- **LNURL and NIP-57** — Lightning zaps, for a site that runs the flex board on Lightning
