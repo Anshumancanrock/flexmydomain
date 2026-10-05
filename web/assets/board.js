@@ -257,7 +257,7 @@ function renderRows(rows) {
             <p class="r-meta">
               <span class="r-cat">${esc(t)}</span>
               <span>${agoText(row.last)}</span>
-              ${row.listing ? `<a href="market.html">for sale &middot; ${sats(row.listing.priceSats)} sats</a>` : ""}
+              ${row.listing ? `<a href="/market">for sale &middot; ${sats(row.listing.priceSats)} sats</a>` : ""}
               <a href="https://${esc(row.domain)}" target="_blank" rel="noopener">visit</a>
             </p>
           </div>
@@ -459,7 +459,7 @@ function showInvoice(p) {
         Pay in any wallet. We never touch the payment.</p>` + (uncertain() ? `<p class="hint err" style="text-align:left"><strong>${state.loading ? "The board is still loading" : state.unknown ? "The board was read while payments couldn't be counted" : "Not every relay answered"}</strong>, so the board may be missing payments, and this may land lower
            than #${rankFor(amount)}. ${state.loading ? "Wait for it before paying." : "Reload the page before paying to be sure."}</p>` : "") + invoiceBlock(invoice, { endsAt: p.endsAt }) + `<p class="hint" style="text-align:left">The board updates when your provider publishes the
         receipt, usually within seconds. Being on this board says only that somebody paid; it is
-        not a claim of ownership. To say you own it, prove it on the <a href="market.html">market</a>.</p>`);
+        not a claim of ownership. To say you own it, prove it on the <a href="/market">market</a>.</p>`);
   shownInvoice = p.requestId;
   wireInvoice($("#key-body"), invoice, {
     endsAt: p.endsAt,

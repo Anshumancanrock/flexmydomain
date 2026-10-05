@@ -86,7 +86,7 @@ writeFileSync(join(site, 'sandbox-seed.html'), `<!doctype html>
     const secret = Uint8Array.from(who.secret.match(/../g).map((h) => parseInt(h, 16)));
     await storeKey(secret, "${PASSPHRASE}", { replace: true });
     out.innerHTML = "This origin now holds the sandbox <b>" + role + "</b> key, " + who.npub.slice(0, 16) + "…, "
-      + "under the passphrase <b>${PASSPHRASE}</b>. <a href=\\"escrow.html\\">Open the escrow page</a>, click "
+      + "under the passphrase <b>${PASSPHRASE}</b>. <a href=\\"/escrow\\">Open the escrow page</a>, click "
       + "Connect, and unlock the stored key.";
   } catch (err) {
     out.textContent = "Could not store the key: " + err.message;
@@ -503,7 +503,7 @@ for (const hostname of ['127.0.0.1', '::1']) {
         let path: string
         try { path = normalize(decodeURIComponent(new URL(request.url).pathname)) }
         catch { return new Response('bad request', { status: 400 }) }
-        for (const candidate of [join(site, path), join(site, path, 'index.html')]) {
+        for (const candidate of [join(site, path), join(site, path, 'index.html'), join(site, `${path}.html`)]) {
           if (!candidate.startsWith(site)) break
           const file = Bun.file(candidate)
           if (await file.exists()) return new Response(file, { headers: pageHeaders })
@@ -523,7 +523,7 @@ flexmydomain sandbox: regtest, a local relay, a stand-in registry and DNS.
   Control page   http://127.0.0.1:${API_PORT}/     fund, mine, DNS records, keys
   Buyer          http://127.0.0.1:${WEB_PORT}/sandbox-seed.html?role=buyer
   Seller         http://localhost:${WEB_PORT}/sandbox-seed.html?role=seller
-  Arbiter        http://[::1]:${WEB_PORT}/escrow.html?arbiter   (paste the arbiter key on an escrow's page)
+  Arbiter        http://[::1]:${WEB_PORT}/escrow?arbiter   (paste the arbiter key on an escrow's page)
 
   Passphrase for the stored keys: ${PASSPHRASE}
   Test keys only, fresh every start. Ctrl-C stops everything.

@@ -17,7 +17,7 @@ Bun.serve({
     } catch {
       return new Response('bad request', { status: 400, headers })
     }
-    for (const candidate of [join(root, path), join(root, path, 'index.html')]) {
+    for (const candidate of [join(root, path), join(root, path, 'index.html'), join(root, `${path}.html`)]) {
       const file = Bun.file(candidate)
       if (await file.exists()) return new Response(file, { headers })
     }

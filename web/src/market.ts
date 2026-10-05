@@ -306,7 +306,7 @@ function render(): void {
       ${!ok && entry.check ? `<p class="listing-why">${esc(entry.check.reason ?? "did not verify")}</p>` : ""}
       <div class="listing-meta">${tags.join("")}</div>
       <div class="listing-actions">
-        ${!mine && ok && l.status !== "sold" ? `<a class="btn btn-accent" href="escrow.html?${new URLSearchParams({
+        ${!mine && ok && l.status !== "sold" ? `<a class="btn btn-accent" href="/escrow?${new URLSearchParams({
             domain: l.domain,
             amount: String(l.priceSats),
             seller: npubEncode(entry.event.pubkey),
@@ -998,7 +998,7 @@ $("#grid").addEventListener("click", (e) => {
   const shareBtn = (e.target as Element).closest<HTMLElement>("[data-share]");
   if (shareBtn) return share(shareBtn.dataset.share!);
   const seller = (e.target as Element).closest<HTMLElement>("[data-seller]");
-  if (seller) { location.href = `flex.html?p=${npubEncode(seller.dataset.seller!)}`; return; }
+  if (seller) { location.href = `/flex?p=${npubEncode(seller.dataset.seller!)}`; return; }
   const delistBtn = (e.target as Element).closest<HTMLElement>("[data-delist]");
   if (delistBtn) delist(delistBtn.dataset.delist!);
 });

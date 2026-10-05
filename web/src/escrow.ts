@@ -1623,7 +1623,7 @@ async function watchOnce(id: string): Promise<void> {
     $("#state-line").innerHTML = row("bad", earlier
       ? `<b>This escrow was opened with the earlier flow</b>, where the arbiter held the domain, and this page no longer
          runs it. Its money is safe on chain. If it was funded and never paid out, the buyer takes the timeout refund
-         with <a href="recover.html">recover.html</a> and their recovery string. If the seller sent the domain to the
+         with <a href="/recover">recover.html</a> and their recovery string. If the seller sent the domain to the
          arbiter under that flow, ask the arbiter for it directly.`
       : rejected.length
       ? `Found ${rejected.length} event(s) at this coordinate and <b>none of them verified</b>:

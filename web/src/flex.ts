@@ -313,12 +313,12 @@ function render(): void {
         : !state.viewing
           ? badLink
             ? `That link's key isn't a valid npub, so there is no portfolio to show. Check the link, or ${
-                session.pubkey ? `<a href="flex.html" id="see-own">see your own</a>` : "connect to see yours"}.`
-            : "No portfolio open. Connect to see yours, or <a href=\"market.html\">prove a domain on the market</a>."
+                session.pubkey ? `<a href="/flex" id="see-own">see your own</a>` : "connect to see yours"}.`
+            : "No portfolio open. Connect to see yours, or <a href=\"/market\">prove a domain on the market</a>."
           : state.portfolioAnswered === 0
             ? "The relays didn't answer, so this portfolio couldn't be read. Reload in a minute."
           : state.viewing === session.pubkey
-            ? "No domains yet. Prove one on the <a href=\"market.html\">market</a>; it takes one DNS record."
+            ? "No domains yet. Prove one on the <a href=\"/market\">market</a>; it takes one DNS record."
             : "This key has not published a portfolio."
     }</p>`;
     return;
