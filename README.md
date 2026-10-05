@@ -1,11 +1,34 @@
-# FlexMyDomain
+<p align="center">
+  <a href="https://flexmydomain.com">
+    <img src=".github/banner.png" alt="flexmydomain" width="720">
+  </a>
+</p>
 
-**Buy and sell domains with no middleman.**
+<h3 align="center">Buy and sell domains with no middleman</h3>
 
-Listings live on Nostr. Ownership is proved with a DNS record. Funds sit in a Bitcoin escrow that no single party can control—including us. No accounts. No commission. No backend.
+<p align="center">
+  Listings live on Nostr. Ownership is proved with a DNS record. Funds sit in a Bitcoin escrow<br>
+  that no single party can control—including us. No accounts. No commission. No backend.
+</p>
 
-**Live:** [flexmydomain.com](https://flexmydomain-neon.vercel.app)
-(The escrow and the flex board currently run on Bitcoin signet.)
+<p align="center">
+  <a href="https://flexmydomain.com"><img alt="Live demo on Bitcoin signet" src="https://img.shields.io/badge/LIVE%20DEMO-SIGNET-38b6ef?style=for-the-badge&labelColor=0f1e2b&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzNiAyOCI+PHBhdGggZD0iTTAgMjhWMTNhMyAzIDAgMCAxIDMtM2g0YTMgMyAwIDAgMSAzIDN2MTVaIiBmaWxsPSIjZmZmIi8+PHBhdGggZD0iTTEzIDI4VjNhMyAzIDAgMCAxIDMtM2g0YTMgMyAwIDAgMSAzIDN2MjVaIiBmaWxsPSIjMzhiNmVmIi8+PHBhdGggZD0iTTI2IDI4VjE4YTMgMyAwIDAgMSAzLTNoNGEzIDMgMCAwIDEgMyAzdjEwWiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPgo="></a>
+  <a href="spec/PROTOCOL.md"><img alt="Protocol spec" src="https://img.shields.io/badge/PROTOCOL-SPEC-8e44ad?style=for-the-badge&labelColor=0f1e2b"></a>
+  <a href="spec/ARBITER.md"><img alt="Arbiter policy" src="https://img.shields.io/badge/ARBITER-POLICY-f7931a?style=for-the-badge&labelColor=0f1e2b&logo=bitcoin&logoColor=white"></a>
+  <a href="spec/THREATS.md"><img alt="Threat model" src="https://img.shields.io/badge/THREAT%20MODEL-READ-e5534b?style=for-the-badge&labelColor=0f1e2b"></a>
+  <a href="spec/VERIFY.md"><img alt="Verify it yourself" src="https://img.shields.io/badge/VERIFY-GUIDE-2ea043?style=for-the-badge&labelColor=0f1e2b"></a>
+</p>
+
+<p align="center">
+  <img alt="Nostr" src="https://img.shields.io/badge/Nostr-8e44ad">
+  <img alt="Bitcoin: Taproot 2-of-3" src="https://img.shields.io/badge/Bitcoin-Taproot%202--of--3-f7931a?logo=bitcoin&logoColor=white">
+  <img alt="DNS: TXT proofs" src="https://img.shields.io/badge/DNS-TXT%20proofs-0b7cba">
+  <img alt="Registry: RDAP" src="https://img.shields.io/badge/Registry-RDAP-0b7cba">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178c6?logo=typescript&logoColor=white">
+  <img alt="Bun" src="https://img.shields.io/badge/Bun-14151a?logo=bun&logoColor=white">
+  <img alt="Backend: none" src="https://img.shields.io/badge/backend-none-2ea043">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-555555"></a>
+</p>
 
 ## The problem
 

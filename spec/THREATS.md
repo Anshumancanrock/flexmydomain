@@ -108,8 +108,8 @@ deployment that turns the board on must take payments through an LNURL server
 whose `nostrPubkey` is its own.
 
 On-chain flex payments (PROTOCOL §11) are weaker. A payment counts only for a
-signed claim of its exact amount, made in the day before it, and each payment
-counts once, so nobody can count coins that were never sent. But nothing ties a
+signed claim made in the day before it, for no more than it paid, and each
+payment counts once, so nobody can count coins that were never sent. But nothing ties a
 payment to the claim it was made for: someone watching the address can sign a
 backdated claim for the same amount and take the credit. The live site accepts
 that because it takes signet coins, which are worth nothing.

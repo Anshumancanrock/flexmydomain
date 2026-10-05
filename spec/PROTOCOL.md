@@ -762,20 +762,27 @@ signet. A Bitcoin payment carries no domain, so the payer first signs a claim:
 }
 ```
 
-Then they pay exactly `fmd_amount` sats to `fmd_address`. The page adds 1 to 999
-random sats to the amount picked, skipping any amount claimed in the last day,
-so that two payers rarely share one.
+Then they pay at least `fmd_amount` sats to `fmd_address`: the amount is a
+minimum, and a bigger payment counts in full. The page asks for the price it
+shows, unless an open claim from the last day is within 10 sats of it, or a
+payment from the last day is at most 10 sats above it; then it adds a few odd
+sats so the payments stay apart.
 
-To count the board, a reader takes every output paid to the address, asks the
-relays for claims tagged `fmd-flex-<amount>` for each amount it saw paid, and
-pairs each payment, oldest first, with the earliest unused claim for the same
-address and the exact same amount that was made no more than a day before the
-payment and no more than 15 minutes after it. A payment still in the mempool
-counts at the time it is read. Each claim and each output is used once, and a
-payment nobody claimed counts for nothing.
+To count the board, a reader takes every output paid to the address and every
+claim for it from the relays, and keeps claims made no more than a day before a
+payment and no more than 15 minutes after it. A payment never counts for a claim
+above it. Payments at most 10 sats above a claim are paired first, each with the
+closest such claim, because those odd sats name it; some wallets also add a sat
+or two. Then each larger payment, oldest first, takes the closest open claim
+below it. A claim made before the payment beats one made after it, then the
+closer amount wins, then the earlier claim. The domain is credited with what was
+actually paid. A payment still in the mempool counts at the time it is read.
+Each claim and each output is used once, and a payment nobody claimed counts for
+nothing.
 
 Nothing in the payment points back at its claim, so someone who sees a payment
-can sign a backdated claim for the same amount and take the credit. On test
+can sign a backdated claim for the same amount and take the credit, and a payment
+bigger than its claim can land on another open claim closer below it. On test
 coins that costs nothing worth protecting. Real money needs an address per
 claim, or the Lightning zaps above, whose receipts the provider signs.
 
